@@ -164,6 +164,35 @@ ACE5_CPUS=8 python3 tools/ace5/phone.py --serial "$ACE5_SERIAL" run \
 
 Measured 2026-10-25 with the CI kernel (`ea64dbc`): 7 cores online, SpringBoard home screen, no panic, framebuffer 10 fps (51 frames per 5 s, ~2.5 ms in the driver per frame). Screenshot: `logs/giulia/20261025-164108-screen.png`. Touch is off unless the run also passes `--touch`; Wi-Fi, audio and camera are not ported.
 
+### Touch (S3910)
+
+`--touch` adds `ace5_touch=1` and starts the S3910 driver in the kernel. Measured 2026-10-25: `s3910: ready; max=12639,27799, 10 contacts, polled SPI`, then 849 reports with 0 errors after a finger slide. Log: `logs/giulia/20261025-165751-run.log`.
+
+### GPU (Adreno 750v2)
+
+The kernel reads the GPU firmware from `fw/` in the small root image, so a firmware-bearing root is required:
+
+```bash
+# root is needed; /vendor/firmware is not readable by the adb shell user.
+MSYS_NO_PATHCONV=1 adb -s "$ACE5_SERIAL" exec-out su -c 'cat /vendor/firmware/gmu_gen70900.bin' > local/firmware/gmu_gen70900.bin
+# repeat for gen70900_sqe.fw, gen70900_aqe.fw, gen70900_zap.mbn
+mkdir -p local/root-gmu/fw
+cp local/firmware/gmu_gen70900.bin local/firmware/gen70900_sqe.fw \
+   local/firmware/gen70900_aqe.fw local/firmware/gen70900_zap.mbn local/root-gmu/fw/
+python3 tools/apfs/mkapfs.py -z --plain fw -o local/root-gmu.apfs redwood=local/root-gmu
+```
+
+```bash
+python3 tools/ace5/phone.py --serial "$ACE5_SERIAL" ramdisk --image local/system-metal.apfs
+ACE5_CPUS=8 python3 tools/ace5/phone.py --serial "$ACE5_SERIAL" run --seconds 300 \
+  --bootcpu 1 --gpu-probe 20 --gpu-direct --live-log --live-interval 10 \
+  --kernel out/giulia-kernel/mach.ace5-public --root-image local/root-gmu.apfs
+```
+
+Measured 2026-10-25: stages 1–20 pass with the rebuilt kernel (`ae42f3e3…`). Stage 17 writes the direct-ring fences and `scratch=0xa7500001`; stage 18 completes PAS13 ZAP authentication; stage 19 does nonsecure-mode GPU DMA; stage 20 writes `BR=0xa75000b1`, `BV=0xa75000b2`, fence 5 at RPTR 112. Log: `logs/giulia/20261025-171542-run.log`.
+
+The probe tears the GPU down at the end (`probe ended; CX off=1; software rendering continues`). For persistent GPU/Metal rendering, rerun with `--gpu-keep --metal` and the **full** `root-daily` plus its `fw/` directory; the minimal `root-gmu.apfs` has no `metal_props` or `display_test`. The desktop window server still uses OpenGL ES, and there is no A750 reset/recovery.
+
 If lock timeouts or watchdog messages appear at 4/8 cores, add `timeout_scale = 2` to `platform_giulia` in `xnuloader/loader.c` and rebuild the loader.
 
 ### Rollback
