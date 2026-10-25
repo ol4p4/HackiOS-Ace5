@@ -32,11 +32,19 @@ static bool a750_gx_import(struct a750_gx *g, uint32_t va, vm_offset_t backing,
     a750_log("ace5-gpu: GPU imported VA=%#x bytes=%#x flags=%#x\n",va,size,flags);
     return true;
 }
-static bool a750_gx_firmware(struct a750_gx *g, const char *name, uint32_t va, uint32_t expected, bool direct)
+/* Firmware size is a build artifact, not ABI: upstream gen70900_sqe.fw is 85364
+ * bytes while this device ships 85300, and no driver programs a length register.
+ * Validate the structure, then log both version words and a fingerprint. */
+static bool a750_gx_firmware(struct a750_gx *g, const char *name, uint32_t va,
+    uint32_t min_bytes, uint32_t max_bytes, bool direct)
 {
     uint64_t bytes=0; int disk=-1;
     const uint8_t *fw=redwood_image_file("fw",name,&bytes,&disk);
-    if (!fw || bytes!=expected || bytes<8 || (bytes&3)) return false;
+    if (!fw || bytes<min_bytes || bytes>max_bytes || (bytes&3)) {
+        a750_log("ace5-gpu: GPU firmware %s unusable: bytes=%llu range=[%u,%u]\n",
+            name,bytes,min_bytes,max_bytes);
+        return false;
+    }
     /* Qualcomm adreno_get_firmware excludes the first version DWORD. */
     if (!a750_block(&g->memory,va,(uint32_t)bytes-4,!direct)) return false;
     vm_offset_t memory=a750_find_memory(&g->memory,va,(uint32_t)bytes-4);
@@ -45,7 +53,8 @@ static bool a750_gx_firmware(struct a750_gx *g, const char *name, uint32_t va, u
     a750_flush(memory,(vm_size_t)bytes-4);
     for (uint32_t off=0;off<bytes-4;off+=4096)
         *a750_leaf(&g->memory,va+off,false)|=(1<<7)|(direct?1<<6:0);
-    a750_log("ace5-gpu: GPU firmware %s VA=%#x bytes=%llu version=%#x\n",name,va,bytes-4,a750_le32(fw));
+    a750_log("ace5-gpu: GPU firmware %s VA=%#x bytes=%llu version=%#x ucode=%#x fnv=%#llx\n",
+        name,va,bytes-4,a750_le32(fw),a750_le32(fw+4),a750_fnv1a(fw+4,(size_t)bytes-4));
     return true;
 }
 static bool a750_gx_prepare(struct a750_hfi *s)
@@ -58,8 +67,8 @@ static bool a750_gx_prepare(struct a750_hfi *s)
         if (!(d[2]&1)) continue;
         if (d[1] || !a750_gx_import(g,d[0],a750_find_memory(s->memory,d[0],d[7]),d[7],d[2])) return false;
     }
-    if (!a750_gx_firmware(g,"gen70900_sqe.fw",0x61000000,85300,s->direct) ||
-        (!s->direct && !a750_gx_firmware(g,"gen70900_aqe.fw",0x61020000,33176,false))) return false;
+    if (!a750_gx_firmware(g,"gen70900_sqe.fw",0x61000000,65536,98304,s->direct) ||
+        (!s->direct && !a750_gx_firmware(g,"gen70900_aqe.fw",0x61020000,16384,49152,false))) return false;
     if (!a750_block(&g->memory,0x61030000,4096,false)) return false;
     if (s->direct) {
         /* Mainline SM8650: host ring, RPTR/fence page and a DMA test page.

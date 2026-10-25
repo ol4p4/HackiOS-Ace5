@@ -8,6 +8,14 @@ extern const uint8_t *redwood_image_file(const char *, const char *, uint64_t *,
 #define A750_BLOCKS 64
 #define A750_TABLES 2048
 #define A750_PTE_ADDR 0x0000fffffffff000ull
+/* FNV-1a fingerprint of firmware images: cheap, order-stable, enough to
+ * correlate a device log with a specific firmware build without SHA-256. */
+static uint64_t a750_fnv1a(const uint8_t *p, size_t n)
+{
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 0x100000001b3ULL; }
+    return h;
+}
 struct a750_memblock { uint32_t va, size; vm_offset_t memory; bool cached; };
 struct a750_memory {
     struct a750_fw fw;
@@ -113,7 +121,8 @@ static bool a750_memory_prepare(struct a750_memory *m)
     if (!a750_fw_parse(&m->fw,fw,size)) {
         a750_log("ace5-gpu: missing or invalid local GMU firmware\n"); return false;
     }
-    a750_log("ace5-gpu: GMU firmware md%d bytes=%llu blocks=%u\n",disk,size,m->fw.count);
+    a750_log("ace5-gpu: GMU firmware md%d bytes=%llu blocks=%u fnv=%#llx\n",
+        disk,size,m->fw.count,a750_fnv1a(fw,(size_t)size));
     for (unsigned i=0;i<m->fw.count;i++) {
         const struct a750_fw_block *b=&m->fw.blocks[i];
         if (b->size || (b->type!=1 && b->type!=7)) continue;
