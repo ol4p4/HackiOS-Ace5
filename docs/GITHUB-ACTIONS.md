@@ -1,6 +1,6 @@
 # 用 GitHub Actions 构建 Ace 5（无 Linux ARM64 主机）
 
-`ubuntu-24.04-arm` 对公开仓库免费，4 核 / 16 GB / 约 120 GB 可用空间，足够跑完 UEFI、XNU、Mesa/userland 和两个 APFS 镜像。构建产物是 `ace5-build` artifact（约 2.4 GB，保留 7 天）。
+`ubuntu-24.04-arm` 对公开仓库免费，4 核 / 16 GB / 约 120 GB 可用空间，足够跑完 UEFI、XNU、Mesa/userland 和两个 APFS 镜像。构建产物分成两个 artifact：`ace5-kernel`（约 30 MB，Phase 1 只需要它）和 `ace5-system`（约 2.4 GB，带 iOS 系统盘），保留 7 天。
 
 ## 1. 公开 fork
 
@@ -37,10 +37,21 @@ gh run watch --repo <you>/HackiOS-Ace5
 
 ## 3. 下载并安装
 
+Phase 1（SMP）只需要内核和 boot image，先下小的：
+
 ```bash
-gh run download <run-id> --repo <you>/HackiOS-Ace5 -n ace5-build -D local/ci-artifact
+gh run download <run-id> --repo <you>/HackiOS-Ace5 -n ace5-kernel -D local/ci-artifact
 python3 tools/ace5/install-artifact.py local/ci-artifact
 ```
+
+要看 iOS 界面时再下系统盘（2.4 GB，可以晚点下）：
+
+```bash
+gh run download <run-id> --repo <you>/HackiOS-Ace5 -n ace5-system -D local/ci-artifact
+python3 tools/ace5/install-artifact.py local/ci-artifact
+```
+
+旧运行可能只有一个 `ace5-build`；先看实际名字：`gh run view <run-id> --json artifacts --jq '.artifacts[].name'`。
 
 脚本会：
 

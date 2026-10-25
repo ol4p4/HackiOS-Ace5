@@ -177,10 +177,10 @@ jobs:
             out/giulia-kernel/hackios-giulia-kernel.img \
             local/root-daily.apfs local/system-metal.apfs.part-*
 
-      - name: Upload artifacts
+      - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ace5-build
+          name: ace5-kernel
           if-no-files-found: error
           retention-days: 7
           path: |
@@ -190,4 +190,11 @@ jobs:
             ${{ env.ACE5_ROOT }}/out/giulia/hackios-giulia-diagnostic.img
             ${{ env.ACE5_ROOT }}/out/giulia/hackios-giulia-diagnostic.json
             ${{ env.ACE5_ROOT }}/local/root-daily.apfs
-            ${{ env.ACE5_ROOT }}/local/system-metal.apfs.part-*
+
+      - name: Upload system image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ace5-system
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ env.ACE5_ROOT }}/local/system-metal.apfs.part-*
