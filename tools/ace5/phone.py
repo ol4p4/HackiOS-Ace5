@@ -7,6 +7,7 @@ All iOS images are sent to RAM. Other storage and unported drivers stay disabled
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import struct
@@ -20,10 +21,14 @@ ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--serial', required=True, help='Original ADB/bootloader serial')
 sub = ap.add_subparsers(dest='command', required=True)
 enter = sub.add_parser('enter', help='Temporary boot into the giulia loader')
-enter.add_argument('--stage', choices=['diagnostic', 'kernel'], default='diagnostic')
+enter.add_argument('--stage', choices=['diagnostic', 'kernel', 'persist'], default='diagnostic')
 ramdisk = sub.add_parser('ramdisk', help='Upload a system image to RAM')
 ramdisk.add_argument('--image', type=Path, help='Explicit local system APFS image; defaults to userland/system.apfs')
+ramdisk.add_argument('--persist', action='store_true', help='Require the persistence loader (storage writes enabled)')
 run = sub.add_parser('run', help='Run single-core iOS, then save logs and framebuffer')
+run.add_argument('--persist', action='store_true', help='Enable UFS read/write and var_store persistence')
+run.add_argument('--dry-run', action='store_true',
+                 help='Print the payload command and command line without touching the phone')
 run.add_argument('--seconds', type=int, default=120,
                  help='Return after this many seconds; 0 keeps iOS running until a physical restart')
 run.add_argument('--verbose', action='store_true')
@@ -61,11 +66,29 @@ run.add_argument('--gpu-display', action='store_true',
                  help='Experimental A750 hardware scaling directly into the panel; requires --gpu-keep')
 selftest = sub.add_parser('selftest')
 selftest.add_argument('--kernel', type=Path, help='Explicit locally built Mach-O kernel')
+selftest.add_argument('--dry-run', action='store_true',
+                      help='Print the payload command without touching the phone')
 sub.add_parser('screenshot')
 sub.add_parser('reboot', help='Return to the unchanged Android boot chain')
 args = ap.parse_args()
 logs = ROOT / 'logs/giulia'
 logs.mkdir(parents=True, exist_ok=True)
+
+def cpu_boot_arg():
+    """One CPU selector: XNU panics if both cpus= and cpumask= are present.
+
+    cpumask bits are positions in the loader's CPU list, not physical core
+    numbers; the loader omits its own core (CPU0, which serves USB).
+    """
+    cpumask = os.environ.get('ACE5_CPUMASK', '')
+    if cpumask:
+        if not re.fullmatch(r'(0x[0-9a-fA-F]+|[0-9]+)', cpumask):
+            raise RuntimeError('ACE5_CPUMASK must be a number such as 0x7F (positional)')
+        return f'cpumask={cpumask}'
+    cpus = os.environ.get('ACE5_CPUS', '1')
+    if not cpus.isdigit() or not 1 <= int(cpus) <= 8:
+        raise RuntimeError('ACE5_CPUS must be an integer 1..8')
+    return f'cpus={cpus}'
 
 def call(command, timeout=20, check=True):
     p = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
@@ -82,11 +105,12 @@ def getvar(key):
     m = re.search(r'^' + re.escape(key) + r': (.*)$', answer, re.M)
     return m.group(1).strip() if m else ''
 
-def ensure_loader(kernel=False):
+def ensure_loader(kernel=False, persist=None):
+    writes = getvar('storage-writes')
     if (getvar('product') != 'xnuloader' or getvar('platform') != 'giulia' or
-            getvar('storage-writes') != 'disabled'):
+            (persist is not None and writes != ('enabled' if persist else 'disabled'))):
         raise RuntimeError('Requires the guarded giulia loader built by these tools')
-    if kernel and getvar('build-stage') != 'kernel':
+    if kernel and getvar('build-stage') not in ('kernel', 'persist'):
         raise RuntimeError('Diagnostic loader cannot execute XNU; enter --stage kernel first')
 
 def wait_device(serial):
@@ -122,10 +146,12 @@ def screenshot():
 
 try:
     if args.command == 'enter':
-        directory = ROOT / ('out/giulia' if args.stage == 'diagnostic' else 'out/giulia-kernel')
+        directory = ROOT / {'diagnostic': 'out/giulia', 'kernel': 'out/giulia-kernel',
+                            'persist': 'out/giulia-persist'}[args.stage]
         image = directory / f'hackios-giulia-{args.stage}.img'
         manifest = json.loads(image.with_suffix('.json').read_text())
-        if (manifest['stage'] != args.stage or manifest['allowed_partition_write'] != ['logdump'] or
+        allowed = ['logdump', 'darwin'] if args.stage == 'persist' else ['logdump']
+        if (manifest['stage'] != args.stage or manifest['allowed_partition_write'] != allowed or
                 hashlib.sha256(image.read_bytes()).hexdigest() != manifest['sha256']):
             raise RuntimeError('Image manifest or SHA-256 mismatch')
         adb = ['adb', '-s', args.serial]
@@ -140,25 +166,31 @@ try:
                 raise RuntimeError('Unexpected or locked bootloader')
         print(call(stock + ['boot', str(image)], timeout=60), flush=True)
         wait_device('xnuloader')
-        ensure_loader(kernel=args.stage == 'kernel')
+        ensure_loader(kernel=args.stage in ('kernel', 'persist'), persist=args.stage == 'persist')
         print('Giulia loader ready; Android partitions were not flashed.')
     elif args.command == 'ramdisk':
-        ensure_loader(kernel=True)
+        ensure_loader(kernel=True, persist=args.persist)
         image = args.image.resolve() if args.image else ROOT / 'userland/system.apfs'
         if not image.is_file() or not 0 < image.stat().st_size < 0xffffffff:
             raise RuntimeError('Missing or oversized system image')
         fb('oem', 'ramdisk')
         print(fb('stage', image, timeout=600))
     elif args.command in ('run', 'selftest'):
-        ensure_loader(kernel=True)
+        persist = args.persist if args.command == 'run' else None
+        if not args.dry_run:
+            ensure_loader(kernel=True, persist=persist)
         payload = ROOT / 'out/giulia-kernel/run-payload.bin'
         seconds = args.seconds if args.command == 'run' else 15
         if not 0 <= seconds <= 3600:
             raise RuntimeError('seconds must be 0..3600')
         if args.command == 'run' and args.live_log and (args.bootcpu!=1 or seconds==0):
             raise RuntimeError('--live-log requires --bootcpu 1 and a finite return timer')
-        commandline = (f'cpus=1 loader_return_after={seconds} epoch={int(time.time())} sb_delay=8 '
+        cpu_arg = cpu_boot_arg()
+        commandline = (f'{cpu_arg} loader_return_after={seconds} epoch={int(time.time())} sb_delay=8 '
                        'touchscreen=0 buttons=0 cpufreq=0 gpu=0 wifi=0 adsp=0')
+        print(f'CPU boot arg: {cpu_arg}', flush=True)
+        if args.command == 'run' and args.persist:
+            commandline += ' ufs=2 ufs_write=1 var_store=1'
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
@@ -215,18 +247,24 @@ try:
         if args.command == 'run' and args.bootcpu:
             commandline += f' bootcpu={args.bootcpu}'
         kernel = args.kernel if args.kernel else ROOT / 'prebuilt/mach.development.bcm2837'
-        if not kernel.is_file():
-            raise RuntimeError(f'Missing kernel: {kernel}')
-        print('Kernel SHA-256:', hashlib.sha256(kernel.read_bytes()).hexdigest(), flush=True)
+        if not args.dry_run:
+            if not kernel.is_file():
+                raise RuntimeError(f'Missing kernel: {kernel}')
+            print('Kernel SHA-256:', hashlib.sha256(kernel.read_bytes()).hexdigest(), flush=True)
         command = [sys.executable, str(ROOT / 'xnuloader/mkpayload.py'), '-o', str(payload),
                    f'kernel={kernel.resolve()}']
         if args.command == 'run':
             root_image = args.root_image or ROOT / 'userland/root.apfs'
-            if not root_image.is_file() or not 0 < root_image.stat().st_size <= 32 * 1024 * 1024:
-                raise RuntimeError('Missing or oversized small root image (limit 32 MiB)')
-            print('Root image SHA-256:', hashlib.sha256(root_image.read_bytes()).hexdigest(), flush=True)
+            if not args.dry_run:
+                if not root_image.is_file() or not 0 < root_image.stat().st_size <= 32 * 1024 * 1024:
+                    raise RuntimeError('Missing or oversized small root image (limit 32 MiB)')
+                print('Root image SHA-256:', hashlib.sha256(root_image.read_bytes()).hexdigest(), flush=True)
             command.append(f'ramdisk={root_image.resolve()}')
         command += ['--cmdline', commandline]
+        if args.dry_run:
+            print('Command line:', commandline, flush=True)
+            print('Payload command:', ' '.join(map(str, command)), flush=True)
+            sys.exit(0)
         print(call(command))
         fb('stage', payload, timeout=60)
         print(fb('oem', 'run' if args.command == 'run' else 'selftest'), flush=True)

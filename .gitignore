@@ -4,6 +4,10 @@
 !/.gitignore
 !/README.md
 !/LICENSE
+!/RUNBOOK.md
+!/patches/
+!/.github/
+!/dtb/
 !/common/
 !/docs/
 !/xl
@@ -100,6 +104,7 @@ __pycache__/
 *.dmg
 *.img
 *.dtb
+!/dtb/giulia.dtb
 *.efi
 *.te
 *.mbn

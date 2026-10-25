@@ -13,7 +13,7 @@ ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--mu', type=Path, required=True)
 ap.add_argument('--dtb', type=Path, required=True)
 ap.add_argument('--output', type=Path, required=True)
-ap.add_argument('--stage', choices=['diagnostic', 'kernel'], default='diagnostic')
+ap.add_argument('--stage', choices=['diagnostic', 'kernel', 'persist'], default='diagnostic')
 args = ap.parse_args()
 root = Path(__file__).resolve().parents[2]
 mu, output = args.mu.resolve(), args.output.resolve()
@@ -29,10 +29,12 @@ if len(dtb) < 40 or struct.unpack('>I', dtb[:4])[0] != 0xd00dfeed:
     raise SystemExit('Invalid DTB magic')
 if struct.unpack('>I', dtb[4:8])[0] != len(dtb) or b'qcom,pineapple\0' not in dtb:
     raise SystemExit('Invalid DTB size or wrong SoC')
-build_dir = root / ('out/giulia' if args.stage == 'diagnostic' else 'out/giulia-kernel')
+build_dir = root / {'diagnostic': 'out/giulia', 'kernel': 'out/giulia-kernel',
+                    'persist': 'out/giulia-persist'}[args.stage]
 build = json.loads((build_dir / 'loader-build.json').read_text())
 payload = (build_dir / 'usb-payload.bin').read_bytes()
-if (build['stage'] != args.stage or build['storage_writes'] or
+expect_writes = args.stage == 'persist'
+if (build['stage'] != args.stage or build['storage_writes'] != expect_writes or
         build['payload_sha256'] != hashlib.sha256(payload).hexdigest()):
     raise SystemExit('Loader build metadata mismatch; rebuild the requested stage')
 if payload[:4] != b'XNUP' or len(payload) >= 0x03f00000:
@@ -57,7 +59,8 @@ if data[:8] != b'ANDROID!' or struct.unpack_from('<I', data, 40)[0] != 4:
     raise SystemExit('Invalid boot image header')
 manifest = {
     'device': 'OnePlus Ace 5 PKG110 / giulia', 'stage': args.stage,
-    'kernel_execution': build['kernel_execution'], 'allowed_partition_write': ['logdump'],
+    'kernel_execution': build['kernel_execution'],
+    'allowed_partition_write': ['logdump', 'darwin'] if expect_writes else ['logdump'],
     'loader_sha256': build['loader_sha256'], 'payload_sha256': build['payload_sha256'],
     'mu_commit': subprocess.check_output(['git','-C',str(mu),'rev-parse','HEAD'], text=True).strip(),
     'fd_base': hex(fd_base), 'fd_size': fd_size, 'payload_base': '0xa8000000',

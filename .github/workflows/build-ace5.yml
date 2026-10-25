@@ -1,0 +1,191 @@
+name: Build Ace 5 (Linux ARM64)
+
+# Public fork required: ubuntu-24.04-arm is a free GitHub-hosted ARM64 runner
+# for public repositories. The build lives on /mnt (the scratch disk); the
+# root filesystem only holds packages and the toolchain.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        continue-on-error: true
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Fallback cleanup and disk report
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache || true
+          sudo apt-get clean
+          echo '--- filesystems ---'
+          df -h / /mnt
+          echo '--- cpu / memory ---'
+          nproc
+          free -h
+          avail=$(df -BG --output=avail /mnt | tail -1 | tr -dc '0-9')
+          echo "Free on /mnt: ${avail}G"
+          if [ "${avail:-0}" -lt 25 ]; then
+            echo "::error::Only ${avail}G free on /mnt; this build needs roughly 30G. Use a larger runner or the cloud-host path in docs/BUILD-HOST.md."
+            exit 1
+          fi
+
+      - name: Move workspace to /mnt
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /mnt/ace5
+          sudo chown "$USER:$USER" /mnt/ace5
+          cp -a "$GITHUB_WORKSPACE/." /mnt/ace5/HackiOS-Ace5
+          echo "ACE5_ROOT=/mnt/ace5/HackiOS-Ace5" >> "$GITHUB_ENV"
+          echo "ACE5_MU=/mnt/Mu-Silicium" >> "$GITHUB_ENV"
+          df -h /mnt
+
+      - name: Install packages
+        run: |
+          set -euo pipefail
+          sudo add-apt-repository -y universe || true
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git curl xz-utils rsync tmux \
+            clang-18 lld-18 llvm-18 flex bison m4 perl autoconf automake libtool \
+            pkg-config libncurses-dev python3 python3-venv python3-pip \
+            meson ninja-build nasm uuid-dev gcc-aarch64-linux-gnu \
+            device-tree-compiler acpica-tools 7zip
+          command -v 7z >/dev/null || sudo ln -sf /usr/bin/7zz /usr/local/bin/7z
+          7z i | head -3 || true
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+          clang --version | head -1
+          python3 --version
+
+      - name: Python image venv
+        run: |
+          set -euo pipefail
+          cd "$ACE5_ROOT"
+          python3 -m venv local/image-venv
+          . local/image-venv/bin/activate
+          python3 -m pip install --upgrade pip
+          python3 -m pip install fonttools Pillow lzfse
+
+      - name: Theos
+        run: |
+          set -euo pipefail
+          cd "$ACE5_ROOT"
+          export THEOS="$PWD/local/theos"
+          mkdir -p "$THEOS/toolchain"
+          if [ ! -x "$THEOS/toolchain/linux/iphone/bin/ld" ]; then
+            curl -fL --retry 3 -o local/ios-toolchain-arm64.tar.xz \
+              https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/iOSToolchain-aarch64.tar.xz
+            tar -xJf local/ios-toolchain-arm64.tar.xz -C "$THEOS/toolchain"
+          fi
+          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include" ]; then
+            git clone --no-checkout https://github.com/theos/sdks.git "$THEOS/sdks"
+            git -C "$THEOS/sdks" checkout --detach 0222fd5413cf4b9af096f37b4621afa2688572f7
+          fi
+          test -x "$THEOS/toolchain/linux/iphone/bin/ld"
+          test -x "$THEOS/toolchain/linux/iphone/bin/ldid"
+          test -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          echo "$THEOS/toolchain/linux/iphone/bin" >> "$GITHUB_PATH"
+
+      - name: Mu-Silicium and BaseTools
+        run: |
+          set -euo pipefail
+          cd "$ACE5_ROOT"
+          if [ ! -d "$ACE5_MU/.git" ]; then
+            git clone --no-checkout https://github.com/Project-Silicium/Mu-Silicium.git "$ACE5_MU"
+            git -C "$ACE5_MU" checkout --detach 42fe563791e51bf5500c2e470ed294ca0c94b97c
+            git -C "$ACE5_MU" submodule update --init --recursive
+          fi
+          python3 -m venv local/mu-venv
+          . local/mu-venv/bin/activate
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r "$ACE5_MU/pip-requirements.txt" pyyaml
+          python3 tools/ace5/prepare-linux-arm64.py "$ACE5_MU"
+          echo "CLANGPDB_AARCH64_PREFIX=aarch64-linux-gnu-" >> "$GITHUB_ENV"
+
+      - name: Build UEFI and kernel-stage boot image
+        run: |
+          set -euo pipefail
+          cd "$ACE5_ROOT"
+          . local/mu-venv/bin/activate
+          tools/ace5/build-diagnostic.sh "$ACE5_MU" "$ACE5_ROOT/dtb/giulia.dtb"
+          tools/ace5/build-loader.sh kernel
+          python3 tools/ace5/pack-boot.py --mu "$ACE5_MU" \
+            --dtb "$ACE5_ROOT/dtb/giulia.dtb" --stage kernel \
+            --output out/giulia-kernel/hackios-giulia-kernel.img
+
+      - name: Build XNU
+        run: |
+          set -euo pipefail
+          cd "$ACE5_ROOT"
+          xnu-deps/setup.sh --stage1
+          xnu/apply.sh
+          xnu-deps/setup.sh --stage2
+          ./xnu-build.sh -j"$(nproc)" build
+          mkdir -p out/giulia-kernel
+          cp xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837 \
+            out/giulia-kernel/mach.ace5-public
+
+      - name: Build userland and APFS
+        run: |
+          set -euo pipefail
+          cd "$ACE5_ROOT"
+          . local/image-venv/bin/activate
+          bash ios165/fetch.sh
+          rm -f ios165/*.ipsw ios165/*.dmg ios165/*.dmg.* 2>/dev/null || true
+          AIR=1 DRIVERS=softpipe,freedreno tools/mk-mesa.sh
+          GL=1 PREBUILT= bash userland/build.sh
+          tools/ace5/build-gpu-userland.sh local/components --metal
+          python3 tools/ace5/prepare-gpu-root.py \
+            --base userland/root --components local/components --ios-root ios165/rootfs \
+            --output local/root-daily --metal --app --display-test \
+            --compositor-threading inline --jobs tools/ace5/rc.jobs.daily
+          python3 tools/ace5/prepare-gpu-system.py --ios ios165 \
+            --stage0 userland/obj/stage0 --triangle local/components/triangle_app \
+            --output local/system-metal
+          python3 tools/apfs/mkapfs.py -z --plain fw -o local/root-daily.apfs redwood=local/root-daily
+          tools/apfs/check-image.sh local/root-daily.apfs redwood=local/root-daily
+          python3 tools/apfs/mkapfs.py -z -o local/system-metal.apfs \
+            System=local/system-metal,manifest=ios165/system.manifest
+          tools/apfs/check-image.sh local/system-metal.apfs \
+            System=local/system-metal,manifest=ios165/system.manifest
+          split -b 900m local/system-metal.apfs local/system-metal.apfs.part-
+          ls -lh out/giulia-kernel/mach.ace5-public \
+            out/giulia-kernel/hackios-giulia-kernel.img \
+            local/root-daily.apfs local/system-metal.apfs.part-*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ace5-build
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ env.ACE5_ROOT }}/out/giulia-kernel/mach.ace5-public
+            ${{ env.ACE5_ROOT }}/out/giulia-kernel/hackios-giulia-kernel.img
+            ${{ env.ACE5_ROOT }}/out/giulia-kernel/hackios-giulia-kernel.json
+            ${{ env.ACE5_ROOT }}/out/giulia/hackios-giulia-diagnostic.img
+            ${{ env.ACE5_ROOT }}/out/giulia/hackios-giulia-diagnostic.json
+            ${{ env.ACE5_ROOT }}/local/root-daily.apfs
+            ${{ env.ACE5_ROOT }}/local/system-metal.apfs.part-*
