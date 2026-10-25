@@ -66,10 +66,13 @@ python3 tools/ace5/install-artifact.py local/ci-artifact
 ```bash
 adb devices                       # 先确认手机在线
 python3 tools/ace5/phone.py --serial "$ACE5_SERIAL" enter --stage kernel
+python3 tools/ace5/phone.py --serial "$ACE5_SERIAL" ramdisk --image local/system-metal.apfs
 ACE5_CPUS=1 python3 tools/ace5/phone.py --serial "$ACE5_SERIAL" run \
   --seconds 600 --bootcpu 1 --live-log --live-interval 10 \
   --kernel out/giulia-kernel/mach.ace5-public --root-image local/root-daily.apfs
 ```
+
+`ramdisk --image` 把系统盘作为 `rd=md0`；不传它，内核会把小镜像当根，并在 `exec /sbin/launchd` 时 panic（SMP 的核数日志仍然有效）。
 
 然后依次 `ACE5_CPUS=2`、`4`、`8`，按 `RUNBOOK.md` 的验收项检查 PSCI `RUNNING` 核数、`gic: no redistributor` 和 USB 日志。
 

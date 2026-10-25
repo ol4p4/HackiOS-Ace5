@@ -25,7 +25,7 @@ if not src.is_dir():
 
 parts = sorted(src.rglob('system-metal.apfs.part-*'))
 if not parts:
-    raise SystemExit('no system-metal.apfs.part-* in the artifact')
+    print('note   no system-metal.apfs parts (kernel-only artifact); skipping the system image')
 
 
 def install(source: Path, dest: Path) -> None:
@@ -38,7 +38,9 @@ def install(source: Path, dest: Path) -> None:
 
 
 system_image = repo / 'local/system-metal.apfs'
-if system_image.exists() and not args.force:
+if not parts:
+    pass
+elif system_image.exists() and not args.force:
     print(f'keep   {system_image} (exists; --force to replace)')
 else:
     system_image.parent.mkdir(parents=True, exist_ok=True)
@@ -60,19 +62,22 @@ for item in src.rglob('*'):
 
 MACHO = {b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe', b'\xca\xfe\xba\xbe'}
 checks = [
-    ('out/giulia-kernel/mach.ace5-public', 0, MACHO, 'Mach-O'),
-    ('out/giulia-kernel/hackios-giulia-kernel.img', 0, {b'ANDROID!'}, 'Android boot'),
-    ('out/giulia/hackios-giulia-diagnostic.img', 0, {b'ANDROID!'}, 'Android boot'),
-    ('local/root-daily.apfs', 32, {b'NXSB'}, 'APFS'),
-    ('local/system-metal.apfs', 32, {b'NXSB'}, 'APFS'),
+    ('out/giulia-kernel/mach.ace5-public', 0, MACHO, 'Mach-O', True),
+    ('out/giulia-kernel/hackios-giulia-kernel.img', 0, {b'ANDROID!'}, 'Android boot', True),
+    ('out/giulia/hackios-giulia-diagnostic.img', 0, {b'ANDROID!'}, 'Android boot', True),
+    ('local/root-daily.apfs', 32, {b'NXSB'}, 'APFS', True),
+    ('local/system-metal.apfs', 32, {b'NXSB'}, 'APFS', bool(parts)),
 ]
-for name, offset, accepted, label in checks:
+for name, offset, accepted, label, required in checks:
     path = repo / name
     if not path.is_file():
-        raise SystemExit(f'missing {path}')
+        if required:
+            raise SystemExit(f'missing {path}')
+        print(f'skip   {name}: not in this artifact')
+        continue
     with open(path, 'rb') as handle:
         handle.seek(offset)
-        magic = handle.read(4)
+        magic = handle.read(len(next(iter(accepted))))
     if magic not in accepted:
         raise SystemExit(f'{path}: expected {label} magic at {offset}, got {magic!r}')
     print(f'ok     {name}: {label}')
