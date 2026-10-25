@@ -58,7 +58,7 @@ jobs:
           sudo chown "$USER:$USER" /mnt/ace5
           cp -a "$GITHUB_WORKSPACE/." /mnt/ace5/HackiOS-Ace5
           echo "ACE5_ROOT=/mnt/ace5/HackiOS-Ace5" >> "$GITHUB_ENV"
-          echo "ACE5_MU=/mnt/Mu-Silicium" >> "$GITHUB_ENV"
+          echo "ACE5_MU=/mnt/ace5/Mu-Silicium" >> "$GITHUB_ENV"
           df -h /mnt
 
       - name: Install packages
