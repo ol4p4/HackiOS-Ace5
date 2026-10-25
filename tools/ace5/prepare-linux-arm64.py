@@ -7,6 +7,7 @@ This uses the pinned Mu checkout and registers explicit local tool overrides.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -32,7 +33,10 @@ subprocess.run(['git', '-C', str(base), 'submodule', 'update', '--init', '--dept
                 'MdeModulePkg/Library/BrotliCustomDecompressLib/brotli',
                 'MdeModulePkg/Universal/RegularExpressionDxe/oniguruma',
                 'MdePkg/Library/BaseFdtLib/libfdt'], check=True)
-subprocess.run(['make', '-C', str(base / 'BaseTools'), '-j2'], check=True)
+# Theos' `as` forwards GCC's --gdwarf-5 to clang-11, which rejects it. BaseTools
+# needs binutils' assembler, so put /usr/bin ahead of any Theos toolchain entry.
+make_env = dict(os.environ, PATH='/usr/bin:' + os.environ.get('PATH', ''))
+subprocess.run(['make', '-C', str(base / 'BaseTools'), '-j2'], check=True, env=make_env)
 bin_dir = base / 'BaseTools/Bin'
 for config, files in (
         ('basetoolsbin_ext_dep.yaml', list((base / 'BaseTools/Source/C/bin').iterdir())),

@@ -76,10 +76,9 @@ git -C "$THEOS/sdks" checkout --detach 0222fd5413cf4b9af096f37b4621afa2688572f7
 test -x "$THEOS/toolchain/linux/iphone/bin/ld"
 test -x "$THEOS/toolchain/linux/iphone/bin/ldid"
 test -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include"
-export PATH="$THEOS/toolchain/linux/iphone/bin:$PATH"
 ```
 
-把 `export THEOS=...` 和 `export PATH=...` 写进 `~/.bashrc`，后续每个新 shell 都要有。
+只把 `export THEOS=...` 写进 `~/.bashrc`。**不要把 Theos 的 `bin` 加进 PATH**：里面的 `clang-11` 和 `as` 会盖住系统的 LLVM 18，导致 Mu 的 UEFI 构建和 GCC 的汇编调用失败。`xnu-env.sh` 会把需要的 cctools 链接到 `xnu-deps/host/bin`，不需要 PATH。
 
 ## 3. 源码和 DTB
 

@@ -106,7 +106,9 @@ jobs:
           test -x "$THEOS/toolchain/linux/iphone/bin/ldid"
           test -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include"
           echo "THEOS=$THEOS" >> "$GITHUB_ENV"
-          echo "$THEOS/toolchain/linux/iphone/bin" >> "$GITHUB_PATH"
+          # Do not put the Theos bin directory on PATH: its clang-11 and `as`
+          # shadow LLVM 18 for the UEFI build and break GCC's assembler call.
+          # xnu-env.sh links the cctools it needs into xnu-deps/host/bin.
 
       - name: Mu-Silicium and BaseTools
         run: |
