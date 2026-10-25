@@ -177,6 +177,8 @@ jobs:
             out/giulia-kernel/hackios-giulia-kernel.img \
             local/root-daily.apfs local/system-metal.apfs.part-*
 
+      # The plain root-daily tree lets a local build add the proprietary fw/
+      # files and repack; the firmware itself never leaves the device.
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -190,6 +192,7 @@ jobs:
             ${{ env.ACE5_ROOT }}/out/giulia/hackios-giulia-diagnostic.img
             ${{ env.ACE5_ROOT }}/out/giulia/hackios-giulia-diagnostic.json
             ${{ env.ACE5_ROOT }}/local/root-daily.apfs
+            ${{ env.ACE5_ROOT }}/local/root-daily/
 
       - name: Upload system image
         uses: actions/upload-artifact@v4
