@@ -195,6 +195,8 @@ Kernel `6f2542d0…` replaces the exact firmware-size gate with structural valid
 
 The probe tears the GPU down at the end (`probe ended; CX off=1; software rendering continues`). For persistent GPU/Metal rendering, rerun with `--gpu-keep --metal` and the **full** `root-daily` plus its `fw/` directory; the minimal `root-gmu.apfs` has no `metal_props` or `display_test`. The desktop window server still uses OpenGL ES, and there is no A750 reset/recovery.
 
+**Live compositor caveat (2026-10-25).** With `--gpu-keep`, the backend publishes and `display_test` passes all nine cases (`bad=0`, `COMPLETE failures=0`), but the window server's live compositing produces ghosted/blank tiles and torn frames — with `--metal` and without it, and with `display_test`/`metal_props` removed from `rc.jobs` (`logs/giulia/20261025-183725-screen.png`, `-184449-screen.png`, `-185215-screen.png`, `-190216-screen.png`). Waiting scanout on the backend's last fence (`MiniIOSurfaceDrawn`) does not fix it; the fault is in the compositor's surface lifetime/command stream, not scanout order. Use `gpu=0` (no `--gpu-keep`) for a correct 10 fps UI until per-client page tables and per-surface fences land.
+
 If lock timeouts or watchdog messages appear at 4/8 cores, add `timeout_scale = 2` to `platform_giulia` in `xnuloader/loader.c` and rebuild the loader.
 
 ### Rollback
