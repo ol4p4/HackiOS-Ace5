@@ -58,7 +58,7 @@ static bool a750_gx_prepare(struct a750_hfi *s)
         if (!(d[2]&1)) continue;
         if (d[1] || !a750_gx_import(g,d[0],a750_find_memory(s->memory,d[0],d[7]),d[7],d[2])) return false;
     }
-    if (!a750_gx_firmware(g,"gen70900_sqe.fw",0x61000000,85364,s->direct) ||
+    if (!a750_gx_firmware(g,"gen70900_sqe.fw",0x61000000,85300,s->direct) ||
         (!s->direct && !a750_gx_firmware(g,"gen70900_aqe.fw",0x61020000,33176,false))) return false;
     if (!a750_block(&g->memory,0x61030000,4096,false)) return false;
     if (s->direct) {

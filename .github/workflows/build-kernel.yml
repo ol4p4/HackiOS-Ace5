@@ -1,0 +1,108 @@
+name: Build Ace 5 kernel (Linux ARM64)
+
+# Kernel-only rebuild for driver iterations. The full image build lives in
+# build-ace5.yml; this one skips Mu, Mesa, userland and APFS.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        continue-on-error: true
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Fallback cleanup and disk report
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache || true
+          sudo apt-get clean
+          df -h /
+          nproc
+          free -h
+
+      - name: Move workspace to /mnt
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /mnt/ace5
+          sudo chown "$USER:$USER" /mnt/ace5
+          cp -a "$GITHUB_WORKSPACE/." /mnt/ace5/HackiOS-Ace5
+          echo "ACE5_ROOT=/mnt/ace5/HackiOS-Ace5" >> "$GITHUB_ENV"
+
+      - name: Install packages
+        run: |
+          set -euo pipefail
+          sudo add-apt-repository -y universe || true
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git curl xz-utils rsync \
+            clang-18 lld-18 llvm-18 flex bison m4 perl autoconf automake libtool \
+            pkg-config libncurses-dev python3 python3-venv python3-pip \
+            nasm uuid-dev gcc-aarch64-linux-gnu device-tree-compiler acpica-tools 7zip
+          command -v 7z >/dev/null || sudo ln -sf /usr/bin/7zz /usr/local/bin/7z
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+          clang --version | head -1
+
+      - name: Theos
+        run: |
+          set -euo pipefail
+          cd "$ACE5_ROOT"
+          export THEOS="$PWD/local/theos"
+          mkdir -p "$THEOS/toolchain"
+          if [ ! -x "$THEOS/toolchain/linux/iphone/bin/ld" ]; then
+            curl -fL --retry 3 -o local/ios-toolchain-arm64.tar.xz \
+              https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/iOSToolchain-aarch64.tar.xz
+            tar -xJf local/ios-toolchain-arm64.tar.xz -C "$THEOS/toolchain"
+          fi
+          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include" ]; then
+            git clone --no-checkout https://github.com/theos/sdks.git "$THEOS/sdks"
+            git -C "$THEOS/sdks" checkout --detach 0222fd5413cf4b9af096f37b4621afa2688572f7
+          fi
+          test -x "$THEOS/toolchain/linux/iphone/bin/ld"
+          test -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          # Keep the Theos bin off PATH: its clang-11 shadows LLVM 18 and its
+          # `as` forwards GCC's --gdwarf-5 to clang-11, which rejects it.
+
+      - name: Build XNU
+        run: |
+          set -euo pipefail
+          cd "$ACE5_ROOT"
+          xnu-deps/setup.sh --stage1
+          xnu/apply.sh
+          xnu-deps/setup.sh --stage2
+          ./xnu-build.sh -j"$(nproc)" build
+          mkdir -p out/giulia-kernel
+          cp xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837 \
+            out/giulia-kernel/mach.ace5-public
+          sha256sum out/giulia-kernel/mach.ace5-public
+          ls -lh out/giulia-kernel/mach.ace5-public
+
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: ace5-kernel-only
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ env.ACE5_ROOT }}/out/giulia-kernel/mach.ace5-public
