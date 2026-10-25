@@ -263,10 +263,18 @@ MiniIOSurfaceDrawn(MiniIOSurface * surface, uint64_t milliseconds)
 	uint32_t fence = surface->drawn;
 	bool done = true;
 
-	if (fence != 0 && gGPULock != NULL) {
-		IOLockLock(gGPULock);
-		done = !redwood_gpu_ready() || gpuWait(fence, milliseconds);
-		IOLockUnlock(gGPULock);
+	if (gGPULock != NULL && redwood_gpu_ready()) {
+		/* A client that draws through the backend without naming this surface
+		 * in its submission leaves drawn at 0; the last backend fence still
+		 * orders the scanout after that client's work. */
+		if (fence == 0) {
+			fence = redwood_gpu_last();
+		}
+		if (fence != 0) {
+			IOLockLock(gGPULock);
+			done = gpuWait(fence, milliseconds);
+			IOLockUnlock(gGPULock);
+		}
 	}
 	return done;
 }

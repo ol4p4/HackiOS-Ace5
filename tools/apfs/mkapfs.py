@@ -140,7 +140,7 @@ def read_tree(path, name=''):
 
 def apply_manifest(root, manifest):
     for raw in open(manifest, 'rb'):
-        fields = raw.rstrip(b'\n').split(b'\t')
+        fields = raw.rstrip(b'\r\n').split(b'\t')
         if len(fields) < 4 or not fields[3]:
             continue
         mode, uid, gid = int(fields[0], 8), int(fields[1]), int(fields[2])
