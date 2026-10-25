@@ -188,6 +188,11 @@ try:
         cpu_arg = cpu_boot_arg()
         commandline = (f'{cpu_arg} loader_return_after={seconds} epoch={int(time.time())} sb_delay=8 '
                        'touchscreen=0 buttons=0 cpufreq=0 gpu=0 wifi=0 adsp=0')
+        extra = os.environ.get('ACE5_CMDLINE', '').strip()
+        if extra:
+            if re.search(r'(^|\s)(flash|erase|ufs_write|var_store)\b', extra):
+                raise RuntimeError('ACE5_CMDLINE may not enable flashing or storage writes')
+            commandline += f' {extra}'
         print(f'CPU boot arg: {cpu_arg}', flush=True)
         if args.command == 'run' and args.persist:
             commandline += ' ufs=2 ufs_write=1 var_store=1'
