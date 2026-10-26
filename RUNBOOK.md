@@ -209,7 +209,16 @@ Revert `tools/ace5/phone.py`, `common/devices/giulia.conf`, and the optional `ti
 
 **Stop here until Phase 1 is stable and the backup is verified.**
 
-> **Blocker (2026-10-25, PKG110):** `userdata` is mounted from `/dev/block/dm-74` and metadata-encrypted (`ro.crypto.metadata.enabled=true`); the raw f2fs superblock at `/dev/block/sda15` is unreadable, so `tools/userdata-carve.py` refuses with "userdata does not begin with a plain f2fs of 4 KB blocks". The device has 219 GiB userdata with 131 GiB used; the only other free partitions are `hybridswap` 1 GiB, `rawdump` 256 MiB and `splash_odm` 32 MiB. Do not run the carve as written. A dm-aware variant (read the superblock from dm-74, shrink `/data`, rewrite the GPT) or the 1 GiB `hybridswap` fallback is required. Phase 1 does not need either.
+> **Resolved 2026-10-26:** `userdata` is still metadata-encrypted, but the f2fs
+> superblock is plaintext on the mapper device (`/dev/block/dm-N`), not on
+> `/dev/block/by-name/userdata` (= `sda15`, ciphertext). `tools/ace5/extract-hw.sh`
+> now resolves the mapper device through `/dev/block/mapper/userdata` and reads
+> the superblock and `segment_info` there. The saved GPT passes
+> `userdata-carve.py --preflight`: 15 partitions, unit 233.9 GiB, `userdata`
+> entry 14 (`sda15`) lba 3920350..61321210 (218.97 GiB) is the last partition and
+> reaches the end of the unit, so a 20 GiB `darwin` takes entry 15 (`sda16`)
+> lba 56078331..61321210. The carve is the destructive step and still needs an
+> explicit go-ahead and a verified backup.
 
 The persistence stack exists but is disabled today:
 
@@ -222,16 +231,28 @@ This branch enables it as a separate `persist` stage; the diagnostic and kernel 
 ### 2.1 Carve the `darwin` partition
 
 ```bash
-# Reads the saved GPT and f2fs superblock; writes gpt-head.new / gpt-tail.new only.
+# 1. The GPT alone: both copies, userdata last, a free entry after it. No phone needed.
+python3 tools/userdata-carve.py local/device 20 darwin --preflight
+
+# 2. The f2fs superblock and segment map, from the mapper device (plaintext only there).
+#    extract-hw.sh does this and warns if the magic is not f2fs.
+ACE5_SERIAL="$ACE5_SERIAL" tools/ace5/extract-hw.sh local/device
+od -An -tx1 -j 1024 -N 4 local/device/userdata-meta-before.bin   # want 10 20 f5 f2
+
+# 3. Reads the saved GPT and superblock; writes gpt-head.new / gpt-tail.new only.
 python3 tools/userdata-carve.py local/device 20 darwin
 ```
 
 Follow the printed instructions **in one Android session, no reboot between steps**:
 
-1. Run `f2fs-resize` on `/data` with the printed block count.
-2. Save the new first block as `local/device/sb-after.bin`.
+1. Push `local/tools/f2fs-resize` (built by CI, `tools/android/build.sh`) and run
+   it on `/data` with the printed block count.
+2. Save the new first block from the **mapper** device as `local/device/sb-after.bin`:
+   `adb exec-out su -c 'dd if=/dev/block/dm-N bs=4096 count=1' > local/device/sb-after.bin`
+   (resolve `dm-N` fresh: `readlink -f /dev/block/mapper/userdata`).
 3. Re-run `userdata-carve.py` to verify the shrunk size and produce the final table.
 4. Write the two GPT copies with the printed `dd` commands.
+5. Reboot Android: `df /data` shows the shrunk size and `/dev/block/by-name/darwin` exists.
 
 This is the destructive step: it shrinks `userdata` and gives the tail to `darwin`. If `userdata-carve.py` refuses, do not force it; the f2fs may hold data past the new end.
 

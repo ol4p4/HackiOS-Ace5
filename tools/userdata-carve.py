@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """Cut a partition of this port's own off the end of Android's userdata: the new GPT, made and checked here.
 
-usage: userdata-carve.py DIR GIB [NAME]
+usage: userdata-carve.py DIR GIB [NAME] [--preflight] [--superblock FILE]
   DIR   what was saved from the phone under Android (adb's root shell), all read only:
           gpt-head.bin             the first 8 blocks of LUN 0 (dd if=/dev/block/sda bs=4096 count=8)
           gpt-tail.bin             its last 8 blocks (... skip=BLOCKS-8 count=8)
           userdata-meta-before.bin at least the first block of userdata (its f2fs superblock)
           segment_info-before.txt  /proc/fs/f2fs/sda33/segment_info
-          sb-after.bin             (once the f2fs is shrunk) the first block of userdata again
+          sb-after.bin             (once the f2fs is shrunk) the first block of the mapper device again
   GIB   how much to take off the end of userdata, in GiB (a whole number of f2fs segments)
   NAME  the new partition's name (default darwin)
 
-Android's userdata on this phone is a plain f2fs (no metadata encryption: its superblock lies on the
-flash as it is) that fills its partition, the last of LUN 0. Taking GIB off its end takes two steps
+  --preflight       check only the GPT: both copies, that userdata is the last
+                    partition and that a free entry follows it. No superblock
+                    needed, so this runs before anything is read from /data.
+  --superblock FILE read the f2fs superblock from FILE instead of
+                    DIR/userdata-meta-before.bin. With metadata encryption the
+                    superblock is plaintext only on the mapper device
+                    (/dev/block/dm-N), not on /dev/block/by-name/userdata.
+
+Android's userdata fills its partition, the last of LUN 0. On a phone whose userdata is
+metadata-encrypted (this one is), the f2fs lives on a device-mapper device and its superblock is
+plaintext only there: capture it from /dev/block/mapper/userdata, never from the raw partition,
+whose block 0 is ciphertext. Taking GIB off its end takes two steps
 on the phone: first the filesystem is shrunk in place, by Android's own kernel
 (tools/android/f2fs-resize, F2FS_IOC_RESIZE_FS), and only then the partition, by writing the
 GPT this makes: userdata ends exactly where the shrunk f2fs ends, and a new partition NAME (of the
@@ -108,13 +118,31 @@ def check(name, head, tail, disk):
 
 
 def main():
-    if len(sys.argv) not in (3, 4):
+    argv = sys.argv[1:]
+    preflight = '--preflight' in argv
+    sb_path = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == '--preflight':
+            i += 1
+        elif a == '--superblock':
+            if i + 1 >= len(argv):
+                sys.exit('userdata-carve.py: --superblock needs a file')
+            sb_path = argv[i + 1]
+            i += 2
+        elif a.startswith('--'):
+            sys.exit(f'userdata-carve.py: unknown option {a}')
+        else:
+            rest.append(a)
+            i += 1
+    if len(rest) not in (2, 3):
         sys.exit(__doc__)
-    d, gib = sys.argv[1], int(sys.argv[2])
-    name = sys.argv[3] if len(sys.argv) > 3 else 'darwin'
+    d, gib = rest[0], int(rest[1])
+    name = rest[2] if len(rest) > 2 else 'darwin'
     head = open(f'{d}/gpt-head.bin', 'rb').read()
     tail = open(f'{d}/gpt-tail.bin', 'rb').read()
-    sb = open(f'{d}/userdata-meta-before.bin', 'rb').read(BS)[1024:2048]
     if len(head) != 8 * BS or len(tail) != 8 * BS:
         sys.exit('userdata-carve.py: gpt-head.bin and gpt-tail.bin are to be 8 blocks each')
     # the backup header says where it is: the last block of the unit
@@ -137,16 +165,31 @@ def main():
         sys.exit('userdata-carve.py: no free entry after the used ones')
     slot = free[0]
 
+    part_blocks = entries[u]['last'] - entries[u]['first'] + 1
+    if preflight:
+        print(f'preflight: the table checks out; {len(used)} partitions, unit {disk * BS / 2**30:.1f} GiB')
+        print(f'  userdata: entry {u} (sda{u + 1}), lba {entries[u]["first"]}..{entries[u]["last"]}, '
+              f'{part_blocks * BS / 2**30:.2f} GiB, the last partition and reaching the end of the unit')
+        print(f'  a {name} of {gib} GiB would take entry {slot} (sda{slot + 1}), '
+              f'lba {ph["last_usable"] - gib * 2**30 // BS + 1}..{ph["last_usable"]}')
+        print('  preflight passed: the GPT alone allows the carve; the superblock and segment map '
+              'are checked next')
+        return 0
+
     # the f2fs of userdata: where its main area is, and how its segments are filled
+    sb_file = sb_path or f'{d}/userdata-meta-before.bin'
+    sb = open(sb_file, 'rb').read(BS)[1024:2048]
     magic, = struct.unpack_from('<I', sb, 0)
     log_bs, log_bps = struct.unpack_from('<I', sb, 16)[0], struct.unpack_from('<I', sb, 20)[0]
     block_count, = struct.unpack_from('<Q', sb, 36)
     segs_main, = struct.unpack_from('<I', sb, 68)
     main_blkaddr, = struct.unpack_from('<I', sb, 92)
     if magic != 0xf2f52010 or log_bs != 12:
-        sys.exit('userdata-carve.py: userdata does not begin with a plain f2fs of 4 KB blocks')
+        sys.exit(f'userdata-carve.py: {sb_file} does not begin with a plain f2fs of 4 KB blocks '
+                 f'(magic 0x{magic:08x}, log_bs {log_bs}). With metadata encryption the superblock '
+                 'is plaintext only on the mapper device (/dev/block/dm-N), not on '
+                 '/dev/block/by-name/userdata; capture it with tools/ace5/extract-hw.sh.')
     per_seg = 1 << log_bps
-    part_blocks = entries[u]['last'] - entries[u]['first'] + 1
     if block_count > part_blocks:
         sys.exit('userdata-carve.py: the f2fs is bigger than its partition')
     cut = gib * 2**30 // BS // per_seg            # segments taken off the end

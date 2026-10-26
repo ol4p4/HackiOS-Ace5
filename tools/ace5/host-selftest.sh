@@ -15,9 +15,12 @@ mkdir -p local
 
 echo "== syntax =="
 "$PY" -m py_compile tools/ace5/phone.py tools/ace5/pack-boot.py \
-  tools/ace5/storage-constants.py tools/ace5/apply-storage-constants.py tools/ace5/check-host.py
+  tools/ace5/storage-constants.py tools/ace5/apply-storage-constants.py tools/ace5/check-host.py \
+  tools/ace5/soc-args.py tools/userdata-carve.py
 bash -n tools/ace5/build-loader.sh
 bash -n tools/ace5/extract-hw.sh
+bash -n devices/ace5/pull-soc.sh
+bash -n devices/ace5/pull-firmware.sh
 
 echo "== dry-run: cpus=2 =="
 ACE5_CPUS=2 "$PY" tools/ace5/phone.py --serial X run --dry-run --seconds 60 --bootcpu 1 \
@@ -71,5 +74,21 @@ grep -q '^#define BLOCK_DARWIN_FIRST 100000ULL' local/host-selftest-root/xnuload
 grep -q '^#define BLOCK_DARWIN_LAST 200000ULL' local/host-selftest-root/xnuloader/loader.c
 grep -q '^#define UFS_DARWIN_BLOCKS 100001ULL' local/host-selftest-root/xnu/files/bsd/dev/redwood_ufs.c
 grep -q '0x11111111' local/host-selftest-root/xnuloader/loader.c
+
+echo "== carve preflight on the saved GPT =="
+if [ -f local/device/gpt-head.bin ] && [ -f local/device/gpt-tail.bin ]; then
+  "$PY" tools/userdata-carve.py local/device 20 darwin --preflight | tee local/host-selftest-preflight.log
+  grep -q 'preflight passed' local/host-selftest-preflight.log
+else
+  echo "  skipped: no local/device/gpt-*.bin (run tools/ace5/extract-hw.sh on the phone)"
+fi
+
+echo "== soc.args from the saved device tree =="
+if [ -f local/device/giulia.dtb ]; then
+  "$PY" tools/ace5/soc-args.py local/device/giulia.dtb --check | tee local/host-selftest-soc.log
+  grep -q 'soc_ipa_base' local/host-selftest-soc.log
+else
+  echo "  skipped: no local/device/giulia.dtb"
+fi
 
 echo "host selftest OK"

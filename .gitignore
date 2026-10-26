@@ -17,6 +17,7 @@
 !/xnuloader/
 !/qemu/
 !/tools/
+!/devices/
 !/xnu/
 !/xnu-deps/
 !/uefi/
