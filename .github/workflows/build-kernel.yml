@@ -64,6 +64,15 @@ jobs:
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
           clang --version | head -1
 
+      - name: Build phone-side tools
+        run: |
+          set -euo pipefail
+          cd "$ACE5_ROOT"
+          tools/android/build.sh
+          mkdir -p local/tools
+          cp tools/android/f2fs-resize local/tools/f2fs-resize
+          file local/tools/f2fs-resize || true
+
       - name: Theos
         run: |
           set -euo pipefail
@@ -105,4 +114,6 @@ jobs:
           name: ace5-kernel-only
           if-no-files-found: error
           retention-days: 7
-          path: ${{ env.ACE5_ROOT }}/out/giulia-kernel/mach.ace5-public
+          path: |
+            ${{ env.ACE5_ROOT }}/out/giulia-kernel/mach.ace5-public
+            ${{ env.ACE5_ROOT }}/local/tools/f2fs-resize
