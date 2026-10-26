@@ -45,7 +45,7 @@ su_bin "dd if=/dev/block/sda bs=4096 skip=$SKIP count=8 2>/dev/null" > "$OUT/gpt
 # (/dev/block/by-name/userdata = sda15) holds ciphertext, so read the mapper
 # device, resolved fresh every run -- the dm number changes between boots.
 MAPPER=$(su_text 'readlink -f /dev/block/mapper/userdata 2>/dev/null' | tr -d '\r')
-if [ -z "$MAPPER" ] || [ ! "$MAPPER" = /* ]; then
+if [ -z "$MAPPER" ] || [ "${MAPPER#/}" = "$MAPPER" ]; then
 	MAPPER=$(su_text 'ls -l /dev/block/mapper 2>/dev/null' | tr -d '\r' \
 		| sed -n 's|.*userdata -> \(.*\)|\1|p' | head -1)
 	case "$MAPPER" in

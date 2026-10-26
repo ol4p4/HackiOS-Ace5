@@ -1510,10 +1510,10 @@ ufs_survey(void)
  * same partition, named the same, of the same size, in the same place, on logical unit 0.
  */
 #define BLOCK_WRITE_FIRST  2042368ULL                  /* darwin's blocks of 4096: past both cryptexes */
-#define BLOCK_DARWIN_FIRST 25374720ULL                 /* its first and last LBA of unit 0, as the GPT has them */
-#define BLOCK_DARWIN_LAST  30617594ULL
+#define BLOCK_DARWIN_FIRST 56078336ULL
+#define BLOCK_DARWIN_LAST 61321210ULL
 #define BLOCK_DARWIN_TYPE  { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } }
-#define BLOCK_DARWIN_UNIQ  { 0xfd6854ad, 0x24aa, 0x4fc3, { 0x94, 0xfe, 0x29, 0x01, 0x16, 0x85, 0x8d, 0x68 } }
+#define BLOCK_DARWIN_UNIQ { 0x086cbf2b, 0xc897, 0x40e5, { 0xa2, 0xeb, 0xf0, 0x8f, 0xf5, 0x66, 0xfb, 0x75 } }
 
 /*
  * The partitions first, then the logical units they are on (BLOCK_PART_UNIT, named unit0, unit1,

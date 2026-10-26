@@ -76,8 +76,8 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
  * bounds and the GUIDs of the partition besides (xnuloader/loader.c, BLOCK_WRITE_FIRST).
  */
 #define UFS_WRITE_FIRST    2042368ULL                  /* darwin's blocks of 4096 */
-#define UFS_DARWIN_FIRST   25374720ULL                 /* its first LBA on the unit, as the GPT has it */
-#define UFS_DARWIN_BLOCKS  5242875ULL
+#define UFS_DARWIN_FIRST 56078336ULL
+#define UFS_DARWIN_BLOCKS 5242875ULL
 
 struct loader_block_part {
 	char name[36];
