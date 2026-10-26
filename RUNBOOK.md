@@ -277,6 +277,10 @@ The type GUID stays the fixed APFS-container GUID; only `BLOCK_DARWIN_UNIQ` come
 
 ### 2.3 Build the persistence loader
 
+The CI workflow already builds this image and ships it in the `ace5-kernel`
+artifact (`out/giulia-persist/hackios-giulia-persist.img`). Rebuild locally only
+after editing the loader or the constants:
+
 ```bash
 tools/ace5/build-loader.sh persist
 python3 tools/ace5/pack-boot.py --mu <Mu-Silicium> --dtb local/device/giulia.dtb \

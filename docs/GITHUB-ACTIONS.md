@@ -1,6 +1,6 @@
 # 用 GitHub Actions 构建 Ace 5（无 Linux ARM64 主机）
 
-`ubuntu-24.04-arm` 对公开仓库免费，4 核 / 16 GB / 约 120 GB 可用空间，足够跑完 UEFI、XNU、Mesa/userland 和两个 APFS 镜像。构建产物分成两个 artifact：`ace5-kernel`（约 30 MB，Phase 1 只需要它）和 `ace5-system`（约 2.4 GB，带 iOS 系统盘），保留 7 天。
+`ubuntu-24.04-arm` 对公开仓库免费，4 核 / 16 GB / 约 120 GB 可用空间，足够跑完 UEFI、XNU、Mesa/userland 和两个 APFS 镜像。构建产物分成两个 artifact：`ace5-kernel`（约 27 MB，含内核、三个 boot image、RAM root 和手机侧工具）和 `ace5-system`（约 2.4 GB，带 iOS 系统盘），保留 7 天。
 
 ## 1. 公开 fork
 
@@ -27,13 +27,13 @@ gh run watch --repo <you>/HackiOS-Ace5
 整个 job 约 40 分钟（实测 07:13–07:43 UTC），超时上限 6 小时。步骤：
 
 1. 释放磁盘、把工作区复制到 `/mnt`。
-2. 安装 LLVM 18、7zip、ARM64 交叉 binutils。
+2. 安装 LLVM 18、7zip、ARM64 交叉 binutils；编译手机侧 `f2fs-resize`（aarch64 静态）。
 3. Theos 工具链（`test-210562a`）和 `iPhoneOS16.5.sdk`。
 4. Mu-Silicium（pin `42fe5637`）+ 本机编译 BaseTools。
-5. UEFI + kernel 阶段 boot image。
+5. UEFI + kernel 阶段 boot image，以及 persist 阶段 boot image（`allowed_partition_write: logdump, darwin`）。
 6. XNU（`xnu-8796.121.2` + `redwood.patch`）。
 7. `ios165/fetch.sh`（从 Apple CDN 取 4.7 GB + 2.7 GB 镜像成员）、Mesa、userland、两个 APFS 镜像，`apfsck` 校验。
-8. 上传 `ace5-build`。
+8. 上传 `ace5-kernel` 和 `ace5-system`。
 
 ## 3. 下载并安装
 
@@ -56,7 +56,7 @@ python3 tools/ace5/install-artifact.py local/ci-artifact
 脚本会：
 
 - 把 `system-metal.apfs.part-aa/ab/ac` 拼回 `local/system-metal.apfs`；
-- 复制 `out/giulia-kernel/mach.ace5-public`、`hackios-giulia-kernel.img/.json`、`out/giulia/hackios-giulia-diagnostic.img/.json`、`local/root-daily.apfs`；
+- 复制 `out/giulia-kernel/mach.ace5-public`、`hackios-giulia-kernel.img/.json`、`out/giulia-persist/hackios-giulia-persist.img/.json`、`out/giulia/hackios-giulia-diagnostic.img/.json`、`local/root-daily.apfs`、`local/tools/f2fs-resize`；
 - 校验 Mach-O、`ANDROID!` 和 APFS `NXSB` magic。
 
 已有文件默认保留，要覆盖加 `--force`。
@@ -91,7 +91,9 @@ ACE5_CPUS=1 python3 tools/ace5/phone.py --serial "$ACE5_SERIAL" run \
 | --- | --- | --- |
 | `mach.ace5-public` | 15 MB | XNU 内核，`phone.py --kernel` |
 | `hackios-giulia-kernel.img` | 2.0 MB | `fastboot boot` 的 UEFI + loader 镜像 |
+| `hackios-giulia-persist.img` | 2.0 MB | persist 阶段（`ufs_write=1`，只允许写 `logdump`/`darwin`） |
 | `hackios-giulia-diagnostic.img` | ~2 MB | 只读诊断阶段 |
+| `local/tools/f2fs-resize` | 2.7 KB | 手机上收缩 `/data` 的静态 aarch64 工具 |
 | `local/root-daily.apfs` | 11 MB | RAM root（`--root-image`） |
 | `local/system-metal.apfs` | 2.38 GB | iOS 16.5 系统盘（`ramdisk --image`） |
 
