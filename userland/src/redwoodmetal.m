@@ -4156,6 +4156,30 @@ done:
 
 @end
 
+/*
+ * A boot-arg's number, or `fallback` when the argument is not there. The kernel's boot-args
+ * are where a run is told things -- the same channel -featureProfile reads metal_profile=
+ * from -- and these two are this file's switches: metal_trace=N writes down the next N
+ * draws, metal_scissors=1 every scissor rectangle asked for.
+ */
+static int
+redwood_metal_boot_number(const char *name, int fallback)
+{
+	char args[1024] = "";
+	size_t size = sizeof(args) - 1;
+	char key[64];
+	const char *at;
+
+	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) {
+		return fallback;
+	}
+	snprintf(key, sizeof(key), "%s=", name);
+	if ((at = strstr(args, key)) == NULL || (at != args && at[-1] != ' ')) {
+		return fallback;
+	}
+	return (int)strtol(at + strlen(key), NULL, 10);
+}
+
 @implementation RedwoodMetalRenderEncoder {
 	RedwoodMetalCommandBuffer *_commandBuffer;   /* not retained: it owns the encoder */
 	RedwoodMetalRenderPipeline *_pipeline;
@@ -4164,6 +4188,7 @@ done:
 	float _clearColor[4];
 	BOOL _clears;
 	unsigned _clearWanted;              /* attachments whose load action is Clear, whether or not they were honoured */
+	unsigned _scissors;                 /* scissor rectangles asked for (and not honoured: see -setScissorRect:) */
 	id _depth;
 	id _depthStencilState;
 	float _clearDepth;
@@ -4423,7 +4448,36 @@ done:
 	_depthRange[1] = (float)viewport.zfar;
 	_hasDepthRange = YES;
 }
-- (void)setScissorRect:(MTLScissorRect)rect           { (void)rect; }
+/*
+ * Not implemented, and unlike the viewport rectangle it was silent about it. A Gallium
+ * scissor state is not carried in rwa_draw, so the library's draw always covers the whole
+ * attachment; a draw CoreAnimation means to clip to a damage rectangle is therefore drawn
+ * whole, and what lies outside the rectangle -- the rest of the texture, its padding, a
+ * region the pass never meant to touch -- is painted too. The rectangles are counted, and
+ * said out loud when one is smaller than the attachment, because that is the only way to
+ * know whether anything asks for one at all.
+ */
+- (void)setScissorRect:(MTLScissorRect)rect
+{
+	static int watching = -1;
+	static unsigned said;
+	id first = _colorCount > 0 ? _color[0] : _depth;
+	NSUInteger w = first != nil ? [first width] : 0, h = first != nil ? [first height] : 0;
+
+	if (watching < 0) {
+		watching = redwood_metal_boot_number("metal_scissors", 0);
+	}
+	_scissors++;
+	if (said < (watching ? 64u : 8u) && (rect.x != 0 || rect.y != 0 ||
+	    (NSUInteger)rect.width != w || (NSUInteger)rect.height != h)) {
+		said++;
+		rw_print("a scissor rectangle of %lux%lu at %lu,%lu is asked for of a %lux%lu "
+		         "attachment and this driver clips nothing: the draw covers the whole "
+		         "attachment\n", (unsigned long)rect.width, (unsigned long)rect.height,
+		         (unsigned long)rect.x, (unsigned long)rect.y, (unsigned long)w,
+		         (unsigned long)h);
+	}
+}
 - (void)setCullMode:(NSUInteger)mode                  { (void)mode; }
 - (void)setFrontFacingWinding:(NSUInteger)winding     { (void)winding; }
 - (void)setTriangleFillMode:(NSUInteger)mode          { (void)mode; }
@@ -4550,6 +4604,42 @@ done:
 	work->samplerCount = _fragmentSamplerCount;
 	for (unsigned i = 0; i < _fragmentSamplerCount; i++) {
 		work->samplers[i] = _fragmentSamplers[i];
+	}
+	{
+		/*
+		 * metal_trace=N: what the first N draws of this process are made of -- the target
+		 * and its size, how many vertices, whether the pass clears, how many scissor
+		 * rectangles were asked for (and not honoured, see -setScissorRect:), and the
+		 * sizes of the textures the fragment stage samples. Written down per draw,
+		 * because a picture that went wrong has to have the draw that put the wrong
+		 * pixels in it findable in the log rather than guessed at.
+		 */
+		static int tracing = -1;
+		static unsigned logged;
+		id first = _colorCount > 0 ? _color[0] : _depth;
+
+		if (tracing < 0) {
+			tracing = redwood_metal_boot_number("metal_trace", 0);
+		}
+		if (tracing > 0 && (int)logged < tracing && first != nil && [first width] >= 1000) {
+			char what[256] = "";
+			size_t used = 0;
+
+			logged++;
+			for (unsigned i = 0; i < _fragmentTextureCount && i < 4 && used < sizeof(what) - 32; i++) {
+				id texture = _fragmentTextures[i];
+
+				used += (size_t)snprintf(what + used, sizeof(what) - used, " [%u] %lux%lu",
+				    i, (unsigned long)[texture width], (unsigned long)[texture height]);
+			}
+			rw_print("metal draw %u: into %lux%lu x%u%s%s, %u %s, %u scissor%s, textures%s\n",
+			    logged, (unsigned long)(first != nil ? [first width] : 0),
+			    (unsigned long)(first != nil ? [first height] : 0), _colorCount,
+			    _clears ? ", clears colour" : "",
+			    _clearsDepth ? ", clears depth" : "", (unsigned)count,
+			    indexBuffer != nil ? "indices" : "vertices", _scissors,
+			    _scissors == 1 ? "" : "s", what);
+		}
 	}
 	[_commandBuffer recordWork:work];
 	[work release];
