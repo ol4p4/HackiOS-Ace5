@@ -4624,6 +4624,28 @@ redwood_metal_now_ms(void)
 	}
 	{
 		/*
+		 * The first draw of this process, always, once. Everything else in this file speaks
+		 * only when something is wrong, which leaves one question unanswerable from a log:
+		 * whether the Metal frontend is drawing at all. One line says it is, and says what
+		 * the process saw of the trace switch, which is the difference between "the window
+		 * never came" and "the draws never happened".
+		 */
+		static unsigned said;
+
+		if (said++ == 0) {
+			const char *want = getenv("RW_METAL_TRACE");
+			id first = _colorCount > 0 ? _color[0] : _depth;
+
+			rw_print("metal: the first draw of this process: RW_METAL_TRACE=%s, into %lux%lu "
+			         "x%u, %u %s, %u textures\n", want != NULL ? want : "(unset)",
+			         (unsigned long)(first != nil ? [first width] : 0),
+			         (unsigned long)(first != nil ? [first height] : 0), _colorCount,
+			         (unsigned)count, indexBuffer != nil ? "indices" : "vertices",
+			         _fragmentTextureCount);
+		}
+	}
+	{
+		/*
 		 * RW_METAL_TRACE=N (or metal_trace=N in the boot-args): what the next N draws are
 		 * made of -- the target and its size, how many vertices, whether the pass clears,
 		 * how many scissor rectangles were asked for (and not honoured, see
