@@ -95,6 +95,7 @@
 #import <objc/runtime.h>
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 
 #include "redwood_drawable.h"
 #include <stdarg.h>
@@ -4158,10 +4159,9 @@ done:
 @end
 
 /*
- * A switch's number, from the environment first and the kernel's boot-args second. The
- * environment is the one that works in every process: a sandboxed one (SpringBoard) may be
- * refused `kern.bootargs`, and the run's own launchd job plist is where the variable is set
- * anyway. The boot-arg form stays for a run that cannot edit a plist.
+ * A switch's number, in the order that each channel fails: the environment, then a line of
+ * /redwood/etc/metal.switches (a file in the read-only root, which no sandbox refuses and
+ * which a local build can change without one), then the kernel's boot-args.
  */
 static int
 redwood_metal_switch(const char *name, int fallback)
@@ -4169,11 +4169,26 @@ redwood_metal_switch(const char *name, int fallback)
 	const char *value = getenv(name);
 	char args[1024] = "";
 	size_t size = sizeof(args) - 1;
+	size_t length = strlen(name);
 	char key[64];
 	const char *at;
+	FILE *file;
 
 	if (value != NULL && *value != '\0') {
 		return (int)strtol(value, NULL, 10);
+	}
+	if ((file = fopen("/redwood/etc/metal.switches", "r")) != NULL) {
+		char line[128];
+
+		while (fgets(line, sizeof(line), file) != NULL) {
+			if (strncmp(line, name, length) == 0 && line[length] == '=') {
+				int number = (int)strtol(line + length + 1, NULL, 10);
+
+				fclose(file);
+				return number;
+			}
+		}
+		fclose(file);
 	}
 	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) {
 		return fallback;
@@ -4183,6 +4198,36 @@ redwood_metal_switch(const char *name, int fallback)
 		return fallback;
 	}
 	return (int)strtol(at + strlen(key), NULL, 10);
+}
+
+/*
+ * A line to the console, opened by name rather than trusting file descriptor 2. A launchd
+ * job's stderr is said to go to /dev/console in its own plist, and for a sandboxed one it
+ * may go nowhere at all -- which is the difference between "the frontend drew nothing" and
+ * "the frontend drew and nobody could hear it". The fd is only a fallback.
+ */
+static void
+redwood_metal_say(const char *format, ...)
+{
+	static int console = -2;
+	char line[512];
+	va_list ap;
+	int n, fd;
+
+	va_start(ap, format);
+	n = vsnprintf(line, sizeof(line), format, ap);
+	va_end(ap);
+	if (n <= 0) {
+		return;
+	}
+	if (n > (int)sizeof(line) - 1) {
+		n = (int)sizeof(line) - 1;
+	}
+	if (console == -2) {
+		console = open("/dev/console", O_WRONLY);
+	}
+	fd = console >= 0 ? console : 2;
+	(void)!write(fd, line, (size_t)n);
 }
 
 /* Milliseconds since boot, the same clock the log's own timestamps use. */
@@ -4488,7 +4533,7 @@ redwood_metal_now_ms(void)
 	if (said < (watching ? 64u : 8u) && (rect.x != 0 || rect.y != 0 ||
 	    (NSUInteger)rect.width != w || (NSUInteger)rect.height != h)) {
 		said++;
-		rw_print("a scissor rectangle of %lux%lu at %lu,%lu is asked for of a %lux%lu "
+		redwood_metal_say("a scissor rectangle of %lux%lu at %lu,%lu is asked for of a %lux%lu "
 		         "attachment and this driver clips nothing: the draw covers the whole "
 		         "attachment\n", (unsigned long)rect.width, (unsigned long)rect.height,
 		         (unsigned long)rect.x, (unsigned long)rect.y, (unsigned long)w,
@@ -4636,7 +4681,7 @@ redwood_metal_now_ms(void)
 			const char *want = getenv("RW_METAL_TRACE");
 			id first = _colorCount > 0 ? _color[0] : _depth;
 
-			rw_print("metal: the first draw of this process: RW_METAL_TRACE=%s, into %lux%lu "
+			redwood_metal_say("metal: the first draw of this process: RW_METAL_TRACE=%s, into %lux%lu "
 			         "x%u, %u %s, %u textures\n", want != NULL ? want : "(unset)",
 			         (unsigned long)(first != nil ? [first width] : 0),
 			         (unsigned long)(first != nil ? [first height] : 0), _colorCount,
@@ -4675,7 +4720,7 @@ redwood_metal_now_ms(void)
 				used += (size_t)snprintf(what + used, sizeof(what) - used, " [%u] %lux%lu",
 				    i, (unsigned long)[texture width], (unsigned long)[texture height]);
 			}
-			rw_print("metal draw %u: into %lux%lu x%u%s%s, %u %s, %u scissor%s, textures%s\n",
+			redwood_metal_say("metal draw %u: into %lux%lu x%u%s%s, %u %s, %u scissor%s, textures%s\n",
 			    logged, (unsigned long)(first != nil ? [first width] : 0),
 			    (unsigned long)(first != nil ? [first height] : 0), _colorCount,
 			    _clears ? ", clears colour" : "",
