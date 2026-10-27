@@ -193,9 +193,45 @@ Measured 2026-10-25: stages 1–20 pass with the rebuilt kernel (`ae42f3e3…`).
 
 Kernel `6f2542d0…` replaces the exact firmware-size gate with structural validation (size range, `%4`, `fw[0]`/`fw[1]` version words, FNV fingerprint), so both this device's 85300-byte SQE and the upstream 85364-byte image are accepted and identified. Cold and back-to-back warm stage-20 runs both pass; the second run logs `waking retained RSC sleep state` (`logs/giulia/20261025-175732-run.log`, `logs/giulia/20261025-175752-run.log`).
 
-The probe tears the GPU down at the end (`probe ended; CX off=1; software rendering continues`). For persistent GPU/Metal rendering, rerun with `--gpu-keep --metal` and the **full** `root-daily` plus its `fw/` directory; the minimal `root-gmu.apfs` has no `metal_props` or `display_test`. The desktop window server still uses OpenGL ES, and there is no A750 reset/recovery.
+The probe tears the GPU down at the end (`probe ended; CX off=1; software
+rendering continues`) unless `--gpu-keep` is set: then the owner thread sleeps
+in `a750_keep_wait`, the backend stays published (`persistent startup ready=1`)
+and the GPU is torn down only when the system stops. Use `--gpu-keep --metal`
+with the **full** `root-daily` plus its `fw/` directory; the minimal
+`root-gmu.apfs` has no `metal_props` or `display_test`. The loader's return
+timer starts when the loader boots, so `enter` + `ramdisk` (~75 s) already
+consume part of it: use `--seconds 600` for a keep run, or the timer can expire
+right after the ~100 s probe and return to the loader before the UI paints.
 
-**Live compositor caveat (2026-10-25).** With `--gpu-keep`, the backend publishes and `display_test` passes all nine cases (`bad=0`, `COMPLETE failures=0`), but the window server's live compositing produces ghosted/blank tiles and torn frames — with `--metal` and without it, and with `display_test`/`metal_props` removed from `rc.jobs` (`logs/giulia/20261025-183725-screen.png`, `-184449-screen.png`, `-185215-screen.png`, `-190216-screen.png`). Waiting scanout on the backend's last fence (`MiniIOSurfaceDrawn`) does not fix it; the fault is in the compositor's surface lifetime/command stream, not scanout order. Use `gpu=0` (no `--gpu-keep`) for a correct 10 fps UI until per-client page tables and per-surface fences land.
+**Repacking the root on Windows.** The GPU test needs `fw/` in the small root.
+The CI-built `root-daily.apfs` is correct; a repack from the artifact tree on
+Windows is not, because the zip loses empty directories and the Unix modes.
+Repack with a **tab-separated** manifest (the parser splits on tabs, not
+spaces), 0755 for `bin/` and `sbin/`, and the `hal/RedwoodAudio.driver` symlink:
+
+```bash
+python3 local/tools/mkroot-manifest.py local/root-daily local/root-daily.manifest
+python3 tools/apfs/mkapfs.py -z --plain fw -o local/root-daily-fw.apfs \
+  redwood=local/root-daily,manifest=local/root-daily.manifest
+```
+
+Without the manifest, `stage0` fails with `cannot run /redwood/sbin/init:
+Permission denied` and the kernel halts right after `load_init_program`.
+
+**Live compositor fixed 2026-10-27 (kernel `ab9839f`).** The ghosting/torn
+frames came from the CP context reset that ran on *every* submit:
+`CP_RESET_CONTEXT_STATE 0xf` clears the BR/BV counters and the resource table
+that a7xx binning keeps across a frame. UniXNU's A740 driver runs it only when
+the client context changes; this port has one context, so it now runs on the
+first submission of a session (`giulia_gpu_live.h`), and a map no longer
+invalidates the TLB (it only fills invalid leaves; unmap keeps the invalidate).
+With `--gpu-keep --metal` the window server composites correctly: icons,
+labels, Dock, status bar and the display scaler are pixel-aligned, with no
+torn/duplicated/stale rectangles (`logs/giulia/20261027-115244-screen.png`).
+`RedwoodGPUDisplay` scales 1125x2436 → 1264x2780 in 4.6 ms, and the framebuffer
+reports 10 fps with ~0.9 ms waiting for the GPU. What remains is content, not
+composition: the Weather and Calendar widget slots are pure white (the widget
+layer never drew), a separate content-service issue.
 
 If lock timeouts or watchdog messages appear at 4/8 cores, add `timeout_scale = 2` to `platform_giulia` in `xnuloader/loader.c` and rebuild the loader.
 
