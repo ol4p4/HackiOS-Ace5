@@ -218,20 +218,35 @@ python3 tools/apfs/mkapfs.py -z --plain fw -o local/root-daily-fw.apfs \
 Without the manifest, `stage0` fails with `cannot run /redwood/sbin/init:
 Permission denied` and the kernel halts right after `load_init_program`.
 
-**Live compositor fixed 2026-10-27 (kernel `ab9839f`).** The ghosting/torn
-frames came from the CP context reset that ran on *every* submit:
-`CP_RESET_CONTEXT_STATE 0xf` clears the BR/BV counters and the resource table
-that a7xx binning keeps across a frame. UniXNU's A740 driver runs it only when
-the client context changes; this port has one context, so it now runs on the
-first submission of a session (`giulia_gpu_live.h`), and a map no longer
-invalidates the TLB (it only fills invalid leaves; unmap keeps the invalidate).
-With `--gpu-keep --metal` the window server composites correctly: icons,
-labels, Dock, status bar and the display scaler are pixel-aligned, with no
-torn/duplicated/stale rectangles (`logs/giulia/20261027-115244-screen.png`).
-`RedwoodGPUDisplay` scales 1125x2436 → 1264x2780 in 4.6 ms, and the framebuffer
-reports 10 fps with ~0.9 ms waiting for the GPU. What remains is content, not
-composition: the Weather and Calendar widget slots are pure white (the widget
-layer never drew), a separate content-service issue.
+**Compositor state 2026-10-27 (kernel `ab9839f`).** The per-submit CP context
+reset was a real defect and is fixed: `CP_RESET_CONTEXT_STATE 0xf` clears the
+BR/BV counters and the resource table a7xx binning keeps across a frame, and
+UniXNU's A740 driver runs it only on a client context change. This port has one
+context, so it now runs on the first submission of a session; a map no longer
+invalidates the TLB (it fills invalid leaves; unmap keeps the invalidate).
+
+With `--gpu-keep --metal` the **home screen** composites correctly: icons,
+labels, Dock, status bar and the scaler are pixel-aligned, no
+torn/duplicated/stale rectangles (`logs/giulia/20261027-115244-screen.png`);
+`RedwoodGPUDisplay` scales 1125x2436 → 1264x2780 in 4.6 ms and the framebuffer
+reports 10 fps with ~0.9 ms waiting for the GPU.
+
+**Control Center is still corrupted, and that is the open defect.** With
+`--metal`: two large tile-quantized black masses (upper-right and lower-right),
+a stray purple triangle over Bluetooth, clipped sliders, and the Now Playing
+module and status-bar clock missing
+(`logs/giulia/20261027-121100-screen.png`). Without `--metal` (GL/Mesa): a
+full-height center stripe of black/white/noise and a tile-quantized colour-noise
+block at the bottom (`logs/giulia/20261027-122049-screen.png`). Both paths miss
+the status-bar clock and Now Playing content. The corruption is confined to
+large/blurred/multi-pass surfaces — the home screen's opaque icons are fine — so
+the next step is the a7xx binning/GMEM tile path in the userspace driver, not
+scanout or the submit ring. The kernel's GET_PARAM mapping matches msm_drm.h
+(GMEM_SIZE 3 MiB, CHIP_ID 0x443051401, GMEM_BASE 0x1000000, HIGHEST_BANK_BIT
+16, UBWC_SWIZZLE 6, MACROTILE_MODE 1); a full-screen triangle/quad test and a
+comparison of the Metal frontend's tile stores with UniXNU AdrenoMetal are the
+next probes. The Weather/Calendar widget slots are also still pure white (a
+content-service issue, separate from the Control Center corruption).
 
 If lock timeouts or watchdog messages appear at 4/8 cores, add `timeout_scale = 2` to `platform_giulia` in `xnuloader/loader.c` and rebuild the loader.
 
