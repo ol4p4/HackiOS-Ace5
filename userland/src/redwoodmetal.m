@@ -4163,6 +4163,7 @@ done:
 	unsigned _colorCount;
 	float _clearColor[4];
 	BOOL _clears;
+	unsigned _clearWanted;              /* attachments whose load action is Clear, whether or not they were honoured */
 	id _depth;
 	id _depthStencilState;
 	float _clearDepth;
@@ -4226,14 +4227,35 @@ done:
 			         [attachment resolveTexture] != nil ? ", with a resolveTexture"
 								  : "");
 		}
-		if (i == 0 && [attachment loadAction] == MTLLoadActionClear) {
-			MTLClearColor c = [attachment clearColor];
+		if ([attachment loadAction] == MTLLoadActionClear) {
+			_clearWanted++;
+			if (i == 0) {
+				MTLClearColor c = [attachment clearColor];
 
-			_clearColor[0] = (float)c.red;
-			_clearColor[1] = (float)c.green;
-			_clearColor[2] = (float)c.blue;
-			_clearColor[3] = (float)c.alpha;
-			_clears = YES;
+				_clearColor[0] = (float)c.red;
+				_clearColor[1] = (float)c.green;
+				_clearColor[2] = (float)c.blue;
+				_clearColor[3] = (float)c.alpha;
+				_clears = YES;
+			}
+		}
+	}
+	/*
+	 * One clear colour for the whole pass: rwa_draw carries a single clear_color and
+	 * Gallium's clear takes every attachment at once. Attachment 0's colour is the one
+	 * used, which is exact for the passes CoreAnimation has been seen to make (one
+	 * colour attachment) and wrong for a pass that clears a second one with a different
+	 * colour -- that one would get attachment 0's, and a loaded attachment would lose
+	 * what it held. Said out loud rather than silently painted; the per-attachment form
+	 * needs a clear colour per attachment in the contract, which the library has not.
+	 */
+	if (_clearWanted > 1) {
+		static unsigned said;
+
+		if (said++ < 16) {
+			rw_print("%u colour attachments ask for a clear and this driver has one "
+			         "clear colour (attachment 0's): the others get that one, and any "
+			         "loaded attachment loses what it held\n", _clearWanted);
 		}
 	}
 	/*
@@ -4484,6 +4506,19 @@ done:
 	work->clearStencil = _clearStencil;
 	work->clearsDepth = _clearsDepth;
 	work->clearsStencil = _clearsStencil;
+	/*
+	 * A load action belongs to the PASS, not to every draw in it: Metal clears once, at
+	 * the start of the pass, and every draw after that adds to what is there. Handing the
+	 * same clear to every draw made rwa_render_draw clear the attachments again before
+	 * each of them, so only the LAST draw of a multi-draw pass survived and everything
+	 * the earlier ones put down was wiped -- which reads as those draws never having
+	 * been made, in exactly the large multi-draw passes (a blur chain, a card made of
+	 * several quads) where the picture first goes wrong. The first draw of the pass
+	 * carries the clear; the ones after it carry none.
+	 */
+	_clears = NO;
+	_clearsDepth = NO;
+	_clearsStencil = NO;
 	work->stencilReference[0] = _stencilReference[0];
 	work->stencilReference[1] = _stencilReference[1];
 	work->depthRange[0] = _depthRange[0];
@@ -5490,6 +5525,28 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
  */
 - (void)endEncoding
 {
+	/*
+	 * A pass whose only work was its load action. The clear travels with a draw -- it is
+	 * made inside rwa_render_draw, which refuses a draw of no vertices -- so a pass that
+	 * recorded no draw clears nothing at all and its attachments keep whatever they held
+	 * from whenever they were last written (or from the pool, if they never were). That
+	 * is the "a pass that draws nothing never cleared" shape Bergamota documents for its
+	 * own frontend, and the way out of it is a clear that does not need a draw; the
+	 * library has no such entry point yet, so the case is at least named here instead of
+	 * passing silently.
+	 */
+	if (_clears || _clearsDepth || _clearsStencil) {
+		static unsigned said;
+
+		if (said++ < 16) {
+			rw_print("a pass of %u colour attachment%s asked for a %s clear and "
+			         "recorded no draw: nothing is cleared and the attachments keep "
+			         "what they held\n", _colorCount, _colorCount == 1 ? "" : "s",
+			         _clears ? (_clearsDepth || _clearsStencil ? "colour, depth and stencil"
+			                                                   : "colour")
+			                 : (_clearsDepth ? "depth" : "stencil"));
+		}
+	}
 	[super endEncoding];
 }
 

@@ -850,6 +850,23 @@ RedwoodGPUUserClient::surfaceBuffer(struct redwood_surface * request)
 	}
 	if (s->client != NULL) {
 		/* (memory of a program's own with a surface made around it: not in whole pages, and seldom in rows the GPU takes) */
+		/*
+		 * Said out loud, because this is the one refusal that leaves a surface with no way
+		 * to be drawn into at all: the client gets no buffer, so whatever wanted to write
+		 * its pixels writes nothing and the surface keeps what it held. It is the same
+		 * starting point Bergamota had to solve with a writable GPU alias for exactly
+		 * these surfaces ("Control Center platters, live icons: black squares and bars").
+		 * If these lines name the Control Center cards, the fix is that alias and not
+		 * anything in the compositor.
+		 */
+		static uint32_t said;
+
+		if (said++ < 16) {
+			IOLog("RedwoodGPU: surface %u (%ux%u, %u bytes per row, %u bytes) is asked for and it is "
+			    "memory of a program's own: it cannot be a buffer of the GPU's, so nothing can draw "
+			    "into it\n", s->sid, s->info.width, s->info.height, s->info.bytesPerRow,
+			    s->info.allocSize);
+		}
 		MiniIOSurfaceDrop(s);
 		return kIOReturnUnsupported;
 	}

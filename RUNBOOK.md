@@ -248,6 +248,243 @@ comparison of the Metal frontend's tile stores with UniXNU AdrenoMetal are the
 next probes. The Weather/Calendar widget slots are also still pure white (a
 content-service issue, separate from the Control Center corruption).
 
+**Measured 2026-10-27 13:20, and the tiling theory is wrong.** The same Metal
+boot was repeated with `FD_MESA_DEBUG=notile` in SpringBoard's and backboardd's
+job environment (`local/root-daily/LaunchDaemons/*.plist`, repacked with
+`local/tools/mkroot-manifest.py` + `tools/apfs/mkapfs.py`). Two things changed:
+the purple wedge over the Bluetooth toggle disappeared (13 852 px, the button
+then looked right), and the bottom black panel turned into grey/white/yellow
+horizontal bands. Everything else was **pixel-identical** — the diagonal black
+wedge (boundary within 0.85 px), the axis-aligned black rectangle below it, the
+brightness slider's hard-cut top edge, the missing clock and the battery's 4x25
+px red bar. So tiling of Mesa's internal buffers accounts for the purple wedge
+only, not for the 49.9 % of the frame that is black.
+
+What the pixels say about the wedge: its edge runs from (93, 200) to (1040,
+2239) — a smooth ~25° line (slope dx/dy 0.475, 1-2 px steps, not tile-sized
+steps), and the bottom black rectangle starts at x 586, y 2255 with exact
+horizontal and vertical edges. A straight diagonal plus axis-aligned edges is
+the outline of **one quadrilateral drawn with a wrong vertex**, not of a surface
+read with a wrong layout: the blur/backdrop is a full-screen quad, and one
+corner of it lands somewhere else. `notile` leaves vertex buffers untouched,
+which is why the shape did not move. The GL path's 266 px vertical band is the
+same class of fault with a different producer.
+
+Two facts that point the search at vertex data rather than at raster state: the
+defect is byte-stable across runs and across two builds, and simple geometry is
+fine (`gl_test`, `display_test` 9/9), so it is a specific buffer or address that
+is wrong, not a general rasterisation fault. The kernel's live map refuses a
+leaf that is already valid (`a750_live_map`), so a VA reused before its unmap
+would silently keep the old page — worth checking before anything in the
+userspace driver. `glskip=N` / `glshow=WxH` (boot-args read by `eagl.c`) are the
+cheapest way to name the program that paints the black region.
+
+**Measured 2026-10-27 14:26: the kept-buffer path is not the cause.** The same
+Metal boot with `gpu_keep=0` (every buffer made afresh, none reused) is
+pixel-identical to `gpu_keep=1`: 51.4 % of the frame black against 51.3 %, and
+0.49 % of pixels differ, which is the noise between two independent frames of the
+same UI. The `fKept` reuse in `iokit/Kernel/RedwoodGPU.cpp` (a buffer of the
+program's own given back and given again uncleared) is therefore exonerated, and
+so is everything that depends on it.
+
+**The trace probes work, but only where `eagl` draws.** Two traps cost a run
+each:
+
+- `gltrace_at=SECONDS` counts from the moment `eagl`'s constructor runs in that
+  process, and the compositor stops drawing when nothing has changed: the last
+  frame of a 480 s run is 820, and a `gltrace_at` later than that never fires.
+  Use `gltrace_draws=N` instead — it fires on the frame after one with exactly
+  N draws, and Control Center's settled frames have a stable count (199 without
+  `--metal`, 205 with it) while the home screen has 10.
+- With `--metal` the big black wedge is **SpringBoard's**, drawn by RedwoodMetal,
+  which does not go through `eagl` at all; `eagl` sees only backboardd's GL
+  compositing. Trace the GL path (no `--metal`) or instrument `redwoodmetal.m`.
+
+**One traced GL frame, 2026-10-27 14:53** (`gltrace_draws=199 gltrace_frames=1
+gltrace_lit=1`, frame 752, 199 draws, 19 clears, log
+`logs/giulia/20261027-145323-run.log`): the display surface (framebuffer 6,
+1125x2436) reaches **98.5 % non-black** after draw #83 (program 37, the
+full-screen backdrop) and then falls to **85.9 %** — 346 891 pixels are turned
+black *after* the backdrop is in place. Every large drop is **program 62**:
+
+| draw | program | texture sampled | pixels blackened |
+| --- | --- | --- | --- |
+| 124 | 62 | 391x392 | 8 823 |
+| 130 | 62 | 455x456 | 108 924 |
+| 152 | 62 | 285x613 | 37 734 |
+| 173 | 62 | 1131x2442 (a snapshot of the screen) | 199 098 |
+| 200 | 7 | 205x456 | 42 714 |
+
+So program 62 is the backdrop/vibrancy pass: it draws a full-screen quad into
+the display, sampling one of the small offscreen blur targets (and once a
+1131x2442 snapshot), and it writes black where the thing it samples is black or
+where its own geometry/texcoords do not cover the target. The blur chain that
+fills those targets is the next thing to read (framebuffers 94, 93, 60, 98, 41,
+90, 26, 99 — cleared and drawn within the same frame, all under the scissor
+`(0, 96, 1125, 1920)`).
+
+**Fixed 2026-10-27, `userland/src/redwoodmetal.m`: the clear was made once per
+draw, not once per pass.** `_clears` (and `_clearsDepth`, `_clearsStencil`) was
+set from the pass descriptor and never reset, and `recordDraw:` copies it into
+every work item; `rwa_render_draw` then runs `pipe->clear()` before *each* draw.
+A pass whose load action is Clear therefore wiped the attachments again before
+every draw, so only the **last** draw of a multi-draw pass survived — everything
+the earlier ones put down was gone, which reads exactly like those draws never
+having been made, in exactly the multi-draw passes (a blur chain, a card made of
+several quads) where the picture first goes wrong. The load action now belongs to
+the first draw of the pass and to nothing after it. Two diagnostics went in with
+it: a pass that asks for a clear and records no draw (the clear is made inside
+`rwa_render_draw`, which refuses a draw of no vertices, so it is lost — the same
+shape Bergamota calls "a pass that draws nothing never cleared"), and a pass with
+more than one colour attachment asking for a clear (this driver has one clear
+colour, attachment 0's). `surfaceBuffer()` in `RedwoodGPU.cpp` now also says out
+loud when it refuses a surface that is memory of a program's own
+(`s->client != NULL`), because that surface can then never be drawn into at all.
+
+A second traced frame, the same run's neighbour (frame 751, `gltrace_place` +
+`gltrace_look`), has a *different* draw mix: 185 listed draws, program 62 only
+twice, both small quads over the Focus card leaving white. The two frames either
+side of the Control Center transition therefore differ enough that a single
+traced frame is only representative of the moment it was taken — pick the
+trigger so that the traced frame is a *settled* one (`gltrace_draws=N` with the
+settled count, then read the frame number against the `redwood-gl: frame`
+lines), not one inside the swipe.
+
+Black coverage of every screenshot so far, for reference (`max(r,g,b) < 24`):
+`121100` (Metal, Control Center) 51.3 %, `132016` (Metal, `notile`) 50.6 %,
+`142640` (Metal, `gpu_keep=0`) 51.4 %, `122049` (GL, Control Center) 4.3 %,
+`115244` (Metal, home screen) 55.2 % but visually correct — the home screen's
+wallpaper is genuinely dark, so this number alone says nothing about a frame;
+only the *difference* between two frames of the same UI does.
+
+**The display path is not a suspect for the black.** `RedwoodGPUDisplay`
+(`iokit/Kernel/RedwoodGPUDisplay.h`) is a single `RM6_BLIT2DSCALE` blit from the
+composited IOSurface to the panel, with the source rect and the destination rect
+both validated against their surfaces (`displayRectValid`) and the whole panel
+covered by `dst`. A frame that is 85.9 % non-black in the framebuffer reads back
+85.9 % non-black on the panel; the black is in the *source* surface, i.e. in what
+the compositor drew, and the scaler is not making it.
+
+**Measured 2026-10-27 15:23: `gpu_cached=1` changes nothing either.** The Metal
+boot with `gpu_cached=1` (cacheable buffers plus an explicit `dc civac` of every
+buffer the submission names, instead of the write-combined default that assumes
+the CPU's writes are already in memory) is **byte-identical** to the
+`gpu_keep=0` and `gpu_keep=1` runs: 0.00 % of pixels differ from
+`20261027-142640-screen.png`, and the frame is 51.4 % black in all three. Two
+conclusions: the CPU/GPU memory-visibility path (`gGPUCached`, `redwood_gpu_to_memory`,
+the write-combined assumption in `submit()`) is exonerated, and **the corruption
+is a deterministic function of the draw stream alone** — three different boots
+with three different memory knobs produce the same picture to the pixel. The
+per-frame wait grew from ~500 to ~1200 µs, so the knob did take effect.
+
+**The two paths fail differently, and the difference is diagnostic.**
+
+- Metal (`--metal`): large pure-black masses — 51 % of the frame. Nothing has
+  been written there, and it reads back as zeros.
+- GL (no `--metal`): **bright RGB noise** (red/magenta/green/blue patches), a
+  solid bright-green block over the home indicator, a narrow dark vertical
+  stripe at the top centre, plus the same clipped brightness slider, the same
+  empty Now Playing card and the same missing clock
+  (`logs/giulia/20261027-151348-screen.png`).
+
+Bright multi-coloured noise is *garbage*, not a colour: the difference between
+the two paths is only what the untouched memory happens to hold (zeros for the
+Metal path's surfaces, recycled heap for the GL path's). So the shared fault is
+**a region of a surface that the renderer never writes and something later
+samples anyway** — a pass that does not cover its whole target. In the GL path
+the lit-count trace shows exactly that shape: the frame reaches 98.5 % non-black
+after the backdrop (draw #83), then program 62 — the backdrop/vibrancy pass —
+repeatedly draws a full-screen quad sampling one of the small offscreen blur
+targets (455x456, 285x613, 391x392) and *lowers* the count, which is what
+sampling an uncovered corner of a blur target looks like.
+
+**Next probes, cheapest first.**
+
+1. `glshow=WxH` is documented but did not fire in this build: `show_texture()`
+   is only called from the `frame_end` loop for an image that is both
+   `.target` and `.drawn` (`userland/src/eagl.c`), and in the 15:13 run no image
+   met both conditions — neither the "the texture N, ..." line nor the
+   "there is no texture of 455 x 456" line was printed at all. Either fix that
+   gate or make it say why it skipped, before relying on it.
+2. Show the blur target directly (`glshow=455x456` after the gate is fixed) and
+   look at its corner: if it holds noise, the blur chain is the producer.
+3. `glskip=62` to confirm program 62 as the producer of the GL-path noise.
+4. The Metal path is the one the user sees and it has no equivalent hook:
+   `RedwoodMetal` does not go through `eagl`, so it needs its own instrumentation
+   in `userland/src/redwoodmetal.m` (a per-draw log of target, viewport, scissor
+   and the pixel the draw leaves at its own centre).
+
+### What other ports hit, and how they fixed it (2026-10-27)
+
+The same *class* — a surface region the renderer never writes and something
+later samples — is documented in detail by `ry-diffusion/Bergamota` (a6xx,
+Adreno 630/640, iOS 16/18/26; `docs/GPU_EAGL.md`, `docs/METAL_ADRENO630.md`).
+Their symptoms, verbatim, and ours:
+
+| Bergamota's symptom | Ours |
+| --- | --- |
+| "Client-memory (wrapped) IOSurfaces are read-only for the GPU and for backboardd's own mapping, so the render server could not deliver pixels into them (**Control Center platters**, live icons: **black squares and bars**)" | Control Center is the only screen that breaks; its cards stay black |
+| "a clear-only pass was lost and the drawable kept the picture from three frames earlier" | stale/garbage content in a region |
+| "the shim kept all of them and copied every attachment at every flush, so **older textures overwrote the surface with older pixels**" | the GL path's grey smear over half the frame |
+| "One clear colour for every attachment … an attachment-0 clear destroyed a loaded attachment 1" | not yet checked in `RedwoodMetal` |
+| GPU "reads past their last row into the guard page after every BO" (wrapped surfaces, mapped read-only with no tail page) | plausible for the 1131x2442 snapshot (6 px larger than the display) |
+| GMEM tiling ruled out with `TU_DEBUG=sysmem` | ruled out with `FD_MESA_DEBUG=notile` — same conclusion |
+
+**Their fixes, in the order they matter to us:**
+
+1. **Load actions are one piece of work of their own at the start of the pass**
+   (`BG_WORK_CLEAR` → `rwa_render_clear`), each attachment to its own colour,
+   loaded ones untouched. A clear must never live inside the first draw.
+2. **Only the latest attachment per surface is kept**, plus dirty tracking, so an
+   older texture cannot overwrite a newer one.
+3. **A writable GPU alias for client-memory surfaces** (`SBO_IN_WRITABLE_ALIAS`,
+   the reply's `alias_addr + offset` is pixel (0,0) of a read-write write-back
+   mapping). Without it, Control Center's platters cannot be written at all.
+4. **Copy wrapped surfaces instead of mapping them** (guard-page slack), because
+   the GPU reads past the last row.
+5. Cache ordering: clean+invalidate *after* the GPU write, never a write-back of
+   dirty CPU lines over GPU pixels.
+
+**Two places in our tree already have the same shape:**
+
+- `userland/src/redwoodmetal.m` takes the clear colour from **attachment 0 only**
+  (`if (i == 0 && [attachment loadAction] == MTLLoadActionClear)`) and passes one
+  `work->clearColor` for the whole render work — Bergamota's fix 1. The clear
+  itself does travel as its own field of the render work, so their "a pass that
+  draws nothing never cleared" does not apply; the per-attachment colour does.
+- `RedwoodGPUUserClient::surfaceBuffer()` returns `kIOReturnUnsupported` for any
+  surface with `s->client != NULL` (`iokit/Kernel/RedwoodGPU.cpp`), i.e. a
+  client-memory IOSurface can never become a GPU buffer at all. `MiniIOSurface`
+  creates exactly those for memory a program of its own hands over, and maps them
+  read-only in the kernel — the same starting point Bergamota had to solve with
+  fix 3. Whether Control Center's platters are such surfaces is the first thing to
+  log (a line in `surfaceBuffer`'s refusal path would say so).
+
+**Why UniXNU does not show this**: its Metal path is not a hand-rolled frontend
+at all — Metal → metal2vulkan → **Turnip** (a mature a7xx Vulkan driver) → IR3,
+so binning, tile stores and clears come from upstream Mesa. It also publishes
+**per-process** Metal devices (its own docs note that Metal-only layers — wallpaper,
+icons, widgets — go black when only backboardd has a device), keeps BOs in a
+1 GiB contiguous write-combined pool, invalidates the TLB per unmap rather than
+per submission, and forces the render server's framebuffer to plain BGRA when
+CoreAnimation takes Metal. `tycykp/UniXNU-OnePlus-Ace5` has no compositor yet (its
+A750 is a preparation service only), and `oosexgang/hackios-xnu-kernel` ships only
+`hakios.adreno.c` on the GL/freedreno path with no Metal device, so neither has
+reached this class of failure.
+
+**The clock and Now Playing are not running at all.** `SpringBoard` asks for
+`com.apple.chronoservices` and launchd answers "Could not find job with label
+com.apple.chronod", 559 times in one session; `/usr/libexec` has no `chronod`,
+but `System/Library/PrivateFrameworks/ChronoCore.framework/Support/chronod` and
+`.../MediaRemote.framework/Support/mediaremoted` are both in the system image.
+Only their job plists were never staged (the default `IOS_JOBS` list does not
+name them, and `/System/Library/LaunchDaemons` is a symlink to
+`/redwood/LaunchDaemons`). A hand-written `com.apple.chronod.plist`
+(`MachServices com.apple.chronoservices`, `RunAtLoad`) is now in the local root;
+whether RenderBox then starts or aborts is the next thing to read. RenderBox's
+`default.metallib` is present (655 304 bytes), so the old "chronod dies for want
+of a metallib" note no longer applies to this image.
+
 If lock timeouts or watchdog messages appear at 4/8 cores, add `timeout_scale = 2` to `platform_giulia` in `xnuloader/loader.c` and rebuild the loader.
 
 ### Rollback
