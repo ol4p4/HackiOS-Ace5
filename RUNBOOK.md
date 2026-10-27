@@ -209,24 +209,25 @@ Revert `tools/ace5/phone.py`, `common/devices/giulia.conf`, and the optional `ti
 
 **Stop here until Phase 1 is stable and the backup is verified.**
 
-> **Resolved 2026-10-26:** `userdata` is still metadata-encrypted, but the f2fs
-> superblock is plaintext on the mapper device (`/dev/block/dm-N`), not on
-> `/dev/block/by-name/userdata` (= `sda15`, ciphertext). `tools/ace5/extract-hw.sh`
-> now resolves the mapper device through `/dev/block/mapper/userdata` and reads
-> the superblock and `segment_info` there. The saved GPT passes
-> `userdata-carve.py --preflight`: 15 partitions, unit 233.9 GiB, `userdata`
-> entry 14 (`sda15`) lba 3920350..61321210 (218.97 GiB) is the last partition and
-> reaches the end of the unit, so a 20 GiB `darwin` takes entry 15 (`sda16`)
-> lba 56078331..61321210. The carve is the destructive step and still needs an
-> explicit go-ahead and a verified backup.
+> **Executed 2026-10-26 (destructive step done):** `userdata` is metadata-encrypted,
+> but the f2fs superblock is plaintext on the mapper device (`/dev/block/dm-N`),
+> not on `/dev/block/by-name/userdata` (= `sda15`, ciphertext).
+> `tools/ace5/extract-hw.sh` resolves the mapper device and reads the superblock
+> and `segment_info` there. The tail 20 GiB held 4.18 GiB of data (2142 segments,
+> the last one at the very end), so the pre-shrink dry run refused as designed.
+> The 6.1.75 kernel's `f2fs_resize_fs` then GC'd that data before shrinking:
+> `f2fs-resize /data 52157952` took 24 s and moved `block_count` 57,400,861 ->
+> 52,157,981. The table was made from the post-shrink state, and Android boots
+> with `/data` at 198.97 GiB and every `fsck.f2fs` check OK. Result:
+> **userdata** entry 14 ends at 56,078,330; **darwin** entry 15 is
+> lba 56,078,336..61,321,210 (20.000 GiB, APFS container type, unique GUID
+> `086cbf2b-c897-40e5-a2eb-f08ff566fb75`).
 
-The persistence stack exists but is disabled today:
+The persistence stack exists but is disabled in the diagnostic/kernel stages:
 
-- `tools/ace5/build-loader.sh` compiled `HACKIOS_STORAGE_WRITES=0`.
-- `phone.py` required `storage-writes=disabled` and a manifest allowing only `logdump`.
-- The run command line had no `ufs=2 ufs_write=1 var_store=1`.
-
-This branch enables it as a separate `persist` stage; the diagnostic and kernel loaders stay write-disabled.
+- `tools/ace5/build-loader.sh` compiles `HACKIOS_STORAGE_WRITES=0` for them.
+- `phone.py` requires `storage-writes=disabled` there and a manifest allowing only `logdump`.
+- The persist stage (`build-loader.sh persist`) enables `ufs=2 ufs_write=1 var_store=1`.
 
 ### 2.1 Carve the `darwin` partition
 
@@ -235,24 +236,48 @@ This branch enables it as a separate `persist` stage; the diagnostic and kernel 
 python3 tools/userdata-carve.py local/device 20 darwin --preflight
 
 # 2. The f2fs superblock and segment map, from the mapper device (plaintext only there).
-#    extract-hw.sh does this and warns if the magic is not f2fs.
 ACE5_SERIAL="$ACE5_SERIAL" tools/ace5/extract-hw.sh local/device
 od -An -tx1 -j 1024 -N 4 local/device/userdata-meta-before.bin   # want 10 20 f5 f2
-
-# 3. Reads the saved GPT and superblock; writes gpt-head.new / gpt-tail.new only.
-python3 tools/userdata-carve.py local/device 20 darwin
 ```
 
-Follow the printed instructions **in one Android session, no reboot between steps**:
+If the tail is free, `python3 tools/userdata-carve.py local/device 20 darwin`
+prints the target and the dd commands. **On this phone it refuses** ("segments
+past the new end hold data"); that is the expected first state. Let the kernel
+move the data first, in one Android session with no reboot:
 
-1. Push `local/tools/f2fs-resize` (built by CI, `tools/android/build.sh`) and run
-   it on `/data` with the printed block count.
-2. Save the new first block from the **mapper** device as `local/device/sb-after.bin`:
-   `adb exec-out su -c 'dd if=/dev/block/dm-N bs=4096 count=1' > local/device/sb-after.bin`
-   (resolve `dm-N` fresh: `readlink -f /dev/block/mapper/userdata`).
-3. Re-run `userdata-carve.py` to verify the shrunk size and produce the final table.
-4. Write the two GPT copies with the printed `dd` commands.
-5. Reboot Android: `df /data` shows the shrunk size and `/dev/block/by-name/darwin` exists.
+```bash
+# 3a. Shrink the f2fs by 20 GiB (the kernel GCs the tail; 24 s measured).
+adb push local/tools/f2fs-resize /data/local/tmp/f2fs-resize
+adb shell su -c '/data/local/tmp/f2fs-resize /data 52157952'
+
+# 3b. Capture the post-shrink state (mapper device, resolved fresh).
+adb shell su -c 'dd if=/dev/block/dm-74 bs=4096 count=1 2>/dev/null' > local/device/sb-after.bin
+adb shell su -c 'cat /proc/fs/f2fs/dm-74/segment_info' > local/device/segment_info-after.txt
+
+# 3c. Make the table from the post-shrink state: no further shrink (0 GiB),
+#     the free tail becomes darwin.
+mkdir -p local/device-after
+cp local/device/gpt-head.bin local/device/gpt-tail.bin local/device-after/
+cp local/device/sb-after.bin local/device-after/userdata-meta-before.bin
+cp local/device/segment_info-after.txt local/device-after/segment_info-before.txt
+python3 tools/userdata-carve.py local/device-after 0 darwin
+```
+
+Then write the two GPT copies with the printed `dd` commands. Use **absolute
+paths**: `adb shell su -c 'cd DIR && dd ...'` is split at `&&` by the device
+shell, and the dd would run as the shell user. The three writes are:
+
+```bash
+adb push local/device-after/gpt-head.new /data/local/tmp/gpt-head.new
+adb push local/device-after/gpt-tail.new /data/local/tmp/gpt-tail.new
+adb shell su -c 'dd if=/data/local/tmp/gpt-head.new of=/dev/block/sda bs=4096 skip=2 seek=2 count=1 conv=notrunc,fsync'
+adb shell su -c 'dd if=/data/local/tmp/gpt-head.new of=/dev/block/sda bs=4096 skip=1 seek=1 count=1 conv=notrunc,fsync'
+adb shell su -c 'dd if=/data/local/tmp/gpt-tail.new of=/dev/block/sda bs=4096 skip=3 seek=61321211 count=5 conv=notrunc,fsync'
+```
+
+Read the three ranges back and compare with the new files before rebooting.
+After the reboot, `df /data` shows 198.97 GiB, `/dev/block/by-name/darwin` is
+`sda16`, and `fsck.f2fs` reports every check OK.
 
 This is the destructive step: it shrinks `userdata` and gives the tail to `darwin`. If `userdata-carve.py` refuses, do not force it; the f2fs may hold data past the new end.
 
@@ -320,6 +345,29 @@ Acceptance:
 - A stamped file survives a loader return and a new run.
 - Android still boots after `phone.py reboot`.
 - No write outside `darwin`: the loader's `block_is_darwin()` and the kernel's name/LBA checks must both pass; if either is edited, re-check the other.
+
+**Measured 2026-10-27** (persist loader `a23a8d09…`):
+
+- Boot 1, empty store: `var_store: no store yet: /private/var stays as init made it`.
+  On return: `saving into slot 0 (slot -1 holds generation 0)`, `slot 0: generation 1,
+  11004 entries, 38181328 bytes, crc 7e36e5ec`, `8298 blocks into the flash, 1024 left
+  alone`; the kernel counted `11 writes into darwin, 33996800 bytes, read back the
+  same; 0 refused`; the saver finished in 1,680 ms.
+- Boot 2, fresh loader after `reboot` and a re-staged system image:
+  `var_store: slot 0: generation 1 of … seconds, 11004 entries, 38181328 bytes`, then
+  `4950 directories, 903 files (36526240 bytes), 2 links back in /private/var`.
+  On return: `saving into slot 1 (slot 0 holds generation 1)`, `slot 1: generation 2,
+  10993 entries, 38362760 bytes, crc 9cdd6eff`, `86 entries and 23541530 bytes of it
+  were written since the last save (306 seconds ago)`, `8342 blocks into the flash`.
+- Android still boots afterwards: `/data` 199G, `by-name/darwin` → `sda16`.
+
+Two operational notes from the run:
+
+- A second `run` in the **same** loader session fails at `core 100: the firmware
+  answers 0 to the request to start it`; reboot, re-enter the persist loader and
+  re-stage the system image between runs (the RAM root does not survive the reboot).
+- `phone.py` prints `not enough values to unpack (expected 3, got 0)` after a clean
+  return (the screenshot fetch); the run and the save are unaffected.
 
 ### Rollback
 
