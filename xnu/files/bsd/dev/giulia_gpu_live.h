@@ -44,7 +44,13 @@ static bool a750_live_map(uint64_t address,uint64_t phys,bool readonly)
     a750_flush((vm_offset_t)pte,sizeof(*pte));
     return true;
 }
+/* A map fills only leaves that were invalid, so no TLB entry can describe the
+ * new pages: nothing to invalidate here. Unmap does its own invalidation. */
 static void a750_live_mapped(void)
+{
+    __sync_synchronize();
+}
+static void a750_live_invalidate(void)
 {
     if (!a750_live.session) return;
     vm_offset_t smmu=a750_live.session->smmu;
@@ -60,7 +66,7 @@ static void a750_live_unmap(uint64_t address,uint64_t size)
         uint64_t *pte=a750_leaf(&a750_live.session->gx->memory,(uint32_t)(address+off),false);
         if (pte) { *pte=0;a750_flush((vm_offset_t)pte,sizeof(*pte)); }
     }
-    a750_live_mapped();
+    a750_live_invalidate();
 }
 static bool a750_live_done(uint32_t fence)
 {
@@ -88,8 +94,12 @@ static uint32_t a750_live_submit(const uint64_t *addresses,const uint32_t *words
     uint32_t fence=a750_live.fence+1;
     if (!fence) fence=1;
     uint32_t packet[580];
-    /* No private page tables yet: reset context state on every client submit. */
-    unsigned n=a750_submit_words(packet,580,addresses,words,count,a750_live.fence,fence,true);
+    /* One GPU context: the reset entry belongs to the first submission, not to
+     * every frame. UniXNU runs it only when the client context changes; doing
+     * it per submit clears the BR/BV counters and the resource table that a7xx
+     * binning keeps across a frame, and costs a cache invalidate each time. */
+    bool reset=a750_live.fence==0;
+    unsigned n=a750_submit_words(packet,580,addresses,words,count,a750_live.fence,fence,reset);
     if (!n) return 0;
     unsigned room=0;
     for (unsigned i=0;i<5000;i++) {
