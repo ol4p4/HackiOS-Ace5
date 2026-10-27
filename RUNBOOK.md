@@ -364,7 +364,26 @@ the same run). So, for this workload: no pass asks for a clear and records no
 draw; no pass clears more than one colour attachment; and **no surface that is
 memory of a program's own is ever asked for as a buffer** — `surfaceBuffer()`'s
 `kIOReturnUnsupported` path was never taken, which rules out Bergamota's
-"client-memory Control Center platters" explanation for this port.
+"client-memory Control Center platters" explanation for this port. (The
+"multisample" count was a red herring at first: three of those hits are the GL
+extension list `GL_EXT_multisampled_render_to_texture`, not the frontend's own
+message. Grep for the sentence, not the word.)
+
+**Open question 2026-10-27 19:00, and everything staged to answer it with one
+run.** A per-draw probe in `redwoodmetal.m` has never produced a line: not the
+windowed trace, not even an unconditional "the first draw of this process"
+line. Either RedwoodMetal draws nothing on this device, or a sandboxed
+SpringBoard's output reaches no log at all — and the two have opposite
+consequences, because the 51.4 %→21.5 % improvement is otherwise only explicable
+by the clear fix inside that same `recordDraw:`. Two independent channels are now
+in place and everything is staged: the probe writes to `/dev/console` opened by
+name instead of trusting file descriptor 2 (`redwood_metal_say`), and the switch
+is read from the environment, then `/redwood/etc/metal.switches`, then the
+boot-args (`redwood_metal_switch`). `local/root-daily/etc/metal.switches` holds
+`RW_METAL_TRACE=800` and `RW_METAL_TRACE_AFTER=100`, SpringBoard's plist carries
+the same two variables, and `local/root-daily-fw.apfs` is repacked with both. One
+300 s `--metal` run says which of the two it is; if the first-draw line appears,
+its `RW_METAL_TRACE=` field also says whether the environment channel works.
 
 A second traced frame, the same run's neighbour (frame 751, `gltrace_place` +
 `gltrace_look`), has a *different* draw mix: 185 listed draws, program 62 only
