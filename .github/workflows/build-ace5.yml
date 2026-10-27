@@ -189,13 +189,15 @@ jobs:
             System=local/system-metal,manifest=ios165/system.manifest
           tools/apfs/check-image.sh local/system-metal.apfs \
             System=local/system-metal,manifest=ios165/system.manifest
-          split -b 900m local/system-metal.apfs local/system-metal.apfs.part-
           ls -lh out/giulia-kernel/mach.ace5-public \
             out/giulia-kernel/hackios-giulia-kernel.img \
-            local/root-daily.apfs local/system-metal.apfs.part-*
+            local/root-daily.apfs local/system-metal.apfs
 
       # The plain root-daily tree lets a local build add the proprietary fw/
-      # files and repack; the firmware itself never leaves the device.
+      # files and repack; the firmware itself never leaves the device. The big
+      # system image is built and checked above but deliberately NOT uploaded:
+      # it is Apple's iOS system volume, and a public build artifact is a
+      # redistribution of it. A local run makes its own with prepare-gpu-system.
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -213,11 +215,3 @@ jobs:
             ${{ env.ACE5_ROOT }}/local/root-daily.apfs
             ${{ env.ACE5_ROOT }}/local/root-daily/
             ${{ env.ACE5_ROOT }}/local/tools/f2fs-resize
-
-      - name: Upload system image
-        uses: actions/upload-artifact@v4
-        with:
-          name: ace5-system
-          if-no-files-found: error
-          retention-days: 7
-          path: ${{ env.ACE5_ROOT }}/local/system-metal.apfs.part-*
