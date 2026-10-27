@@ -102,6 +102,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/sysctl.h>
+#include <mach/mach_time.h>
 #include <unistd.h>
 
 /* The contract with Mesa's side, copied here rather than included: this file is built by
@@ -4157,19 +4158,23 @@ done:
 @end
 
 /*
- * A boot-arg's number, or `fallback` when the argument is not there. The kernel's boot-args
- * are where a run is told things -- the same channel -featureProfile reads metal_profile=
- * from -- and these two are this file's switches: metal_trace=N writes down the next N
- * draws, metal_scissors=1 every scissor rectangle asked for.
+ * A switch's number, from the environment first and the kernel's boot-args second. The
+ * environment is the one that works in every process: a sandboxed one (SpringBoard) may be
+ * refused `kern.bootargs`, and the run's own launchd job plist is where the variable is set
+ * anyway. The boot-arg form stays for a run that cannot edit a plist.
  */
 static int
-redwood_metal_boot_number(const char *name, int fallback)
+redwood_metal_switch(const char *name, int fallback)
 {
+	const char *value = getenv(name);
 	char args[1024] = "";
 	size_t size = sizeof(args) - 1;
 	char key[64];
 	const char *at;
 
+	if (value != NULL && *value != '\0') {
+		return (int)strtol(value, NULL, 10);
+	}
 	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) {
 		return fallback;
 	}
@@ -4178,6 +4183,18 @@ redwood_metal_boot_number(const char *name, int fallback)
 		return fallback;
 	}
 	return (int)strtol(at + strlen(key), NULL, 10);
+}
+
+/* Milliseconds since boot, the same clock the log's own timestamps use. */
+static uint64_t
+redwood_metal_now_ms(void)
+{
+	static mach_timebase_info_data_t base;
+
+	if (base.denom == 0) {
+		mach_timebase_info(&base);
+	}
+	return mach_absolute_time() * base.numer / base.denom / 1000000ull;
 }
 
 @implementation RedwoodMetalRenderEncoder {
@@ -4465,7 +4482,7 @@ redwood_metal_boot_number(const char *name, int fallback)
 	NSUInteger w = first != nil ? [first width] : 0, h = first != nil ? [first height] : 0;
 
 	if (watching < 0) {
-		watching = redwood_metal_boot_number("metal_scissors", 0);
+		watching = redwood_metal_switch("RW_METAL_SCISSORS", 0);
 	}
 	_scissors++;
 	if (said < (watching ? 64u : 8u) && (rect.x != 0 || rect.y != 0 ||
@@ -4607,21 +4624,25 @@ redwood_metal_boot_number(const char *name, int fallback)
 	}
 	{
 		/*
-		 * metal_trace=N: what the first N draws of this process are made of -- the target
-		 * and its size, how many vertices, whether the pass clears, how many scissor
-		 * rectangles were asked for (and not honoured, see -setScissorRect:), and the
-		 * sizes of the textures the fragment stage samples. Written down per draw,
-		 * because a picture that went wrong has to have the draw that put the wrong
-		 * pixels in it findable in the log rather than guessed at.
+		 * RW_METAL_TRACE=N (or metal_trace=N in the boot-args): what the next N draws are
+		 * made of -- the target and its size, how many vertices, whether the pass clears,
+		 * how many scissor rectangles were asked for (and not honoured, see
+		 * -setScissorRect:), and the sizes of the textures the fragment stage samples.
+		 * RW_METAL_TRACE_AFTER=S (default 0) holds the first line back until S seconds
+		 * after boot, so a window can be aimed at the frames that go wrong instead of at
+		 * process startup. Written down per draw because a picture that went wrong has to
+		 * have the draw that put the wrong pixels in it findable in the log.
 		 */
-		static int tracing = -1;
+		static int tracing = -1, after = -1;
 		static unsigned logged;
 		id first = _colorCount > 0 ? _color[0] : _depth;
 
 		if (tracing < 0) {
-			tracing = redwood_metal_boot_number("metal_trace", 0);
+			tracing = redwood_metal_switch("RW_METAL_TRACE", 0);
+			after = redwood_metal_switch("RW_METAL_TRACE_AFTER", 0);
 		}
-		if (tracing > 0 && (int)logged < tracing && first != nil && [first width] >= 1000) {
+		if (tracing > 0 && (int)logged < tracing && first != nil && [first width] >= 64 &&
+		    redwood_metal_now_ms() >= (uint64_t)(after > 0 ? after : 0) * 1000ull) {
 			char what[256] = "";
 			size_t used = 0;
 
