@@ -326,20 +326,45 @@ fills those targets is the next thing to read (framebuffers 94, 93, 60, 98, 41,
 **Fixed 2026-10-27, `userland/src/redwoodmetal.m`: the clear was made once per
 draw, not once per pass.** `_clears` (and `_clearsDepth`, `_clearsStencil`) was
 set from the pass descriptor and never reset, and `recordDraw:` copies it into
-every work item; `rwa_render_draw` then runs `pipe->clear()` before *each* draw.
-A pass whose load action is Clear therefore wiped the attachments again before
-every draw, so only the **last** draw of a multi-draw pass survived — everything
+every work item, so `rwa_render_draw` ran `pipe->clear()` before *each* draw. A
+pass whose load action is Clear therefore wiped its attachments again before
+every draw and only the **last** draw of a multi-draw pass survived — everything
 the earlier ones put down was gone, which reads exactly like those draws never
 having been made, in exactly the multi-draw passes (a blur chain, a card made of
 several quads) where the picture first goes wrong. The load action now belongs to
-the first draw of the pass and to nothing after it. Two diagnostics went in with
-it: a pass that asks for a clear and records no draw (the clear is made inside
-`rwa_render_draw`, which refuses a draw of no vertices, so it is lost — the same
-shape Bergamota calls "a pass that draws nothing never cleared"), and a pass with
-more than one colour attachment asking for a clear (this driver has one clear
-colour, attachment 0's). `surfaceBuffer()` in `RedwoodGPU.cpp` now also says out
-loud when it refuses a surface that is memory of a program's own
-(`s->client != NULL`), because that surface can then never be drawn into at all.
+the first draw of the pass and to nothing after it.
+
+**Measured 2026-10-27 17:06: that was the biggest single defect so far, and it is
+not the only one.** Same root, same `rc.jobs` (the swipe restored — `install-artifact
+--force` had overwritten the hand-edited one, which is why the 16:56 run never
+opened Control Center), same `--metal`, same 300 s; only `_clears = NO` differs.
+Black coverage 51.4 % → **21.5 %**, mean brightness 41.6 → 83.2, and the band
+y 600-1300 that was 30-65 % black is **0.0 %** black in every 100-row slice
+(`logs/giulia/20261027-170627-screen.png`). The huge diagonal wedge is gone and
+the wallpaper is drawn where it was; the brightness slider is back to full
+height; the calculator and camera cards have their fills again.
+
+What is left, measured the same way:
+
+- the top band y 0-500 is still black (100 % / 97.5 % / 74 % / 81 % / 82 % per
+  100 rows) with a stepped lower edge, and the status-bar clock is still missing
+  (that is the chronod/RenderBox issue, not this one);
+- two saturated-colour blocks that were *not* visible before: a red/orange speck
+  blob on the calculator/camera card edge (x 0.60-0.90, y 0.635-0.72) and a
+  red/cyan/magenta/yellow block around the home indicator (x 0.47-0.90,
+  y 0.83-0.99). Saturated pixels 0.06 % → **5.07 %**. Repeated clearing used to
+  wipe these regions every draw, so they were hidden rather than absent;
+- a grey stepped smear where the old wedge's edge ran, and an opaque grey block
+  over the top half of the brightness slider;
+- the Now Playing card is now *present* but empty — content, not compositing.
+
+**The three diagnostics that went in with the fix did not fire**, and `rw_print`
+does reach the log (an existing "multisample resolve" message appears 3 times in
+the same run). So, for this workload: no pass asks for a clear and records no
+draw; no pass clears more than one colour attachment; and **no surface that is
+memory of a program's own is ever asked for as a buffer** — `surfaceBuffer()`'s
+`kIOReturnUnsupported` path was never taken, which rules out Bergamota's
+"client-memory Control Center platters" explanation for this port.
 
 A second traced frame, the same run's neighbour (frame 751, `gltrace_place` +
 `gltrace_look`), has a *different* draw mix: 185 listed draws, program 62 only
