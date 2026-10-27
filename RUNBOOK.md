@@ -334,10 +334,31 @@ having been made, in exactly the multi-draw passes (a blur chain, a card made of
 several quads) where the picture first goes wrong. The load action now belongs to
 the first draw of the pass and to nothing after it.
 
-**Measured 2026-10-27 17:06: that was the biggest single defect so far, and it is
-not the only one.** Same root, same `rc.jobs` (the swipe restored — `install-artifact
---force` had overwritten the hand-edited one, which is why the 16:56 run never
-opened Control Center), same `--metal`, same 300 s; only `_clears = NO` differs.
+**Measured 2026-10-27 19:55: that improvement did NOT reproduce, and the
+attribution above is withdrawn.** The same root, same `rc.jobs`, same `--metal`,
+240 s: **51.4 % black, mean 41.6 — the same numbers as the 14:26 baseline to the
+first decimal** (`logs/giulia/20261027-195509-screen.png`). Fifty-four minutes
+earlier the same build had given **4.0 % black, mean 83.8**
+(`20261027-190136-screen.png`). So the picture is **not deterministic across
+boots** — three mutually identical runs earlier in the day made it look as if it
+were — and the 21.5 % frame was a better-condition sample of the same
+distribution, not a fix taking effect. The per-pass clear is still a real bug and
+its fix stays in, but nothing measured so far shows it changing the picture.
+
+**And the Metal frontend is not drawing the UI at all.** With an unconditional
+"the first draw of this process" line in `recordDraw:`, written through
+`/dev/console` opened by name, switched on by a file in the read-only root *and*
+by the job's environment — it never appears, in any run. The UI is drawn by
+`eagl`/Mesa in backboardd (its `redwood-gl: frame` lines are the only renderer
+that speaks), and both the 4.0 % and the 51.4 % frames come from that one path.
+RedwoodMetal is present and can be exercised by the `metal_*` tools, but
+CoreAnimation is not using it on this device — most likely because `metal_props
+on` runs ~60 s into the session (`rc.jobs` puts `rwtouch wait 60` first) while
+SpringBoard's CoreAnimation asks for its device in the first seconds. That is the
+next thing to test: put `metal_props on` first in `rc.jobs` and see whether the
+Metal frontend then draws (its first-draw line would say so) and whether the
+picture changes.
+
 Black coverage 51.4 % → **21.5 %**, mean brightness 41.6 → 83.2, and the band
 y 600-1300 that was 30-65 % black is **0.0 %** black in every 100-row slice
 (`logs/giulia/20261027-170627-screen.png`). The huge diagonal wedge is gone and
