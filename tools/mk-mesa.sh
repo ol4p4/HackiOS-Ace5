@@ -102,10 +102,20 @@ endian = 'little'
 needs_exe_wrapper = true
 INI
 DRIVERS=${DRIVERS:-softpipe,freedreno}
-BUILD=build-${DRIVERS//,/-}
+# VULKAN=1 also builds Turnip, Mesa's freedreno Vulkan driver, as
+# libvulkan_freedreno.dylib: the evaluation of the "real driver" route (see
+# RUNBOOK.md, 2026-10-28). It talks to the same kernel service through the same
+# tools/mesa/redwood-drm shim; nothing else changes for the GL library.
+VULKAN=${VULKAN:-0}
+if [ "$VULKAN" = 1 ]; then
+	VULKAN_DRIVERS=freedreno
+else
+	VULKAN_DRIVERS=
+fi
+BUILD=build-${DRIVERS//,/-}$([ "$VULKAN" = 1 ] && echo -vulkan)
 [ -f $BUILD/build.ninja ] || meson setup $BUILD mesa-$VERSION --cross-file cross.ini --wrap-mode=nofallback \
 	--prefix=/redwood --libdir=lib --buildtype=release -Db_ndebug=true \
-	-Dplatforms= -Dgallium-drivers="$DRIVERS" -Dfreedreno-kmds=msm -Dvulkan-drivers= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
+	-Dplatforms= -Dgallium-drivers="$DRIVERS" -Dfreedreno-kmds=msm -Dvulkan-drivers="$VULKAN_DRIVERS" -Dglx=disabled -Degl=disabled -Dgbm=disabled \
 	-Dosmesa=true -Dllvm=disabled -Dshared-glapi=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=true \
 	-Dzstd=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dshader-cache=disabled -Dvalgrind=disabled \
 	-Dlibunwind=disabled -Dglvnd=disabled -Dvideo-codecs= -Dtools= -Dgallium-vdpau=disabled -Dgallium-va=disabled \
@@ -137,6 +147,23 @@ llvm-strip -x -o out/libOSMesa.8.dylib $BUILD/src/gallium/targets/osmesa/libOSMe
 install_name_tool -id /redwood/lib/libOSMesa.8.dylib out/libOSMesa.8.dylib
 nm -gU out/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > out/exported-gl.txt
 cp mesa-$VERSION/src/mapi/glapi/registry/gl.xml out/gl.xml
+
+# Turnip, when VULKAN=1: the freedreno Vulkan driver, built against the same
+# tools/mesa/redwood-drm shim and the same kernel service as the GL driver. It
+# is loaded by tools/vulkan/turnip_test through vk_icdGetInstanceProcAddr, and
+# its entry points are the ICD's, so it is named the way the device's libraries
+# are and keeps its global symbols like libredwoodair does.
+if [ "$VULKAN" = 1 ]; then
+	TURNIP=$(ls $BUILD/src/freedreno/vulkan/libvulkan_freedreno.dylib \
+	            $BUILD/src/freedreno/vulkan/libvulkan_freedreno.so 2>/dev/null | head -1)
+	[ -n "$TURNIP" ] || { echo "mk-mesa.sh: VULKAN=1 but libvulkan_freedreno was not built" >&2; exit 1; }
+	llvm-strip -x -o out/libvulkan_freedreno.dylib "$TURNIP"
+	install_name_tool -id /redwood/lib/libvulkan_freedreno.dylib out/libvulkan_freedreno.dylib
+	nm -gU out/libvulkan_freedreno.dylib | grep -E ' _vk_icd(GetInstanceProcAddr|NegotiateLoaderICDInterfaceVersion)' \
+		|| { echo "mk-mesa.sh: libvulkan_freedreno exports no ICD entry points" >&2; exit 1; }
+	echo "mk-mesa.sh: $B/out/libvulkan_freedreno.dylib ($(stat -c %s out/libvulkan_freedreno.dylib) bytes)"
+fi
+
 # (userland/build.sh comes here again when this no longer matches)
 cat "$ROOT"/tools/mesa/*.patch "$ROOT"/tools/mesa/redwood-drm/* | sha256sum > out/built-from
 echo "mk-mesa.sh: Mesa $VERSION ($DRIVERS): $B/out/libOSMesa.8.dylib, $(stat -c %s out/libOSMesa.8.dylib) bytes," \

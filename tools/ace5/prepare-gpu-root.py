@@ -50,6 +50,11 @@ if args.metal:
                for name in ['RedwoodMetal', 'Info.plist']]
 if args.app:
     copies += [(args.components / 'battery_test', Path('bin/battery_test'))]
+# Turnip, when the Mesa build has it (VULKAN=1): the ICD library and the gate
+# program. Optional, so a build without it still makes an image.
+if (args.components / 'libvulkan_freedreno.dylib').exists():
+    copies += [(args.components / 'libvulkan_freedreno.dylib', Path('lib/libvulkan_freedreno.dylib')),
+               (args.components / 'turnip_test', Path('bin/turnip_test'))]
 required = [src for src, _ in copies] + [args.base / 'etc/rc', args.base / 'lib/libredwood.dylib']
 if args.compositor_threading:
     required.append(args.base / 'LaunchDaemons/com.apple.backboardd.plist')

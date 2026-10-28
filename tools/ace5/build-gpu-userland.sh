@@ -33,6 +33,18 @@ xnu-clang -arch arm64 -isysroot "$SDK" -O2 \
     -o "$OUTPUT/display_test" tools/ace5/display-test.c
 cp "$MESA/libOSMesa.8.dylib" "$OUTPUT/libOSMesa.8.dylib"
 sha256sum "$OUTPUT/libOSMesa.8.dylib" "$OUTPUT/libredwood-gl.dylib" "$OUTPUT/gl_test" "$OUTPUT/display_test"
+# Turnip, when the Mesa build has it (VULKAN=1 tools/mk-mesa.sh): the ICD dylib
+# and the gate program that asks whether it can reach our GPU at all. Optional,
+# so a Mesa built without it still makes an image.
+if [ -f "$MESA/libvulkan_freedreno.dylib" ]; then
+    cp "$MESA/libvulkan_freedreno.dylib" "$OUTPUT/libvulkan_freedreno.dylib"
+    # No link against the ICD: turnip_test dlopen()s it, so only the Vulkan
+    # headers of the build host are needed, and the device path is the library's
+    # install name.
+    xnu-clang -arch arm64 -isysroot "$SDK" -O1 -I"${VULKAN_INC:-/usr/include}" \
+        -o "$OUTPUT/turnip_test" tools/vulkan/turnip_test.c
+    sha256sum "$OUTPUT/libvulkan_freedreno.dylib" "$OUTPUT/turnip_test"
+fi
 if [ "${2:-}" = --metal ]; then
     # Driver and AIR library share an internal struct ABI. Do not silently package
     # an older compiler library after an edit to tools/mesa/air/.
