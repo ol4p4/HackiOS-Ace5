@@ -6905,6 +6905,14 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
     * integer attachment the bits of the float land in the right place when the colour
     * is zero, which is the one air_run uses.
     *
+    * When the driver supplies the newer per-attachment form (clear_colors, see
+    * air_metal.h) it wins: each attachment whose mask bit is set is cleared through
+    * its own pipe->clear with its own colour, because Gallium's single call takes
+    * one colour for every buffer the mask names, and Metal's load actions are
+    * per-attachment -- a pass that clears attachment 1 to transparent while loading
+    * attachment 0 can only be said this way. A bit left clear is Load: the
+    * attachment keeps what it held.
+    *
     * Depth and stencil are each their own pointer and so their own load action, because
     * a pass that clears the depth and keeps the stencil is ordinary and one action for
     * both would be a lie about one of them. Gallium takes all three in one call with a
@@ -6916,8 +6924,19 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
       unsigned mask = 0;
       for (unsigned c = 0; c < 4; c++)
          clear.f[c] = draw->clear_color ? draw->clear_color[c] : 0.0f;
-      if (draw->clear_color)
+      if (draw->clear_colors) {
+         for (unsigned i = 0; i < draw->color_count && i < 8; i++) {
+            if (draw->clear_color_mask & (1u << i)) {
+               union pipe_color_union one;
+
+               for (unsigned c = 0; c < 4; c++)
+                  one.f[c] = draw->clear_colors[i * 4 + c];
+               pipe->clear(pipe, PIPE_CLEAR_COLOR0 << i, NULL, &one, 0.0, 0);
+            }
+         }
+      } else if (draw->clear_color) {
          mask |= PIPE_CLEAR_COLOR;
+      }
       /* An aspect is cleared only if the attachment has it: clearing the stencil of a
        * Depth32Float buffer is a caller's mistake, but Gallium's clear would either
        * ignore it or touch a plane that is not there, and neither is worth finding out

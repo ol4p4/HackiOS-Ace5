@@ -50,7 +50,7 @@
  * to write down (twelve by default); glcensus=1 keeps count of the draws CoreAnimation makes with no
  * program and of the functions it asks for in vain (see census_draw()); glshaders=1 writes down
  * the text of every shader, glshow=TEXTURE (or WxH, with glshow_part=W,H and glshow_zoom=N) puts that texture over the corner of the picture, glplain=0 leaves the
- * draws without a program alone, glskip=N[,N...] leaves out the draws of those programs (see skip_draw()), glcopy=1 copies every IOSurface as if the library could not
+ * draws without a program alone, glskip=N[,N...] leaves out the draws of those programs (see skip_draw()), glzero=0 leaves empty texture uploads holding whatever the driver's memory held (by default they are zeroed, as an iPhone's fresh pages read -- see zero_empty), glcopy=1 copies every IOSurface as if the library could not
  * share one, glwait=1 waits for the GPU at the end of every frame and glwait=0 never (see
  * wait_for_frames), glfetch=0 keeps EXT_shader_framebuffer_fetch from CoreAnimation (see
  * fetch_offered), glgroup=0 leaves vibrant layers inside groups as they were (see group_draw_begin()), glprecision=0 leaves the shaders' "lowp" and "mediump" as they are (see all_highp), glenv=NAME=VALUE puts that into the environment for the library to find
@@ -1881,6 +1881,18 @@ static int plain_draws = 1;
 static int vblur_on = 1;
 
 /*
+ * Boot-arg glzero=0: textures uploaded with no pixels are left holding whatever the driver's
+ * memory holds. By default they are handed zeros instead, because that is what an iPhone's
+ * fresh pages read, and the difference is the boot-to-boot colour noise: CoreAnimation samples
+ * such textures' unwritten corners when it blurs (the small downsample targets behind Control
+ * Center's cards are exactly this shape), and on our driver those corners hold the heap's
+ * last user -- bright RGB speckle one boot, black another, a smear from three frames ago the
+ * next. Zeros make the same picture every boot, which is what a measurement needs; the knob
+ * exists so the difference can be shown rather than argued.
+ */
+static int zero_empty = 1;
+
+/*
  * Halving: a pixel of the level made is the average of the sixteen of the level it is made of
  * around it, by weight (four samples, each the GPU's own average of four pixels), which is what
  * makes a chain of such levels look blurred rather than coarse when it is read back enlarged.
@@ -3323,8 +3335,38 @@ my_glTexImage2D(void *context, GLenum target, GLint level, GLint internal, GLsiz
 	if (target == GL_TEXTURE_2D && e->unit < 8) {
 		group_forget(e, e->bound[e->unit]);
 	}
+	/* An empty upload holds whatever the driver's memory held, and CoreAnimation samples
+	 * those corners (the blur targets behind Control Center): zero it, which is what fresh
+	 * pages read on an iPhone. Four bytes a pixel for the unsigned-byte RGBA/BGRA shapes
+	 * Apple's empty uploads use, eight for half floats; any other shape is left as it was
+	 * rather than mis-filled, and said once. glzero=0 turns the whole thing off. */
+	void *zeros = NULL;
+	size_t zero_bytes = 0;
+	if (zero_empty && pixels == NULL && level == 0 && border == 0 && width > 0 && height > 0) {
+		if (type == GL_UNSIGNED_BYTE && (format == GL_RGBA || format == GL_BGRA)) {
+			zero_bytes = (size_t)width * (size_t)height * 4;
+		} else if (type == 0x140b && format == GL_RGBA) {                       /* GL_HALF_FLOAT */
+			zero_bytes = (size_t)width * (size_t)height * 8;
+		} else {
+			static unsigned told;
+
+			if (told++ < 8) {
+				say("redwood-gl: an empty texture of %d x %d, format %#x type %#x, is left "
+				    "holding whatever the memory held: no zero fill for that shape\n",
+				    width, height, format, type);
+			}
+		}
+		if (zero_bytes != 0) {
+			zeros = malloc(zero_bytes);
+			if (zeros != NULL) {
+				memset(zeros, 0, zero_bytes);
+			}
+		}
+	}
 	uint64_t began = slow_calls_us != 0 ? now_us() : 0;
-	glTexImage2D(target, level, (GLint)internal_format((GLenum)internal, format), width, height, border, format, type, pixels);
+	glTexImage2D(target, level, (GLint)internal_format((GLenum)internal, format), width, height, border, format, type,
+	    pixels != NULL ? pixels : zeros);
+	free(zeros);
 	if (began != 0 && now_us() - began >= slow_calls_us) {
 		/* (with glslow=US: which pictures take long to hand over) */
 		say("tl: slow-tex %dx%d level %d format %#x type %#x%s %llu at %llu\n", width, height, level, format, type,
@@ -4122,6 +4164,7 @@ install(void)
 		}
 		full_precision = strstr(arguments, "glprecision=0") == NULL;
 		vblur_on = strstr(arguments, "vblur=0") != NULL ? 0 : strstr(arguments, "vblur=2") != NULL ? 2 : 1;
+		zero_empty = strstr(arguments, "glzero=0") == NULL;
 		if ((argument = strstr(arguments, "glplain=")) != NULL) {
 			plain_draws = (int)strtoul(argument + 8, NULL, 10);
 		}

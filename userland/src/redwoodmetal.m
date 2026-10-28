@@ -309,6 +309,15 @@ struct rwa_draw {
 	unsigned vertex_buffer_table_count;
 	const struct rwa_buffer_bind *fragment_buffer_table;
 	unsigned fragment_buffer_table_count;
+	/* Per-attachment clear colours, APPENDED to keep every offset above where this
+	 * driver and the library already read them; the contract comment in air_metal.h
+	 * says what they mean. Bit i of clear_color_mask set: colour attachment i begins
+	 * its pass with MTLLoadActionClear and the four floats at clear_colors[i * 4].
+	 * A bit left clear is MTLLoadActionLoad -- the attachment keeps what it held.
+	 * clear_colors NULL (or a mask of nothing) is the older single-colour shape:
+	 * then clear_color applies to every attachment, as the old contract said. */
+	const float *clear_colors;     /* clear_color_mask bit i -> four floats at i*4 */
+	unsigned clear_color_mask;
 };
 
 /*
@@ -1025,6 +1034,13 @@ struct gem_close { uint32_t handle, pad; };
 	unsigned colorCount;
 	float clearColor[4];
 	BOOL clears;
+	/* Per-attachment clears: bit i of clearColorMask set means colour attachment i
+	 * begins the pass with its own clear colour (clearColors[i * 4 .. i * 4 + 3]),
+	 * and a bit left clear means MTLLoadActionLoad -- that attachment keeps what it
+	 * held. The single clearColor above stays for a library built against the older
+	 * contract; a library that reads clear_colors ignores it. */
+	float clearColors[8 * 4];
+	unsigned clearColorMask;
 	/* the depth/stencil attachment of the pass, its two load actions and the state
 	 * bound when the draw was encoded. Separate flags per aspect because Metal keeps
 	 * two attachment descriptors over one texture and a pass that clears the depth and
@@ -3942,6 +3958,8 @@ done:
 		.color = color,
 		.color_count = work->colorCount,
 		.clear_color = work->clears ? work->clearColor : NULL,
+		.clear_colors = work->clearColorMask ? (const float *)work->clearColors : NULL,
+		.clear_color_mask = work->clearColorMask,
 		/* The depth attachment, its two load actions, the state that was bound and
 		 * the depth range of the viewport -- which is where the quad's own depth
 		 * comes from, the generated vertex stage putting every corner at clip z = 0
@@ -4249,7 +4267,8 @@ redwood_metal_now_ms(void)
 	unsigned _colorCount;
 	float _clearColor[4];
 	BOOL _clears;
-	unsigned _clearWanted;              /* attachments whose load action is Clear, whether or not they were honoured */
+	float _clearColors[8 * 4];          /* each attachment's own clear colour */
+	unsigned _clearColorMask;           /* bit i: attachment i clears, with _clearColors[i * 4] */
 	unsigned _scissors;                 /* scissor rectangles asked for (and not honoured: see -setScissorRect:) */
 	id _depth;
 	id _depthStencilState;
@@ -4315,10 +4334,14 @@ redwood_metal_now_ms(void)
 								  : "");
 		}
 		if ([attachment loadAction] == MTLLoadActionClear) {
-			_clearWanted++;
-			if (i == 0) {
-				MTLClearColor c = [attachment clearColor];
+			MTLClearColor c = [attachment clearColor];
 
+			_clearColors[i * 4 + 0] = (float)c.red;
+			_clearColors[i * 4 + 1] = (float)c.green;
+			_clearColors[i * 4 + 2] = (float)c.blue;
+			_clearColors[i * 4 + 3] = (float)c.alpha;
+			_clearColorMask |= 1u << i;
+			if (i == 0) {
 				_clearColor[0] = (float)c.red;
 				_clearColor[1] = (float)c.green;
 				_clearColor[2] = (float)c.blue;
@@ -4328,23 +4351,14 @@ redwood_metal_now_ms(void)
 		}
 	}
 	/*
-	 * One clear colour for the whole pass: rwa_draw carries a single clear_color and
-	 * Gallium's clear takes every attachment at once. Attachment 0's colour is the one
-	 * used, which is exact for the passes CoreAnimation has been seen to make (one
-	 * colour attachment) and wrong for a pass that clears a second one with a different
-	 * colour -- that one would get attachment 0's, and a loaded attachment would lose
-	 * what it held. Said out loud rather than silently painted; the per-attachment form
-	 * needs a clear colour per attachment in the contract, which the library has not.
+	 * Each attachment carries its own clear colour now: _clearColors[] and
+	 * _clearColorMask above are filled per attachment and travel in the draw, and
+	 * the library issues one Gallium clear per attachment that asked (air_metal.c).
+	 * A loaded attachment keeps what it held, which the single-colour form this
+	 * replaces could not say -- it painted every attachment with attachment 0's
+	 * colour, and the clock widget's two-attachment plane_color pass was the first
+	 * on-device shape that needed the per-attachment one.
 	 */
-	if (_clearWanted > 1) {
-		static unsigned said;
-
-		if (said++ < 16) {
-			rw_print("%u colour attachments ask for a clear and this driver has one "
-			         "clear colour (attachment 0's): the others get that one, and any "
-			         "loaded attachment loses what it held\n", _clearWanted);
-		}
-	}
 	/*
 	 * The depth/stencil attachment, which is two descriptors over one texture: for
 	 * MTLPixelFormatDepth32Float_Stencil8 an application sets the same texture on
@@ -4616,6 +4630,10 @@ redwood_metal_now_ms(void)
 	for (unsigned i = 0; i < 4; i++) {
 		work->clearColor[i] = _clearColor[i];
 	}
+	work->clearColorMask = _clearColorMask;
+	for (unsigned i = 0; i < 8 * 4; i++) {
+		work->clearColors[i] = _clearColors[i];
+	}
 	work->depth = _depth;
 	work->depthStencilState = _depthStencilState;
 	work->clearDepth = _clearDepth;
@@ -4633,6 +4651,7 @@ redwood_metal_now_ms(void)
 	 * carries the clear; the ones after it carry none.
 	 */
 	_clears = NO;
+	_clearColorMask = 0;
 	_clearsDepth = NO;
 	_clearsStencil = NO;
 	work->stencilReference[0] = _stencilReference[0];
@@ -5713,15 +5732,15 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 	 * library has no such entry point yet, so the case is at least named here instead of
 	 * passing silently.
 	 */
-	if (_clears || _clearsDepth || _clearsStencil) {
+	if (_clearColorMask || _clearsDepth || _clearsStencil) {
 		static unsigned said;
 
 		if (said++ < 16) {
 			rw_print("a pass of %u colour attachment%s asked for a %s clear and "
 			         "recorded no draw: nothing is cleared and the attachments keep "
 			         "what they held\n", _colorCount, _colorCount == 1 ? "" : "s",
-			         _clears ? (_clearsDepth || _clearsStencil ? "colour, depth and stencil"
-			                                                   : "colour")
+			         _clearColorMask ? (_clearsDepth || _clearsStencil ? "colour, depth and stencil"
+			                                                           : "colour")
 			                 : (_clearsDepth ? "depth" : "stencil"));
 		}
 	}

@@ -359,6 +359,196 @@ next thing to test: put `metal_props on` first in `rc.jobs` and see whether the
 Metal frontend then draws (its first-draw line would say so) and whether the
 picture changes.
 
+**Staged 2026-10-27 20:31, awaiting a device session.** The reorder is in:
+`local/root-daily/etc/rc.jobs` now runs `metal_props on` first (the `wait 60`
+moved behind it), and `local/root-daily-fw.apfs` is repacked from that tree
+(manifest `local/root-daily.manifest`, fw plaintext, switches and SpringBoard
+plist verified inside the image). The timing that makes this the right test, read
+off `20261027-195508-run.log`: the GPU probe holds the first ~108 s of kernel
+time, the GPU backend publishes (`persistent startup ready=1`, kernel 108.381 s),
+and only then does launchd spawn `com.redwood.demo` (wall 11:51:07.587) — so
+`rc.jobs`'s first line now runs right after the service exists and ~2 s before
+SpringBoard's window server asks for a device. The two outcomes:
+
+- `metal_props: no IOAcceleratorES service in the registry` — the launchd job can
+  start before the kernel publishes the service; add a bounded wait or a retry to
+  `metal_props` and re-run.
+- The properties are set near kernel t≈109 s: the first-draw line either appears
+  (timing hypothesis confirmed; its `RW_METAL_TRACE=` field then says whether the
+  environment channel works) or still does not, and the not-drawing question
+  moves to CoreAnimation's own path.
+
+One 300 s `--metal` run decides it:
+
+```bash
+export ACE5_SERIAL=b4cf8812   # oplusboot.serialno
+python3 tools/ace5/phone.py --serial "$ACE5_SERIAL" enter --stage kernel
+python3 tools/ace5/phone.py --serial "$ACE5_SERIAL" ramdisk --image local/system-metal.apfs
+ACE5_CPUS=8 python3 tools/ace5/phone.py --serial "$ACE5_SERIAL" run --seconds 300 \
+  --bootcpu 1 --live-log --live-interval 10 --gpu-keep --metal --gpu-probe 20 \
+  --gpu-direct --kernel out/giulia-kernel/mach.ace5-public \
+  --root-image local/root-daily-fw.apfs
+```
+
+Read it with `grep -a "metal_props\|the first draw of this process\|metal draw"`.
+`local/root-daily.apfs` is the stale CI image (no `fw/`, no swipe step, no
+switches file); the `--gpu-keep --metal` runs must keep using `root-daily-fw.apfs`.
+
+**Measured 2026-10-28 13:03 (`20261028-130831-run.log`): the timing hypothesis
+is confirmed and superseded in one run.** The properties were set at kernel
+121.3 s — before backboardd's CoreAnimation asked — and the service was found
+(no registry race). What followed was not the first-draw line but a new state:
+
+- **SpringBoard took the Metal path.** `redwoodmetal[SpringBoard 7]: blend: …`
+  lines prove it created real Metal pipelines through RedwoodMetal (labels
+  `SiriBlitNearestAdditive`, `SiriSphereMask`, `SiriSphereComposite`, ~27 blend
+  trace lines per instance). backboardd never created a Metal device — on iOS
+  16.5 it is **SpringBoard, the client, that opens Metal**, and the property
+  timing is the renderer-selection switch: set before SpringBoard's device ask
+  → Metal; after (or never) → backboardd's GL path.
+- **Every SpringBoard instance then died at MPS init**: `[MPSImageGaussianBlur
+  initWithDevice:] Failed to get MPSDevice.` (`MPSKernel.mm:95` failed
+  assertion → SIGABRT), 34 times — pids 7, 35, 37, … 73 crash-looping until the
+  kernel returned. The screen was 100 % black; backboardd's GL renderer drew
+  only its 3 boot frames and stopped once no client lived.
+- **The probe never spoke because SpringBoard died before its first draw** —
+  the first-draw line sits in `recordDraw:`, and no draw was ever recorded. The
+  `redwood_metal_say` channel itself is fine: the blend lines reach the log from
+  inside sandboxed SpringBoard.
+
+So the Metal frontend's first on-device blocker is now precise: **MPSDevice
+creation fails on RedwoodMetal** (`MPSImageGaussianBlur` is in SpringBoard's
+startup path — the wallpaper blur). Next step: an MPS probe in the metal suite
+(create `MPSImageGaussianBlur` with our device, log every selector MPS asks and
+the answer) and bisect the capability query it fails on; `metal_caps`' sweep is
+the checklist of what we answer today.
+
+**Measured 2026-10-28 13:45 (`20261028-134527-run.log`): the blocker was the
+feature profile, and one boot-arg clears it.** The driver comment predicted it
+exactly — profile 0 claims Apple1 alone, and **Apple2 is the lowest rung MPS
+asks about**. With `ACE5_CMDLINE="metal_profile=1"` (the existing
+`metal_profile=` knob in `-featureProfile`, no rebuild): 0 MPS aborts (was 34),
+0 SIGABRTs, and **the first-draw line finally appeared** — `metal: the first
+draw of this process: into 465x465 x2, 4 indices, 0 textures`. SpringBoard made
+5 Metal draws in total, one small surface, no scissors. chronod/RenderBox
+opened its own device and built real pipelines (label `plane_color`, two colour
+attachments), and the "2 colour attachments ask for a clear and this driver has
+one clear colour" line fired there — **Bergamota's per-attachment clear colours
+(fix 1) is now a live requirement, not a checklist item**. backboardd opened a
+Metal client too but stopped before pipelines. Two loose ends from the same
+run: the first-draw line's `RW_METAL_TRACE=` field read `(unset)` — the plist
+EnvironmentVariables do not reach `getenv`, though the `etc/metal.switches`
+file channel works (4 windowed trace lines) — and the `surfaceBuffer`
+client-memory refusal never fired (0 lines), so the black regions are not the
+Control Center platters.
+
+The picture (`134527-screen.png`, 45.2 % black): the GL-path speckle noise and
+RGB blocks are **gone** — the client layers that produced them are now
+Metal-rendered and correct — but a stepped black wedge remains on the right.
+
+**And the attribution run (`135809`, GL `rc.jobs` order, same
+`metal_profile=1`, 25.7 % black) pins that wedge on the compositor, not on
+Metal.** The wedge's stepped geometry is the same in both screenshots, so it is
+the `--metal`-boot compositor black mass at yet another sample of its
+non-deterministic size (4.0–51.4 % across boots), while the speckle and RGB
+garbage returns exactly when SpringBoard is back on GL sampling. Two recipes:
+
+- Metal experiment boot: `metal_props on` **first** in `rc.jobs` plus
+  `ACE5_CMDLINE="metal_profile=1"`.
+- Daily GL boot: `rwtouch wait 60` first (the state `rc.jobs` is left in).
+
+Next steps, cheapest first: per-attachment clear colours in `redwoodmetal.m`
+(userland — chronod's pipeline already hits the defect), then the GL
+compositor's uncovered blur-target corners (program 62), which remain the
+product-path bug. Userland changes ride `build-ace5.yml`; kernel changes (the
+writable alias for client-memory surfaces, if a platter ever refuses) ride the
+kernel workflow.
+
+**2026-10-28 14:20, three things read off the same `134527` log.**
+
+- **The clock widget path works; the status-bar clock was never chronod's.**
+  RenderBox (in chronod) failed to open its *precompiled* pipeline cache
+  (`default.pipelinelib/pipelines.Adreno750(chip0x43051401,Redwood)` — the
+  system image ships caches keyed by Apple GPU names only) and Metal then
+  compiled the pipelines from the framework's `default.metallib` at runtime —
+  the `plane_color` blend lines — and **drew**: the first-draw line and all 5
+  Metal draws of that boot are chronod's, into a 465x465 ×2 surface (a widget
+  platter). The missing status-bar clock is SpringBoard's own status-bar
+  rendering, a separate item.
+- **The two-attachment clear defect is fixed in-tree** (`ba66189`): the
+  `rwa_draw` contract gains `clear_colors` + `clear_color_mask` (appended, so
+  every offset the driver and library already read stays), `redwoodmetal.m`
+  collects each attachment's own colour, and `air_metal.c` issues one Gallium
+  clear per attachment through `PIPE_CLEAR_COLOR0 << i`, falling back to the
+  single-colour shape when the driver predates the field. The "one clear colour
+  for the whole pass" complaint is retired. Userland + Mesa side: it builds in
+  the `build-ace5.yml` image; the next CI run carries it, and the first Metal
+  boot after that should show the clock widget's second plane intact.
+- **RenderBox's pipeline-cache miss is worth naming**: if a pipelinelib under
+  our GPU name ever becomes needed (Metal does fall back to compiling from the
+  metallib, as this boot proves), the name to build it under is exactly what
+  `targetDeviceInfo` answers: `pipelines.Adreno750(chip0x43051401,Redwood)`.
+
+### Control Center's rendering, decomposed 2026-10-28 14:33
+
+Asked what to do about Control Center, the evidence now splits it three ways:
+
+1. **The client layers' garbage (blue speckle columns, RGB blocks) is a
+   GL-path read of never-written memory, and it is boot-to-boot random.**
+   `glskip=62` was run to test the old program-62 attribution and **program 62
+   never drew** (0 skip lines) — yet the frame came out nearly clean
+   (`143338-screen.png`: Control Center composited correctly, only the narrow
+   top-centre black stripe and one red/cyan blob at the home indicator left).
+   The same build has given 4.0 %, 21.5 % and 51.4 % black on other boots. So
+   the garbage is not one program: it is whatever memory CoreAnimation's blur
+   chain happened to read before writing it. With SpringBoard on Metal
+   (`metal_profile=1` + properties early) those client layers render
+   correctly; what stays is the compositor wedge, whose geometry is boot-lottery
+   too (same wedge in the GL and Metal runs of 13:45/13:58).
+2. **eagl's own variable-blur chain is dormant on this CoreAnimation, and that
+   is now shown rather than suspected.** The clean run's log has **zero**
+   "blur whose radius varies" lines — neither the level builds (`vblur_level`)
+   nor the mask reads (`vblur_draw_begin`) fire — and, decisively, **no
+   "CoreAnimation gives its function 38/39 numbers" line has appeared in any
+   logged run** (today's or yesterday's), while functions 66, 61, 26 and 18 do
+   log and the vibrant path (which reads the same function id from the same
+   hard-coded CA context offset) creates its programs. So the probe is fine;
+   this CA build never invokes the `vrd`/`vrb` path eagl intercepts — the blur
+   is CoreAnimation's own programs sampling CA's own downsample targets, and
+   eagl's protection (unmade levels bound to the picture) can never apply. The
+   `libredwood-gl.dylib` on the phone is byte-identical across all artifacts
+   (`1312ecaa…`), so this is not a regression: the chain has never engaged on
+   this build. Fixing the coverage therefore cannot ride the vblur path; it has
+   to come from the zero-fill below or from making CA's own chain write what it
+   reads.
+3. **The fix that matches the platform, committed as `d6484e9`.** An iPhone's
+   fresh pages read zero; ours read the heap's last user. `my_glTexImage2D` now
+   hands the driver a zero buffer for every empty RGBA/BGRA upload
+   (half-floats too), which turns the random speckle into defined black,
+   removes the boot-to-boot variance from every future measurement, and makes
+   the remaining defect — the uncovered region itself — the only variable
+   left. `glzero=0` boots the old behaviour for a side-by-side. This rides the
+   next `build-ace5.yml` image.
+
+After that build, the checks in order: one boot with `glzero=1` and one with
+`glzero=0` (the difference *is* the uninitialized-memory hypothesis, shown
+rather than argued); then the compositor wedge itself, which is the same defect
+on both paths and should now be deterministic enough to bisect with
+`gltrace_place` over the wedge and `gltrace_look=1`. The pending userland
+changes now number three and all wait on one CI build: `d6484e9` (zero fill),
+`ba66189` (per-attachment clears), and the runbook-only material in between.
+
+The daily root is back on the GL order: `local/root-daily/etc/rc.jobs` has
+`rwtouch wait 60` first again, repacked and re-verified on hardware
+(`20261028-132636-run.log`: 79 GL frames, 0 MPS aborts, 0 SIGABRTs — identical
+to the 10-27 baseline; Control Center painted with the known GL defects,
+`20261028-132637-screen.png`). **To boot the Metal experiment again, move
+`metal_props on` back to the first line, repack, and add
+`ACE5_CMDLINE="metal_profile=1"`.** Also read off this boot: the hand-written
+`com.apple.chronod.plist` works — chronod spawned (pid 8) and stayed; with the
+Metal profile raised, its RenderBox pipelines compile (`plane_color`), and
+whether the status-bar clock then appears is the next screenshot check.
+
 Black coverage 51.4 % → **21.5 %**, mean brightness 41.6 → 83.2, and the band
 y 600-1300 that was 30-65 % black is **0.0 %** black in every 100-row slice
 (`logs/giulia/20261027-170627-screen.png`). The huge diagonal wedge is gone and
@@ -536,6 +726,93 @@ CoreAnimation takes Metal. `tycykp/UniXNU-OnePlus-Ace5` has no compositor yet (i
 A750 is a preparation service only), and `oosexgang/hackios-xnu-kernel` ships only
 `hakios.adreno.c` on the GL/freedreno path with no Metal device, so neither has
 reached this class of failure.
+
+### What the HackiOS family has verified on hardware, and what transfers (2026-10-27)
+
+Surveyed at the user's request ("the K40 project has GPU and Wi-Fi working"). No
+K40 (alioth) port exists; the working claims belong to this repo's own family.
+Copies of the two key documents are in `local/refs/` (gitignored).
+
+| project | device / SoC | GPU | Wi-Fi |
+| --- | --- | --- | --- |
+| `oosexgang/hackios-xnu-kernel` — the upstream this repo forked | POCO X5 Pro (redwood, SM7375, A642L, WCN6750) | CoreAnimation drawn by `eagl` → OSMesa → freedreno GLES (`gpu=1`), photographed on the phone | WCN6750 ath11k (AHB) on the LinuxKPI layer (`wifi/lx/`), joins from Settings, Safari at 55–90 Mbit/s |
+| `HeliumStudio-Dev/hackios-xnu-kernel` | raphael / K20 Pro (SM8150, A640) | GLES verified (FD640 triangle draw + readback, GL error 0) | WCN399x ICNSS + MPSS (PAS 4) + ath10k SNOC: WPA2 and WPA3-SAE verified with real page loads; re-scan after a Wi-Fi toggle still broken |
+| `iola1999/hackios-redmi-k90-annibale` | K90 (SM8750, A830) | iOS 16.5 desktop drawn on the GPU by `eagl.c` → OSMesa → freedreno; touch usable, page-turn and Control Center animations near full frame | WCN7850 plan only: PCIe RC0 link-up and BHI/PBL readback done 2026-10-27; MHI and ath12k not started |
+
+Neither `ls9875/hackios-umi` (Mi 10: software rendering, no firmware staged) nor
+`FFT-infra/UniXNU-alioth` (the actual K40 repos: lock screen on the UEFI GOP, the
+A650 probe still a to-do) has GPU or Wi-Fi. **Metal/Turnip works nowhere in the
+family**: upstream Metal is 293/456 system shaders in progress, and K90's Turnip
+probe dies with SIGILL after enumeration. The GL path is the shipping path
+everywhere.
+
+What transfers to giulia:
+
+1. **The GL path is the product path.** Keep the Metal probe experiments, but
+   black-region fixes belong to the GL/freedreno path — the same judgement our
+   own GL-vs-Metal split already made.
+2. **K90's framebuffer-fetch cache fix is the nearest known fix for our symptom
+   class.** QuartzCore links OpenGLES and uses framebuffer fetch; Mesa's a6xx/a7xx
+   fetch path invalidates CCU and UCHE before the first fetch, and A8xx needed
+   CCHE on top (their userland `94e4c97`; ~95 screenshots before and after, the
+   known colour blocks went from some to zero). Check what our Mesa does on a750
+   before a frame's first fetch, and note our blur-target "uncovered corner"
+   sampling is the same read-stale-memory class.
+3. **Wi-Fi for WCN785x is chip-matched and already planned**: K90's
+   `docs/plan/wcn7850-plan.md` maps redwood's chain (AHB/PIL/GLINK/QRTR/ath11k —
+   what our tree carries in `redwood_wifi.c`, `redwood_qmi.c`, `redwood_wlfw.c`,
+   `redwood_lx.c`) onto WCN7850: **PCIe RC0 + MHI + ath12k**, with a step table
+   (PCIe link-up → minimal MHI → firmware + WLFW-over-MHI → data plane → en0),
+   4–8 device weeks estimated to first connect, abort criteria, and firmware from
+   linux-firmware `ath12k/WCN7850/hw2.0/` plus the BDF/NV from
+   `/vendor/firmware_mnt/image`. Our `giulia.dtb` is the same shape:
+   `/soc/qcom,pcie@1c00000` + `pcie0_rp`, `pcie_qtb@16cd000`, `cnss_pci0`,
+   `bt_kiwi`, and the stock Android cmdline names the kiwi firmware dirs and
+   `pcie_sm_regs=0x1D07000` — the same constants K90 quotes. The
+   `redwood_net`/`redwood_apple80211`/`RedwoodWLAN` top layer is chip-independent
+   and already in our tree.
+4. **Per-SoC discipline transfers**: the raphael Wi-Fi doc forbids reusing
+   redwood's WCN6750/WPSS/ath11k config on a different chip; each generation needs
+   its own control chain. giulia's is the WCN7850 one, not redwood's.
+
+**Family update 2026-10-28: the PCIe Wi-Fi route now has working in-family
+code.** `azzlantern/hackios-thyme` (Mi 10S, SM8250-AC / SD870 — the same SoC and
+Adreno 650 as a K40) reports on hardware: GPU `THE GPU STAYS ON`, GMU 587 MHz,
+`Mesa 25.0.7; FD650` CoreAnimation hardware rendering, and **Wi-Fi `PCIe →
+amss20 SBL → QMI → radio registered (en0) → networks visible in Settings`**
+(their `docs/thyme-port-summary.md`, copied to `local/refs/`). Its
+acknowledgements credit `DBC1349`'s Mi 10 Ultra as "the first kona phone where
+touch, GPU and Wi-Fi worked on this code base". The driver overlay lives in
+`devices/thyme/overlays/xnu/files/bsd/dev/`: `umi_pcie.c` + `umi_pcie_phy.h`
+(PCIe host), `umi_mhi.c` (MHI), `umi_wifi.c` (the `umi_wifi_step=`
+boot-arg bring-up machine), `hakios.qmi.c`, plus the `wifi/lx/` layer and
+`tools/stage-wifi.py` — exactly the chain K90's plan marked "to be written"
+(its step 0–2), now proven on a PCIe-attached Qualcomm WLAN chip in this tree.
+
+Notes that transfer directly:
+
+- Firmware for the WLAN chip sat in a dedicated firmware partition (51 files:
+  `amss20`/`m3`/`bd_*`/`regdb`); on giulia the equivalents are the `modem`
+  partition (sde6/sde41, mounted at `/vendor/firmware_mnt`, where the stock
+  cmdline already points `firmware_class.path` at `image/kiwi`) and the NV
+  halves are `modemst1`/`modemst2`.
+- `wifi_mac=` from the runtime interface is mandatory or the scan comes back
+  empty; `adb cat` pollutes firmware with CRLF (use `exec-out`).
+- Both thyme and the Mi 10 Ultra hit the same wall: after a run the GPU and
+  TrustZone keep their state, the next run hangs in the GPU steps, and only a
+  cold boot (power 10–15 s) clears it — the same class our loader's return-path
+  teardown has to answer for.
+- Their display-tearing fix (line-rate × rows frame timing on an autorefresh
+  panel) and the diagnostic-mode habit (`umi_wifi_step=2 umi_wifi_return=1`,
+  no system image, auto-return) are both worth copying.
+
+Also updated since the 2026-10-27 survey: `FFT-infra/UniXNU-alioth` (the actual
+K40) is wiring its A650 probe read-only into the device tree — still bring-up,
+no Wi-Fi; `XTOM0706/ios-sweet-k60` (SM8475) is aligning GMU cold start with the
+SM8550 reference and counting painted pixels for full-surface verification, but
+the desktop is still CPU-rendered; `WuuuWeiii/ios-sweet-ci` (polaris, SDM845) is
+working the GPU publish/lazy/reset lifecycle as a patch series; `b1ackm4x`'s
+OnePlus 9 imported upstream modem staging and native Bluetooth helpers.
 
 **The clock and Now Playing are not running at all.** `SpringBoard` asks for
 `com.apple.chronoservices` and launchd answers "Could not find job with label

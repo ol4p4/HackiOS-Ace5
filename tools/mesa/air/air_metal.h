@@ -1301,6 +1301,24 @@ struct rwa_draw {
 	unsigned vertex_buffer_table_count;
 	const struct rwa_buffer_bind *fragment_buffer_table;
 	unsigned fragment_buffer_table_count;
+
+	/* PER-ATTACHMENT CLEAR COLOURS, APPENDED for the same reason the indexed forms
+	 * are: userland/src/redwoodmetal.m holds a hand-typed copy of this struct, and
+	 * appending moves nothing that driver already fills. `clear_color` above stays
+	 * what it was -- one colour for the whole pass, the shape one Gallium
+	 * pipe->clear takes -- and covers a driver built against the older contract.
+	 * When `clear_colors` is not NULL it wins: bit i of `clear_color_mask` set means
+	 * colour attachment i begins its pass with MTLLoadActionClear and the four
+	 * floats at clear_colors[i * 4], and a bit left clear means MTLLoadActionLoad --
+	 * the attachment keeps what it held. That is Metal's own per-attachment shape,
+	 * and the single colour could not say it: a pass that clears attachment 1 to
+	 * transparent while loading attachment 0 (the clock widget's two-attachment
+	 * plane_color pass was the first on-device one) wiped the loaded attachment with
+	 * attachment 0's colour. The mask has room for the 8 colour attachments the
+	 * driver binds; a pass with more has other things to fix first.
+	 */
+	const float *clear_colors;     /* clear_color_mask bit i -> four floats at i*4 */
+	unsigned clear_color_mask;
 };
 
 int rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
