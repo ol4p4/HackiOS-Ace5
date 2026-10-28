@@ -136,7 +136,7 @@
  
 --- a/src/gallium/drivers/freedreno/a6xx/fd6_draw.cc
 +++ b/src/gallium/drivers/freedreno/a6xx/fd6_draw.cc
-@@ -445,6 +445,21 @@
+@@ -445,6 +445,26 @@
         DRAW == DRAW_INDIRECT_OP_INDIRECT_COUNT)
        ctx->batch->barrier |= FD6_WAIT_FOR_ME;
  
