@@ -150,9 +150,14 @@
 +    * triangle of each such quad was wrong, the second right.  A CCU colour
 +    * flush before the draw mends it, and so does a UCHE invalidate alone;
 +    * the first such draw gets both, as a framebuffer barrier would give.
++    * On a750 (OnePlus Ace 5) the pair alone was not enough: invalidating
++    * UCHE before its dirty lines had been written back threw the previous
++    * draws' pixels away, and Control Center's blur read them as heap
++    * leftovers.  FD6_FLUSH_CACHE is the writeback that fd6_texture_barrier
++    * always had and this inline form was missing (2026-10-28).
 +    */
 +   if (unlikely(emit.fs->fb_read) && !ctx->batch->prev_draw_read_fb)
-+      ctx->batch->barrier |= FD6_FLUSH_CCU_COLOR | FD6_INVALIDATE_CACHE;
++      ctx->batch->barrier |= FD6_FLUSH_CCU_COLOR | FD6_FLUSH_CACHE | FD6_INVALIDATE_CACHE;
 +   ctx->batch->prev_draw_read_fb = emit.fs->fb_read;
 +
     if (ctx->batch->barrier)
