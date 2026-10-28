@@ -173,7 +173,10 @@ jobs:
           . local/image-venv/bin/activate
           bash ios165/fetch.sh
           rm -f ios165/*.ipsw ios165/*.dmg ios165/*.dmg.* 2>/dev/null || true
-          AIR=1 VULKAN=1 DRIVERS=softpipe,freedreno tools/mk-mesa.sh
+          AIR=1 VULKAN=1 DRIVERS=softpipe,freedreno tools/mk-mesa.sh || {
+            echo "--- meson-setup.log ---"; tail -60 xnu-deps/build/mesa/meson-setup.log || true;
+            echo "--- ninja.log tail ---"; tail -60 xnu-deps/build/mesa/ninja.log || true;
+            exit 1; }
           GL=1 PREBUILT= bash userland/build.sh
           tools/ace5/build-gpu-userland.sh local/components --metal
           python3 tools/ace5/prepare-gpu-root.py \
