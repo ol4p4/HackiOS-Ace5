@@ -538,6 +538,102 @@ on both paths and should now be deterministic enough to bisect with
 changes now number three and all wait on one CI build: `d6484e9` (zero fill),
 `ba66189` (per-attachment clears), and the runbook-only material in between.
 
+**Measured 2026-10-28 15:20–16:00: the zero-fill build is on the phone and the
+hypothesis it was built for is REFUTED.** CI built `a404ab9c` and its artifact
+(`local/ci-artifact-new`) carries both fixes — the running library proves it
+(`libredwood-gl.dylib` 541960 bytes in the boot log's `/redwood` listing, the
+zero-fill string present, the old "one clear colour" complaint gone from
+`libredwoodmetal.dylib`). Result: the blue speckle noise on Control Center is
+**unchanged** — 82 912 pure-blue pixels this boot against 25 241 before the
+fix — and, decisively, the blue-pixel masks of three GL boots overlap by only
+**0.9–1.8 %** of their union, so the dots are per-boot heap content and just
+differently shaped each time. Two consequences: the fix stays in (it is still
+correct platform behaviour and it makes `TexImage2D`-specified textures
+deterministic), and **the garbage lives in memory the library never sees
+through `glTexImage2D`** — the candidates left are Mesa/freedreno's BO cache
+reusing a render target that is never fully written (the original uncovered-
+target defect), or the IOSurface partial refill (`a copy of wrapped memory`
+textures appear in the trace). MiniIOSurface is exonerated by its own source:
+kept memory is bzeroed before reuse and `surf_clear=0` is the only way to get
+old content back.
+
+Trace recipe corrections, learned the hard way in the same hour:
+
+- `gltrace_at=SECONDS` did **not** fire (two boots, zero lines); `gltrace_draws=N`
+  compares for **exact equality** against a cumulative count that moves in
+  90-205-draw steps, so an arbitrary N is a lottery and usually misses.
+  `gltrace=FIRST-LAST` (absolute frame numbers) is the one that works: 160
+  `gl-at:` lines at frames 70–71 with `gltrace_place=200,0,600,2780`.
+- The frame counter of a 300 s session reaches ~800 (the frame line prints only
+  every 20th after the first 40), so "the settled Control Center" is around
+  frame 600+, not 79 — the earlier "79 frames" reading was a grep artefact.
+- When counting trace lines, `grep '^gl:'` — `redwood-gl:` contains `gl:` too.
+- A settled-frame trace with the same place rectangle produced **zero** `gl-at:`
+  lines at frames 600–601 while the boot frames produced 160, so the place
+  test is not yet understood for the settled picture (different drawing
+  coordinates or framebuffer); the next trace should use the whole screen
+  (`gltrace_place=-4000,-4000,8000,8000`, corners 4) and filter the log by the
+  blue bands' coordinates afterwards, as the 15:03 run did.
+
+CI and push notes for the next session: **git push over HTTPS to github.com:443
+does not connect from this host** (api.github.com works). The five files were
+pushed with the Git Data API (blob → tree → commit → `PATCH /git/refs/heads/main`)
+as `a404ab9c`, and the workflow is `workflow_dispatch`, so it must be started
+with `gh workflow run build-ace5.yml -R ol4p4/HackiOS-Ace5 --ref main`. The
+remote main's history has different SHAs from this checkout's (an earlier
+rewrite), so a future `git push` would be refused even with the network fixed —
+either fetch/compare first or keep using the API path.
+
+**The blue band's painter, found 2026-10-28 16:34 (`20261028-163440-run.log`,
+`gltrace=26-45`, whole-screen place, 3328 `gl-at:` lines).** Frames 26–45 are
+the Control Center's opening (the picture is the 1125×2436 iPhone-X canvas), and
+the top-centre band is drawn by the same family of draws on every one of them:
+
+- `program 15`, rect (204,682)–(398,744): a 194×62 label;
+- `program 17`, rect (90,234)–(510,654) and `program 19`, rect (68,211)–(533,676),
+  48 triangles: **the band itself**, all three sampling texture **21 (194 × 62,
+  0x1906 = RGB565)** as `[0]` and texture 13 (32 × 32, BGRA) as `[1]`, with the
+  texture coordinates at the first corner printed as **-0.77 and -1** — outside
+  the texture, so clamp-to-edge smears the edge texels across the whole quad.
+  The right-hand band has the same shape with texture 24 (204 × 62).
+- Neither texture 21 nor 24 is refilled from an IOSurface anywhere in the traced
+  frames, and nothing draws into them there — their content comes from before
+  frame 26. Whatever their edges hold (garbage from the heap, per the mask
+  evidence above) is stretched over the band; if the edges are clean the band
+  is clean, which is exactly the boot lottery.
+
+Next probes, in order: `gltrace=15-26` with the same whole-screen place to catch
+who fills texture 21 (a `TexSubImage2D`, an earlier surface refill, or a draw
+into it) and what its edge texels hold; then `glshow=194x62` once the gate that
+kept it silent is understood, to dump the texture itself (`show_texture()` is
+called only for an image that is both `.target` and `.drawn` — texture 21 is
+neither, which is why the documented recipe never produced a line).
+
+**"Who fills it" is answered (2026-10-28 17:06, `20261028-170628-run.log`,
+whole-frame trace of frames 20–27): CoreAnimation uploads it with real data.**
+The call sequence is `glBindTexture(24)` → `glPixelStorei(UNPACK_ALIGNMENT, 1)`
+→ `glPixelStorei(UNPACK_ROW_LENGTH, 224)` →
+`glTexImage2D(GL_TEXTURE_2D, 0, 0x1906 /* RGB */, 194, 62, 0, 0x1906, 0x1401 /* UBYTE */, 0x1164fc000)` → `glUseProgram(15)` → `glDrawElements` into
+the picture, sampling that texture with `wrap 0x812f/0x812f` (clamp) and
+`mag 0x2601` (linear). Two consequences:
+
+- The band's texture is a **194×62 RGB crop of a 224-pixel-wide source buffer,
+  uploaded from CPU memory with a non-NULL pointer** — so it is not an empty
+  allocation and the zero-fill never applies to it. What the band shows is the
+  *content of that source buffer*, stretched over the tile.
+- Texture ids drift between boots (the same 194×62 shape was id 21 in the
+  16:34 trace and id 24 here) — pair observations by size, program and rect,
+  never by id.
+
+So the garbage is in a CPU-side buffer that CoreAnimation uploads from — most
+likely a copy of a partially-written surface (the 224-pixel stride says it is a
+crop of a wider image), and per-boot because that surface's unwritten part holds
+the heap's leftovers. The next diagnostic needs a build: `my_glTexImage2D` can
+tell when an upload's source pointer range overlaps one of its own wrapped
+surfaces (it knows them), which would name the surface and offset the band is
+copied from; then the fix is at that surface's producer (write it fully before
+the copy) rather than in the upload path.
+
 The daily root is back on the GL order: `local/root-daily/etc/rc.jobs` has
 `rwtouch wait 60` first again, repacked and re-verified on hardware
 (`20261028-132636-run.log`: 79 GL frames, 0 MPS aborts, 0 SIGABRTs — identical

@@ -3363,6 +3363,37 @@ my_glTexImage2D(void *context, GLenum target, GLint level, GLint internal, GLsiz
 			}
 		}
 	}
+	/* Where an upload's pixels come from, when they are a surface's memory: the Control
+	 * Center band's 194 x 62 crop is uploaded from a pointer that is the memory of one of
+	 * our own surfaces (2026-10-28), and naming that surface says whose producer writes
+	 * too little rather than where the compositor reads. Only uploads whose source is a
+	 * surface this context knows can be named here; a pointer of CoreAnimation's own is
+	 * left alone without a line, because every frame uploads several of those.
+	 */
+	if (pixels != NULL && level == 0) {
+		static unsigned told;
+
+		for (unsigned i = 0; i < e->image_count && told < 16; i++) {
+			IOSurfaceRef surface = e->images[i].surface;
+			uint8_t *base;
+			size_t bytes;
+
+			if (surface == NULL) {
+				continue;
+			}
+			base = IOSurfaceGetBaseAddress(surface);
+			bytes = (size_t)IOSurfaceGetBytesPerRow(surface) * (size_t)IOSurfaceGetHeight(surface);
+			if (base != NULL && (const uint8_t *)pixels >= base && (const uint8_t *)pixels < base + bytes) {
+				say("redwood-gl: an upload of %d x %d (%#x, %#x) has its pixels in the memory "
+				    "of surface %u (%d x %d), at offset %zu: whatever writes that surface "
+				    "has not written all of it\n", width, height, format, type,
+				    (unsigned)IOSurfaceGetID(surface), (int)IOSurfaceGetWidth(surface),
+				    (int)IOSurfaceGetHeight(surface), (size_t)((const uint8_t *)pixels - base));
+				told++;
+				break;
+			}
+		}
+	}
 	uint64_t began = slow_calls_us != 0 ? now_us() : 0;
 	glTexImage2D(target, level, (GLint)internal_format((GLenum)internal, format), width, height, border, format, type,
 	    pixels != NULL ? pixels : zeros);
