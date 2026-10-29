@@ -8,6 +8,7 @@
  * there is one GPU and one connection to it in a process.
  */
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -21,6 +22,8 @@
 #define REDWOOD_GPU_SERVICE     "RedwoodGPU"
 #define REDWOOD_GPU_SURFACE     0x7e            /* the request that is not Linux's */
 #define REDWOOD_GPU_DESCRIBE    0xffffffffu     /* ... asked only what the buffer would be like */
+
+static int drm_trace(void);
 
 /*
  * Vulkan's fences and semaphores are syncobjs, whose handles Turnip hands the kernel inside the
@@ -309,6 +312,10 @@ drmGetVersion(int fd)
 		version->date = strdup("");
 		version->desc = strdup("Adreno on Darwin");
 		version->desc_len = (int)strlen(version->desc);
+		if (drm_trace()) {
+			fprintf(stderr, "redwood-drm: drmGetVersion: \"%s\" %d.%d\n",
+			    version->name, version->version_major, version->version_minor);
+		}
 	}
 	return version;
 }
@@ -595,12 +602,32 @@ static drmDevice redwood_device = {
 	.available_nodes = (1 << DRM_NODE_PRIMARY) | (1 << DRM_NODE_RENDER),
 };
 
+/*
+ * A line on stderr for the questions a silent caller cannot answer (Vulkan's
+ * enumeration skips a device it does not like without a word in a release build).
+ * Set REDWOOD_DRM_TRACE in the environment; the GL driver never calls
+ * drmGetDevices2, so only a Vulkan client hears the first line.
+ */
+static int
+drm_trace(void)
+{
+	static int on = -1;
+
+	if (on < 0) {
+		on = getenv("REDWOOD_DRM_TRACE") != NULL;
+	}
+	return on;
+}
+
 int
 drmGetDevices2(uint32_t flags, drmDevicePtr devices[], int max_devices)
 {
 	(void)flags;
 	if (devices == NULL || max_devices < 1) {
 		return -EINVAL;
+	}
+	if (drm_trace()) {
+		fprintf(stderr, "redwood-drm: drmGetDevices2: one device, nodes %s\n", redwood_nodes[DRM_NODE_RENDER]);
 	}
 	devices[0] = &redwood_device;
 	return 1;

@@ -126,6 +126,7 @@ main(void)
 	 * why only when Mesa's debug output asks for it, and this build is
 	 * b_ndebug. The gate always wants the reason. */
 	setenv("TU_DEBUG", "startup", 1);
+	setenv("REDWOOD_DRM_TRACE", "1", 1);
 
 	printf("turnip_test: opening the ICD %s\n", ICD_PATH);
 	library = dlopen(ICD_PATH, RTLD_NOW);
