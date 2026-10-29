@@ -170,6 +170,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$ACE5_ROOT"
+          source ./xnu-env.sh
           # DIAGNOSTIC (temporary): does this toolchain honour weak_import on an
           # undefined symbol in a dylib? ld64 said no for the WSI table; answer it
           # with the same clang and the same ld64, then stop.
