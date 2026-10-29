@@ -106,6 +106,8 @@ DRIVERS=${DRIVERS:-softpipe,freedreno}
 # libvulkan_freedreno.dylib: the evaluation of the "real driver" route (see
 # RUNBOOK.md, 2026-10-28). It talks to the same kernel service through the same
 # tools/mesa/redwood-drm shim; nothing else changes for the GL library.
+# Needs glslangValidator on PATH (Ubuntu: glslang-tools) - Mesa's top-level
+# meson.build requires it as soon as a Vulkan driver is enabled.
 VULKAN=${VULKAN:-0}
 if [ "$VULKAN" = 1 ]; then
 	VULKAN_DRIVERS=freedreno
