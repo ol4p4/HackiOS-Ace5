@@ -406,17 +406,17 @@ Only in b2/src/gallium/frontends/osmesa: osmesa.c.orig
  };
  % endfor
 +
-+% if gen_weak and ('wsi' in prefixes or 'vk_common' in prefixes):
++% if gen_weak and any(p != 'tu' for p in prefixes):
 +% for p in prefixes:
-+% if p in ('wsi', 'vk_common'):
++% if p != 'tu':
 +#ifdef __APPLE__
 +/*
 + * The tables name every entrypoint, and Mach-O will not leave one undefined: ld64 here
 + * refuses even a weak reference ("symbol(s) not found"), where ELF resolves it to NULL.
 + * A weak definition satisfies it, and a file that defines the same entrypoint for real
-+ * wins over it. These prefixes are the tables whose entries are fallbacks for the
-+ * driver's own (filled first, and a filled entry is not overwritten): what stays ours
-+ * answers FEATURE_NOT_PRESENT where the platform would have had NULL.
++ * wins over it. The driver's own table (prefix tu) keeps its NULLs: there an undefined
++ * symbol is what says the driver does not have the command. These prefixes are the
++ * runtime's and WSI's fallback tables, where a filled entry answers NOT_PRESENT.
 + */
 +% for e in entrypoints:
 +% if e.guard is not None:
