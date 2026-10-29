@@ -408,3 +408,19 @@ Only in b2/src/gallium/frontends/osmesa: osmesa.c.orig
 +               (host_machine.system() == 'darwin' ? ['-Wl,-undefined,dynamic_lookup'] : []),
    link_depends : vulkan_icd_link_depends,
    install : true,
+--- a/src/util/libdrm.h
++++ b/src/util/libdrm.h
+@@ -26,6 +26,12 @@
+  * the proliferation of #ifdef'ery to support environments without libdrm.
+  */
+ 
+-#ifdef HAVE_LIBDRM
++/*
++ * Darwin on redwood: there is a stand-in for libdrm (src/redwood-drm), and meson hands
++ * it over as dep_libdrm instead of defining HAVE_LIBDRM (no DRM on that system). Its
++ * declarations are the ones wanted -- the real xf86drm.h is what the other branch is
++ * a no-op stand-in for.
++ */
++#if defined(HAVE_LIBDRM) || defined(__APPLE__)
+ #include <xf86drm.h>
+ #else
