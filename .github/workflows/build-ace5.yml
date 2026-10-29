@@ -170,6 +170,46 @@ jobs:
         run: |
           set -euo pipefail
           cd "$ACE5_ROOT"
+          # DIAGNOSTIC (temporary): does this toolchain honour weak_import on an
+          # undefined symbol in a dylib? ld64 said no for the WSI table; answer it
+          # with the same clang and the same ld64, then stop.
+          cat > /tmp/probe.h <<'PROBE'
+          #ifndef P_H
+          #define P_H
+          #if !defined(_MSC_VER) && defined(VK_ENTRY_USE_WEAK)
+          #ifdef __APPLE__
+          #define P_WEAK __attribute__ ((weak_import))
+          #else
+          #define P_WEAK __attribute__ ((weak))
+          #endif
+          #else
+          #define P_WEAK
+          #endif
+          typedef struct { void (*a)(void); void (*b)(void); } table_t;
+          void p_defined(void) P_WEAK;
+          void p_missing(void) P_WEAK;
+          #endif
+          PROBE
+          cat > /tmp/probe.c <<'PROBE'
+          #define VK_ENTRY_USE_WEAK 1
+          #include "/tmp/probe.h"
+          void p_defined(void) {}
+          const table_t t = { .a = p_defined, .b = p_missing };
+          PROBE
+          echo "--- APPLE macros:"; xnu-clang -dM -E -x c /dev/null | grep -c __APPLE__
+          echo "--- which ld64:"; xnu-clang -### -x c /dev/null -o /tmp/x 2>&1 | grep -o 'ld64[^ "]*' | head -1
+          xnu-clang -arch arm64 -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" \
+            -fvisibility=hidden -c /tmp/probe.c -o /tmp/probe.o
+          echo "--- object symbols:"; llvm-nm -m /tmp/probe.o | grep p_missing
+          echo "--- link a dylib:"
+          xnu-clang -arch arm64 -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" \
+            -shared -o /tmp/probe.dylib /tmp/probe.o && echo "PROBE LINK OK" || echo "PROBE LINK FAILED"
+          exit 1
+
+      - name: Build userland and APFS (real)
+        run: |
+          set -euo pipefail
+          cd "$ACE5_ROOT"
           . local/image-venv/bin/activate
           bash ios165/fetch.sh
           rm -f ios165/*.ipsw ios165/*.dmg ios165/*.dmg.* 2>/dev/null || true
