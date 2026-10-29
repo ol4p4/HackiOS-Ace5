@@ -9,6 +9,7 @@
 #define REDWOOD_XF86DRM_H
 
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -52,6 +53,7 @@ int drmSyncobjDestroy(int fd, uint32_t handle);
 int drmSyncobjReset(int fd, const uint32_t *handles, uint32_t count);
 int drmSyncobjSignal(int fd, const uint32_t *handles, uint32_t count);
 int drmSyncobjTimelineSignal(int fd, const uint32_t *handles, const uint64_t *points, uint32_t count);
+int drmSyncobjTransfer(int fd, uint32_t dst_handle, uint64_t dst_point, uint32_t src_handle, uint64_t src_point, uint32_t flags);
 int drmSyncobjQuery(int fd, uint32_t *handles, uint64_t *points, uint32_t count);
 int drmSyncobjWait(int fd, uint32_t *handles, uint32_t count, int64_t timeout_ns, uint32_t flags,
     uint32_t *first_signaled);
@@ -64,19 +66,36 @@ int drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd);
 
 /*
  * The device list Turnip's instance walks (vk_instance.c calls drmGetDevices2, and hands each
- * device to tu_physical_device_try_create, which opens the render node and asks for its stat).
- * There is one device and no /dev/dri here; the device is made up, naming the node
- * drmOpenWithType() opens. What the fields of Linux's _drmDevice beyond these two are for --
- * buses and such -- nothing of ours reads.
+ * device to tu_physical_device_try_create, which opens the render node and asks for its stat),
+ * and the whole of what the WSI library's DRM file reads of one (its bus, when it asks whether
+ * a surface can be presented on a device). There is one device and no /dev/dri here; the
+ * device is made up, naming the node drmOpenWithType() opens. The buses are Linux's numbers,
+ * and this device is of none of them: nothing of ours presents through a DRM node.
  */
+#define DRM_BUS_PCI             0x02
+#define DRM_BUS_PLATFORM        0x04
+
+typedef struct _drmPciBusInfo {
+	uint16_t domain;
+	uint8_t bus, dev, func;
+} drmPciBusInfo, *drmPciBusInfoPtr;
+
 typedef struct _drmDevice {
 	char **nodes;                   /* DRM_NODE_MAX node paths, NULL where there is none */
 	int available_nodes;            /* which nodes nodes[] has, as 1 << the node */
 	int bustype;
+	int flags;
+	union {
+		drmPciBusInfoPtr pci;
+		void *platform;
+	} businfo;
 } drmDevice, *drmDevicePtr;
 
 int drmGetDevices2(uint32_t flags, drmDevicePtr devices[], int max_devices);
 void drmFreeDevices(drmDevicePtr devices[], int count);
+int drmGetDevice2(int fd, uint32_t flags, drmDevicePtr *device);
+void drmFreeDevice(drmDevicePtr *device);
+bool drmDevicesEqual(drmDevicePtr a, drmDevicePtr b);
 
 /* Not libdrm's: a buffer's memory in this process, in place of mmap() on the device (freedreno_bo.c is patched to call these). */
 void *redwood_drm_map(int fd, uint32_t handle, uint64_t size);

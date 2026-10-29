@@ -613,6 +613,74 @@ drmFreeDevices(drmDevicePtr devices[], int count)
 	(void)count;                    /* nothing was made per device, so nothing to take back */
 }
 
+/* The same one device, made the caller's (drmFreeDevice() frees it): what wsi_common_drm.c asks
+   when it wants to know whether a device descriptor is this device. */
+int
+drmGetDevice2(int fd, uint32_t flags, drmDevicePtr *device)
+{
+	drmDevicePtr made = malloc(sizeof(*made));
+
+	(void)fd;
+	(void)flags;
+	if (made == NULL) {
+		errno = ENOMEM;
+		return -1;
+	}
+	*made = redwood_device;
+	*device = made;
+	return 0;
+}
+
+void
+drmFreeDevice(drmDevicePtr *device)
+{
+	if (device != NULL && *device != NULL) {
+		free(*device);
+		*device = NULL;
+	}
+}
+
+bool
+drmDevicesEqual(drmDevicePtr a, drmDevicePtr b)
+{
+	if (a == NULL || b == NULL || a->available_nodes != b->available_nodes) {
+		return false;
+	}
+	for (int node = 0; node < DRM_NODE_MAX; node++) {
+		const char *one = (a->available_nodes & (1 << node)) ? a->nodes[node] : NULL;
+		const char *other = (b->available_nodes & (1 << node)) ? b->nodes[node] : NULL;
+
+		if ((one == NULL) != (other == NULL) || (one != NULL && strcmp(one, other) != 0)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* Linux moves a timeline point from one syncobj to another; there is no timeline here
+   (drmGetCap() says so) and nothing asks. The table can still say what a transfer means:
+   the source's state becomes the destination's, at the point asked of it. */
+int
+drmSyncobjTransfer(int fd, uint32_t dst_handle, uint64_t dst_point, uint32_t src_handle,
+    uint64_t src_point, uint32_t flags)
+{
+	struct redwood_syncobj *dst = syncobj_at(dst_handle);
+	struct redwood_syncobj *src = syncobj_at(src_handle);
+
+	(void)fd;
+	(void)flags;
+	if (dst == NULL || src == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (src->signaled && (src_point == 0 || src->point >= src_point)) {
+		dst->signaled = 1;
+		dst->point = dst_point != 0 ? dst_point : src->point;
+		dst->fence = 0;
+	}
+	return 0;
+}
+
 static int
 none(void)
 {
