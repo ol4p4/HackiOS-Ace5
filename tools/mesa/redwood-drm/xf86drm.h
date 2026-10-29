@@ -16,6 +16,10 @@
 
 #include "drm-uapi/drm.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define DRM_NODE_PRIMARY        0
 #define DRM_NODE_CONTROL        1
 #define DRM_NODE_RENDER         2
@@ -116,5 +120,9 @@ struct redwood_drm_surface {
 	uint32_t width, height, pixel_format, planes;   /* and what they are */
 };
 int redwood_drm_surface(int fd, struct redwood_drm_surface *surface);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
