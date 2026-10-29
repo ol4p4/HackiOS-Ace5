@@ -400,7 +400,7 @@ Only in b2/src/gallium/frontends/osmesa: osmesa.c.orig
     if (pthread_cond_init(&device->timeline_cond, &condattr) != 0) {
 --- a/src/vulkan/wsi/wsi_common.c
 +++ b/src/vulkan/wsi/wsi_common.c
-@@ -2254,3 +2254,18 @@
+@@ -2254,3 +2254,21 @@
        (device->timeline_semaphore_export_handle_types &
         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
  }
