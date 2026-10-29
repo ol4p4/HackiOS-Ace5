@@ -176,12 +176,22 @@ def checksum_ok(block):
 
 class RawImage:
     def __init__(self, path):
-        self.fd = os.open(path, os.O_RDONLY)
+        # O_BINARY on Windows: without it the file is read as text, which stops at the first
+        # 0x1a and turns 0x0d 0x0a into 0x0a -- an image is not text.
+        self.fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
         self.size = os.lseek(self.fd, 0, os.SEEK_END)
         self.path = path
 
     def read(self, off, length):
-        return os.pread(self.fd, length, off)
+        if hasattr(os, "pread"):
+            return os.pread(self.fd, length, off)
+        # Windows has no pread. The reader seeks and reads in turns, so the position has to be
+        # put back after each read, or the next one starts where this one ended.
+        here = os.lseek(self.fd, 0, os.SEEK_CUR)
+        os.lseek(self.fd, off, os.SEEK_SET)
+        data = os.read(self.fd, length)
+        os.lseek(self.fd, here, os.SEEK_SET)
+        return data
 
     def close(self):
         os.close(self.fd)

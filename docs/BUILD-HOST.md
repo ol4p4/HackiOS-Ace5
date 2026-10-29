@@ -91,7 +91,7 @@ mkdir -p local/device
 从 Windows 传设备树（这是云主机唯一需要的手机文件）：
 
 ```powershell
-scp D:\\.zcode\workspace\c5551999-ba0b-46c7-81d5-e7ff5990553c\HackiOS-Ace5\local\device\giulia.dtb `
+scp E:\HackiOS-Ace5\local\device\giulia.dtb `
   ubuntu@<云主机IP>:~/HackiOS-Ace5/local/device/giulia.dtb
 ```
 
@@ -202,7 +202,7 @@ ls -lh out/giulia-kernel/mach.ace5-public \
 在 Windows 上拉回（路径按你的工作区调整）：
 
 ```powershell
-$R = "D:\.zcode\workspace\c5551999-ba0b-46c7-81d5-e7ff5990553c\HackiOS-Ace5"
+$R = "E:\HackiOS-Ace5"
 scp ubuntu@<云主机IP>:~/HackiOS-Ace5/out/giulia-kernel/mach.ace5-public "$R\out\giulia-kernel\"
 scp ubuntu@<云主机IP>:~/HackiOS-Ace5/out/giulia-kernel/hackios-giulia-kernel.img "$R\out\giulia-kernel\"
 scp ubuntu@<云主机IP>:~/HackiOS-Ace5/out/giulia-kernel/hackios-giulia-kernel.json "$R\out\giulia-kernel\"

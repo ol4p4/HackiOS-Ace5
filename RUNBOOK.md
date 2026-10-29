@@ -634,6 +634,155 @@ surfaces (it knows them), which would name the surface and offset the band is
 copied from; then the fix is at that surface's producer (write it fully before
 the copy) rather than in the upload path.
 
+**That diagnostic is in and returns nothing (2026-10-28 18:24,
+`20261028-182414-run.log`).** `my_glTexImage2D` now prints, for any upload
+whose pixels land inside the memory of a surface this context knows, the
+surface id, its size and the offset. A full session: **0 lines** — so the band's
+194×62 crop is not a copy from any surface eagl wraps; the source is
+CoreAnimation's own memory, one layer further upstream than the compositor, and
+nothing in this driver can name it. The same boot also measured the two defect
+variants apart from each other: **51.4 % black, 976 blue pixels** — the
+wedge-only frame (zero-fill turns the unfilled regions black, the right-hand
+stairs are unchanged) against the speckle frames' 25 000–83 000 blue pixels on
+identical code. Two independent defects remain, then: the compositor wedge
+(51.4 % here, geometry boot-stable) and the occasional speckle (CA's own
+uploaded crop, boot-lottery content).
+
+Where that leaves the Control Center work: the GL path cannot clean CA's own
+upload; the options are (a) the wedge, which is ours and is now deterministic
+enough to bisect with the trace recipe above, or (b) move the client layers to
+Metal, which already renders them correctly (`metal_profile=1`), leaving the
+wedge as the single remaining defect on that path too. The `glzero=0` A/B that
+was staged has effectively been run by the boot lottery itself: with the fix,
+unwritten GL-allocated memory is black; the speckle survived, and that is what
+proved the source is not a GL allocation at all.
+
+**Mid-session screenshots are possible, and one boot's post-return frame was
+byte-identical to its mid-run frame (2026-10-28 18:36/18:37).** `phone.py
+screenshot` answers from the loader while the kernel runs (the same USB channel
+the live log uses), so a frame can be taken before the return timer fires:
+`20261028-183647-screen.png` at t≈245 s against `20261028-183744-screen.png`
+after the return — the same picture, the same coloured blocks, no wedge. Two
+things follow: the teardown repaint does **not** alter the last presented frame
+(at least in this variant), so post-return screenshots are representative and
+the previous measurements stand; and this boot is a third variant — **fully
+composited Control Center (cards, sliders, Focus tile all correct) with large
+red/green/blue garbage blocks** where the blur content is garbage, no black
+wedge anywhere. Variants seen so far on the same build, all mid/presented
+frames: clean, coloured noise, black wedge. The wedge and the noise are the
+same class (garbage or zeros where a blurred region should be), differing only
+in what the unfilled memory held and which of CA's uploads/copies carried it.
+
+**rc.jobs must be LF, and one Windows write of it broke `metal_props` silently
+(2026-10-28 18:53).** A `write_text()` without `newline=''` turned the file into
+CRLF; the init's argument splitter keeps the `\r`, so `metal_props on\r` printed
+`usage:` and set nothing — SpringBoard then took the GL path and the run looked
+like "Metal lost the race". The symptom that names it is
+`metal_props: usage: metal_props [show | on [NAME CLASS] | off]` in the log.
+Write `rc.jobs` with `newline=''` (or the Edit tool), and check that line in
+every Metal boot's log before reading anything into "Metal did not engage".
+
+**Metal-on Today View boot, with the per-attachment clear build
+(`20261028-190229-run.log`).** With `metal_props on` first (LF file) and
+`metal_profile=1`: **0 MPS aborts, 0 SIGABRTs**, and Metal in three processes —
+SpringBoard 31 trace lines, chronod/RenderBox 18, backboardd 4 — plus the
+first-draw line (`into 465x465 x2`) and 14 traced draws. The picture
+(`190148-screen.png`, mid-session): the Today View, **status bar clock rendering
+(`11:01`)**, three widget cards as white placeholders. Two corrections to the
+record: the status-bar clock was never missing — it was hidden under the wedge
+in the Control Center frames, and it renders on the GL path as well (the 18:53
+boot with `metal_props` broken showed `10:52`); and the widget cards' blank
+content is placeholder/data, not compositing — RenderBox draws its 465×465
+platter without crashing and without a visible second-plane loss.
+
+The daily root is back on the GL order with the Control Center swipe (LF,
+verified), repacked as `root-daily-fw.apfs`.
+
+**Wedge geometry, measured (2026-10-28 19:10, from `182415-screen.png`).** The
+wedge's boundary is a **smooth diagonal, slope about 1:1** — stepping 1–7 px per
+4 rows, no 16/32/64-px quantization — so it is not a GMEM tile boundary and the
+earlier `notile` result stands for the right reason. A straight diagonal over a
+half-screen region is what a rotated or wrongly transformed quad paints, not
+what a missed tile store paints. In the traced band-noise boot (`163440`) there
+are **no draws with off-canvas coordinates** (0 of 3328), but that trace belongs
+to the band variant, not the wedge: the wedge has not been captured in a traced
+boot yet. Its capture needs the retry loop — set `gltrace` on the swipe frames
+26–45 (whole-screen place), take a mid-session screenshot, and keep the run
+only if the picture shows the wedge; the band-noise boot proves the recipe
+records what draws the variant that *is* present.
+
+Checked and exonerated on the way: `target_to_surface()`'s `glReadPixels` copy
+needs no explicit wait (Mesa syncs readback per the GL contract), and nothing in
+the driver intercepts CoreAnimation's own `glReadPixels`, so the 194×62 upload's
+source is CA's memory throughout.
+
+**The garbage and the wedge are the framebuffer-fetch path — proven by A/B on
+2026-10-28 19:20 (`192531`, `193317`).**
+
+- `glenv=FD_MESA_DEBUG=noreorder`: the env line is set
+  (`redwood-gl: in the environment: FD_MESA_DEBUG=noreorder`) and the picture is
+  **unchanged** — same coloured blocks — so batch reordering is not the cause,
+  and the in-tree `fd6-fb-barrier-reorder.patch` (a Chlorophyll/Bergamota fix
+  whose own comment names the exact symptom — "a framebuffer-fetch draw read
+  half-written memory: one triangle of each of Control Center's blur quads came
+  out stale") is not what this boot needs. It lives inside
+  `fd6_texture_barrier`, and **eagl never calls `glTextureBarrier`**, so that
+  path is never taken on our stack.
+- `glfetch=0` (the extension is not advertised, CA's and eagl's shaders use
+  plain sampling): **the Control Center is clean** — no coloured blocks, no
+  wedge, correct blur backdrop — and it stays clean: mid-session and post-return
+  frames are identical, 286 GL frames, 0 crashes
+  (`193128-screen.png`, `193317-screen.png`). What remains is different in kind:
+  the connectivity module's four circles draw as white discs (the vibrant
+  material's fallback without the fetch program), and the Now Playing card is
+  still empty.
+
+So the fetch path is where the garbage comes from, and the family's known fix
+(cache invalidation around the first read after a write — K90's CCHE on a8xx,
+CCU/UCHE on a7xx) is the right direction; our tree's two attempts at it cover
+only `glTextureBarrier` and a same-batch transition, not the fetch draws we
+actually issue. The workable next step is to make the invalidation happen for
+the draws that use `gl_LastFragData` on this stack — either in the driver (flush
+CCU + invalidate UCHE when a fetch draw's target was written by a previous
+batch) or by making eagl emit a texture barrier before those draws — rather than
+disabling fetch. Until then, `glfetch=0` is a clean-picture workaround with the
+white-disc fallback as its cost.
+
+**First attempt at that fix, built 2026-10-28 20:5x (`722f60e1`, artifact in
+`local/ci-artifact-3`).** The inline first-fetch barrier used
+`FD6_FLUSH_CCU_COLOR | FD6_INVALIDATE_CACHE`; upstream's `fd6_texture_barrier`
+always had `| FD6_FLUSH_CACHE` as well, and the missing writeback is exactly what
+lets an invalidate throw away the previous draws' pixels. `freedreno-darwin.patch`
+now carries `FD6_FLUSH_CCU_COLOR | FD6_FLUSH_CACHE | FD6_INVALIDATE_CACHE` for
+the first fb-read draw of a batch, and the new `libOSMesa.8.dylib` (14 822 264
+bytes, md5 `59aaf486…`) is merged into `local/root-daily` and repacked as
+`root-daily-fw.apfs`. **The boot that tests it has not run yet** — the phone was
+handed back to Android for the user. Next session: `enter --stage kernel`,
+`ramdisk system-metal.apfs`, `run --seconds 300 --gpu-keep --metal --gpu-probe
+20 --gpu-direct --root-image local/root-daily-fw.apfs` (GL order, fetch on), and
+a mid-session screenshot; what to look for is the coloured blocks and the
+diagonal wedge staying gone while `glfetch` is **1**.
+
+One build lesson: extending a patch's comment inside a hunk changes the `@@
+-hunk,count +hunk,count @@` numbers — forgetting that produced "malformed patch
+at line 161" and a 12-minute failed CI run. After editing any `tools/mesa/*.patch`,
+verify with `patch -p1 --dry-run` against the upstream file before pushing.
+
+**VERIFIED 2026-10-28 22:22 (`222307`): the fix works, and the Control Center
+problem is closed.** With fetch **on** and the `FD6_FLUSH_CACHE` build:
+Control Center renders completely correctly — backdrop blur, all icons, the
+connectivity module's four circles with their material shading (the
+`glfetch=0` white-disc fallback is no longer needed and that workaround is
+retired), sliders, Focus tile — **black coverage 0.3 %** (wedge variants were
+25–51 %), **1 762 saturated pixels** (the coloured-garbage variants carried
+tens of thousands), mid-session and post-return frames identical, 79 GL frames,
+0 panics or SIGABRTs (`222209-screen.png`, `222308-screen.png`). The coloured
+blocks and the diagonal wedge were the same defect all along: the first
+framebuffer-fetch draw after ordinary draws read memory whose earlier writes had
+been invalidated instead of written back. What remains on that screen is
+content, not compositing: the Now Playing card is empty (no media) and the
+status bar's clock was hidden only by the wedge before.
+
 The daily root is back on the GL order: `local/root-daily/etc/rc.jobs` has
 `rwtouch wait 60` first again, repacked and re-verified on hardware
 (`20261028-132636-run.log`: 79 GL frames, 0 MPS aborts, 0 SIGABRTs — identical
