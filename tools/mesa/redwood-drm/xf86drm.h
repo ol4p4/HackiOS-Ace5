@@ -56,7 +56,7 @@ int drmSyncobjQuery(int fd, uint32_t *handles, uint64_t *points, uint32_t count)
 int drmSyncobjWait(int fd, uint32_t *handles, uint32_t count, int64_t timeout_ns, uint32_t flags,
     uint32_t *first_signaled);
 int drmSyncobjTimelineWait(int fd, uint32_t *handles, const uint64_t *points, uint32_t count,
-    int64_t timeout_ns, uint32_t flags, uint32_t *first_signaled, uint64_t *points_signaled);
+    int64_t timeout_ns, uint32_t flags, uint32_t *first_signaled);
 int drmSyncobjFDToHandle(int fd, int obj_fd, uint32_t *handle);
 int drmSyncobjHandleToFD(int fd, uint32_t handle, int *obj_fd);
 int drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd);

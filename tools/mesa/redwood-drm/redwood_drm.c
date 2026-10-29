@@ -161,7 +161,7 @@ syncobj_wait_one(int fd, struct redwood_syncobj *s, uint64_t point, int64_t dead
    to the deadline for each in turn, so a WAIT_ALL of many is as patient as its slowest. */
 static int
 syncobj_wait(int fd, uint32_t *handles, const uint64_t *points, uint32_t count, int64_t deadline_ns,
-    uint32_t flags, uint32_t *first_signaled, uint64_t *points_signaled)
+    uint32_t flags, uint32_t *first_signaled)
 {
 	uint32_t done = 0;
 
@@ -179,9 +179,6 @@ syncobj_wait(int fd, uint32_t *handles, const uint64_t *points, uint32_t count, 
 			return -1;
 		}
 		if (waited == 0) {
-			if (points_signaled != NULL) {
-				points_signaled[i] = s->point;
-			}
 			if ((flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL) == 0) {
 				if (first_signaled != NULL) {
 					*first_signaled = i;
@@ -500,14 +497,14 @@ int
 drmSyncobjWait(int fd, uint32_t *handles, uint32_t count, int64_t timeout_ns, uint32_t flags,
     uint32_t *first_signaled)
 {
-	return syncobj_wait(fd, handles, NULL, count, timeout_ns, flags, first_signaled, NULL);
+	return syncobj_wait(fd, handles, NULL, count, timeout_ns, flags, first_signaled);
 }
 
 int
 drmSyncobjTimelineWait(int fd, uint32_t *handles, const uint64_t *points, uint32_t count,
-    int64_t timeout_ns, uint32_t flags, uint32_t *first_signaled, uint64_t *points_signaled)
+    int64_t timeout_ns, uint32_t flags, uint32_t *first_signaled)
 {
-	return syncobj_wait(fd, handles, points, count, timeout_ns, flags, first_signaled, points_signaled);
+	return syncobj_wait(fd, handles, points, count, timeout_ns, flags, first_signaled);
 }
 
 /*
