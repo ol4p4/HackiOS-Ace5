@@ -122,6 +122,11 @@ main(void)
 	void *library = NULL, *mapped = NULL;
 	int result = 1;
 
+	/* A device the driver skips is skipped in silence: vk_startup_errorf says
+	 * why only when Mesa's debug output asks for it, and this build is
+	 * b_ndebug. The gate always wants the reason. */
+	setenv("TU_DEBUG", "startup", 1);
+
 	printf("turnip_test: opening the ICD %s\n", ICD_PATH);
 	library = dlopen(ICD_PATH, RTLD_NOW);
 	if (library == NULL) {

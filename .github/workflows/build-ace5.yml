@@ -177,6 +177,12 @@ jobs:
             echo "--- meson-setup.log ---"; tail -60 xnu-deps/build/mesa/meson-setup.log || true;
             echo "--- ninja.log tail ---"; tail -60 xnu-deps/build/mesa/ninja.log || true;
             exit 1; }
+          # DIAGNOSTIC: the gate reported zero physical devices with no error
+          # text; the question is whether these are in the unstripped dylib (a
+          # NULL try_create_for_drm would explain the silence).
+          echo "--- vulkan dylib symbols (unstripped) ---"
+          llvm-nm -m xnu-deps/build/mesa/build-softpipe-freedreno-vulkan/src/freedreno/vulkan/libvulkan_freedreno.dylib \
+            | grep -E "tu_physical_device_try_create|tu_enumerate_devices|drmGetDevices2|drmGetVersion|wsi_EnumeratePhysicalDevices|vk_common_EnumeratePhysicalDevices" || true
           GL=1 PREBUILT= bash userland/build.sh
           tools/ace5/build-gpu-userland.sh local/components --metal
           python3 tools/ace5/prepare-gpu-root.py \
