@@ -422,3 +422,31 @@ Only in b2/src/gallium/frontends/osmesa: osmesa.c.orig
 +   return VK_ERROR_FEATURE_NOT_PRESENT;
 +}
 +#endif
+--- a/src/vulkan/util/vk_entrypoints_gen.py
++++ b/src/vulkan/util/vk_entrypoints_gen.py
+@@ -62,5 +62,12 @@
+ #if !defined(_MSC_VER) && defined(VK_ENTRY_USE_WEAK)
++#ifdef __APPLE__
++/* Mach-O's weak reference is weak_import: a plain weak, hidden, undefined symbol is an
++ * error to ld64 ("symbol(s) not found"), where ELF resolves it to NULL. The WSI table is
++ * the one that relies on that: the driver supplies the device entrypoints it names. */
++#define VK_ENTRY_WEAK __attribute__ ((weak_import))
++#else
+ #define VK_ENTRY_WEAK __attribute__ ((weak))
++#endif
+ #else
+ #define VK_ENTRY_WEAK
+ #endif
+@@ -73,5 +80,12 @@
+ #ifndef _WIN32
++#if defined(__APPLE__) && defined(VK_ENTRY_USE_WEAK)
++/* A hidden weak reference is what Mach-O has not got (see VK_ENTRY_WEAK above). Only the
++ * translation unit that defines VK_ENTRY_USE_WEAK -- the table's own -- gives up its
++ * symbols' hidden visibility, because that is the unit whose symbols stay optional. */
++#define VK_ENTRY_HIDDEN
++#else
+ #define VK_ENTRY_HIDDEN __attribute__ ((visibility("hidden")))
++#endif
+ #else
+ #define VK_ENTRY_HIDDEN
+ #endif
