@@ -424,3 +424,35 @@ Only in b2/src/gallium/frontends/osmesa: osmesa.c.orig
 +#if defined(HAVE_LIBDRM) || defined(__APPLE__)
  #include <xf86drm.h>
  #else
+--- a/src/freedreno/vulkan/tu_knl.cc
++++ b/src/freedreno/vulkan/tu_knl.cc
+@@ -21,5 +21,8 @@
+ #include "vk_debug_utils.h"
+ 
+ #include "util/libdrm.h"
++#ifdef __APPLE__
++#include <sys/sysctl.h>
++#endif
+ 
+ #include "tu_device.h"
+--- a/src/freedreno/vulkan/tu_knl.cc
++++ b/src/freedreno/vulkan/tu_knl.cc
+@@ -194,7 +194,17 @@
+ if (!(DETECT_ARCH_AARCH64 || DETECT_ARCH_X86 || DETECT_ARCH_X86_64))
+    return 0;
+ 
+-#if DETECT_ARCH_AARCH64 &&                                                   \
++#if defined(__APPLE__)
++   /* XNU on this port leaves SCTLR_EL1.UCT clear: 'mrs ctr_el0' from EL0 is a
++    * SIGILL (the K90 port died on exactly this). The kernel knows the line size
++    * anyway, and says it. */
++   size_t linesize = 0;
++   size_t len = sizeof(linesize);
++   if (sysctlbyname("hw.cachelinesize", &linesize, &len, NULL, 0) == 0 &&
++       linesize > 0)
++      return (uint32_t) linesize;
++   return 64;
++#elif DETECT_ARCH_AARCH64 &&                                                   \
+    (!defined(_SC_LEVEL1_DCACHE_LINESIZE) || DETECT_OS_ANDROID)
+    /* Bionic does not implement _SC_LEVEL1_DCACHE_LINESIZE properly: */
+    uint64_t ctr_el0;
