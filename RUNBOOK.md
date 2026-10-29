@@ -1020,6 +1020,49 @@ What transfers to giulia:
    redwood's WCN6750/WPSS/ath11k config on a different chip; each generation needs
    its own control chain. giulia's is the WCN7850 one, not redwood's.
 
+### Turnip on this port: the build (2026-10-29)
+
+The gate (`tools/vulkan/turnip_test.c`) and the VULKAN=1 build first went through
+a compiler today. The path from "mesa configures" to "libvulkan_freedreno.dylib"
+was blocked, in this order, and each is now answered:
+
+1. `glslangValidator` — Mesa's top-level meson requires it as soon as a Vulkan
+   driver is enabled. Ubuntu: `glslang-tools`.
+2. The libdrm shim (`tools/mesa/redwood-drm`) was the GL driver's libdrm. The
+   Vulkan runtime needs more of it: syncobjs (the kernel service has none; the
+   table lives in the shim, a submit's out-syncobjs are bound to the fence the
+   submit was given and waits go through WAIT_FENCE, and an empty submit's fence
+   is given out in the shim because the kernel refuses nr_cmds 0), the device
+   enumeration (`drmGetDevices2`, one made-up device on /dev/null), and the WSI
+   file's `drmGetDevice2`/`drmDevice.businfo`.
+3. `pthread_condattr_setclock` does not exist on Darwin; the timeline waits poll
+   to their deadline instead (tu_device.cc, patched).
+4. **ld64 on this toolchain refuses even a weak undefined symbol in a dylib** —
+   the object carries `(undefined) weak external` and the link still says
+   `symbol(s) not found`, where ELF resolves it to NULL. Measured with a probe
+   built by the same xnu-clang and ld64. Mesa relies on that weak semantics in
+   every generated dispatch table (the WSI, vk_common and cmd-enqueue tables
+   name entrypoints that nothing defines, expecting NULL). Two answers:
+   the generator emits **weak definitions under `__APPLE__` for every table
+   except the driver's own** (`tu` keeps its NULLs: there an undefined symbol
+   is what says the driver does not have the command) — 721 per table, exact
+   signatures from vk.xml, strong definitions win; and the dylib links with
+   `-undefined,dynamic_lookup` so the driver tables' remaining weak references
+   stay weak. A genuinely missing strong symbol will still stop the gate at
+   dlopen.
+5. The gate's Vulkan headers come from the build host (`libvulkan-dev`); they
+   are copied out as their own include root (`vulkan/` + `vk_video/`), because
+   `-I/usr/include` lets the host's libc answer an iOS compile's `<stdint.h>`.
+
+Measured in CI: `libvulkan_freedreno.dylib` 10,518,148 bytes, exports
+`vk_icdGetInstanceProcAddr`/`vk_icdNegotiateLoaderICDInterfaceVersion`; the
+build also strips it, fixes its install name, and ships it into the root as
+`/redwood/lib/libvulkan_freedreno.dylib` with the gate as
+`/redwood/bin/turnip_test` (`rc.jobs.turnip` runs it after the settle).
+The hardware gate has not run yet: steps 1–7 (ICD, instance, physical device,
+device+queue, host-visible memory, image, empty submit→fence) answer "can
+Turnip talk to RedwoodGPU at all" and each fails in a different place.
+
 **Family update 2026-10-28: the PCIe Wi-Fi route now has working in-family
 code.** `azzlantern/hackios-thyme` (Mi 10S, SM8250-AC / SD870 — the same SoC and
 Adreno 650 as a K40) reports on hardware: GPU `THE GPU STAYS ON`, GMU 587 MHz,
