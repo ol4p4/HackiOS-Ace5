@@ -400,32 +400,37 @@ Only in b2/src/gallium/frontends/osmesa: osmesa.c.orig
     if (pthread_cond_init(&device->timeline_cond, &condattr) != 0) {
 --- a/src/vulkan/util/vk_entrypoints_gen.py
 +++ b/src/vulkan/util/vk_entrypoints_gen.py
-@@ -215,7 +215,38 @@
+@@ -215,7 +215,45 @@
      % endif
    % endfor
  };
  % endfor
 +
-+% if gen_weak and 'wsi' in prefixes:
++% if gen_weak and ('wsi' in prefixes or 'vk_common' in prefixes):
++% for p in prefixes:
++% if p in ('wsi', 'vk_common'):
 +#ifdef __APPLE__
 +/*
 + * The tables name every entrypoint, and Mach-O will not leave one undefined: ld64 here
 + * refuses even a weak reference ("symbol(s) not found"), where ELF resolves it to NULL.
-+ * A weak definition satisfies it, and a file of this library that defines the same
-+ * entrypoint for real wins over it. Nothing reaches these: the driver's own table is
-+ * filled first, and the WSI entrypoints that exist are defined here strongly.
++ * A weak definition satisfies it, and a file that defines the same entrypoint for real
++ * wins over it. These prefixes are the tables whose entries are fallbacks for the
++ * driver's own (filled first, and a filled entry is not overwritten): what stays ours
++ * answers FEATURE_NOT_PRESENT where the platform would have had NULL.
 + */
 +% for e in entrypoints:
 +% if e.guard is not None:
 +#ifdef ${e.guard}
 +% endif
 +VKAPI_ATTR ${e.return_type} VKAPI_CALL
-+wsi_${e.name}(${e.decl_params()}) __attribute__ ((weak))
++${p}_${e.name}(${e.decl_params()}) __attribute__ ((weak))
 +{
-+% for p in e.params:
-+   (void)${p.name};
++% for q in e.params:
++   (void)${q.name};
 +% endfor
-+% if e.return_type != 'void':
++% if e.return_type == 'VkResult':
++   return VK_ERROR_FEATURE_NOT_PRESENT;
++% elif e.return_type != 'void':
 +   return (${e.return_type}) 0;
 +% endif
 +}
@@ -434,6 +439,8 @@ Only in b2/src/gallium/frontends/osmesa: osmesa.c.orig
 +% endif
 +% endfor
 +#endif // __APPLE__
++% endif
++% endfor
 +% endif
 +
  
