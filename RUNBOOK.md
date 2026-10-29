@@ -1327,3 +1327,41 @@ Two operational notes from the run:
 
 - **Full root-on-userdata**: `rd=ufsroot0` does not exist in this tree; `root_apfs=` mounts read-only; APFS has no allocator/transaction. Requires a writable filesystem, months of work.
 - **iOS 18**: Bergamota's Renegade (PAC strip) + xnu-11215/11417 + Chlorophyll. A separate branch, not this runbook.
+
+The gate on the phone, third answer (2026-10-29 22:12, build `eaeb31c`): step 3
+failed at `tu_knl_drm_msm.cc:1028 could not get GPU ID` with the shim's trace
+lines right above it — the enumeration reached the shim, the version answered
+"msm" 1.7, and the first GET_PARAM failed because **the IOKit user client was
+never opened**: only `drmOpenWithType()` opens it and Turnip opens the node path
+by itself. Fixed with `ensure_connection()`, committed, not yet on hardware.
+
+### The local (WSL) Turnip loop: set up, one step short (2026-10-29 night)
+
+For small changes, the mesa build now runs on this Windows machine under WSL
+(dist `Ace5Build`, Ubuntu 24.04.3 x86_64, rootfs imported from ubuntu-base;
+scripts in `local/wsl/`, all paths inside): `build-mesa.sh` de-CRLFs the tree
+(git's autocrlf breaks the patches and shebangs), re-syncs `tools/`, stages the
+checksummed tarball (archive.mesa3d.org is slow from WSL; download on the host),
+and runs `AIR=1 VULKAN=1 tools/mk-mesa.sh`. Toolchain: Ubuntu clang-18 (the
+wrapper's compiler), theos **x86_64** toolchain on `/root/theos`, and the
+iPhoneOS16.5.sdk — whose Windows clone needs two repairs done in
+`fix-sdk-links2.py` (symlinks came out as short text files: libSystem.tbd,
+pthread.h, 70 files) and `fix-tbd-crlf.sh` (autocrlf CRLF'd 2702 tbd YAMLs; no
+tapi parser accepts those).
+
+What works: meson configures and 600+ targets compile. What remains: **the
+linker**. meson probes the linker and, not recognising cctools ld64, emits
+GNU-style arguments (`--as-needed`, `--start-group`) that ld64 refuses; the
+CI's native aarch64 ld64 tolerates them. The fix in progress: run the CI's own
+aarch64 ld64 under `qemu-aarch64-static` (`use-cctools-a64.sh` installs qemu
+and the aarch64 toolchain; `mk-wrappers.sh` rebuilds the host/bin wrappers with
+the GNU arguments filtered) — written, not yet verified. llvm's ld64.lld is not
+an option: it cannot read the SDK's tbd v4 files.
+
+Once a local dylib builds: `export-outputs.sh` copies it to
+`local/components/`, the root repack is the same three commands as always, and
+the phone cycle is `reboot` → `enter --stage kernel` → `ramdisk --image
+local/system-metal.apfs` → `run --seconds 300 --bootcpu 1 --touch --kernel
+out/giulia-kernel/mach.ace5-public --root-image local/root-turnip.apfs`. The
+gate then answers step 3 for real: with `ensure_connection()` in, the next
+expected failure is none — or the first real device-creation data the port has.
