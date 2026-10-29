@@ -41,13 +41,14 @@ if [ -f "$MESA/libvulkan_freedreno.dylib" ]; then
     # No link against the ICD: turnip_test dlopen()s it, so only the Vulkan
     # headers of the build host are needed, and the device path is the library's
     # install name. The headers are copied out of the host's include tree on
-    # their own: -I/usr/include would let the host's libc headers (features.h and
-    # the bits/ it asks for) answer the iOS compile's <stdint.h> and the like.
+    # their own -- vulkan/ and the vk_video/ vulkan_core.h names: -I/usr/include
+    # would let the host's libc headers (features.h and the bits/ it asks for)
+    # answer the iOS compile's <stdint.h> and the like.
     VULKAN_INC=${VULKAN_INC:-/usr/include}
     if [ "$VULKAN_INC" = /usr/include ]; then
         rm -rf "$OUTPUT/vulkan-include"
         mkdir -p "$OUTPUT/vulkan-include"
-        cp -r "$VULKAN_INC/vulkan" "$OUTPUT/vulkan-include/"
+        cp -r "$VULKAN_INC/vulkan" "$VULKAN_INC/vk_video" "$OUTPUT/vulkan-include/"
         VULKAN_INC="$OUTPUT/vulkan-include"
     fi
     xnu-clang -arch arm64 -isysroot "$SDK" -O1 -I"$VULKAN_INC" \
