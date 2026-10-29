@@ -398,55 +398,44 @@ Only in b2/src/gallium/frontends/osmesa: osmesa.c.orig
     }
 +#endif
     if (pthread_cond_init(&device->timeline_cond, &condattr) != 0) {
---- a/src/vulkan/wsi/wsi_common.c
-+++ b/src/vulkan/wsi/wsi_common.c
-@@ -2254,3 +2254,21 @@
-       (device->timeline_semaphore_export_handle_types &
-        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
- }
-+
-+#ifdef __APPLE__
-+/*
-+ * The WSI dispatch table names every device entrypoint and expects the driver's table to
-+ * supply the ones WSI does not implement: the generated file is, in its own words, "the only
-+ * place we rely on undefined symbols to fall back to NULL". ld64 does not leave one
-+ * undefined, and names this one; nothing on this port asks for micromaps.
-+ */
-+VKAPI_ATTR VkResult VKAPI_CALL
-+wsi_WriteMicromapsPropertiesEXT(VkDevice device, uint32_t micromapCount,
-+                                const VkMicromapEXT *pMicromaps, VkQueryType queryType,
-+                                size_t stride, void *pData, size_t dataSize)
-+{
-+   (void)device; (void)micromapCount; (void)pMicromaps; (void)queryType;
-+   (void)stride; (void)pData; (void)dataSize;
-+   return VK_ERROR_FEATURE_NOT_PRESENT;
-+}
-+#endif
 --- a/src/vulkan/util/vk_entrypoints_gen.py
 +++ b/src/vulkan/util/vk_entrypoints_gen.py
-@@ -62,5 +62,12 @@
- #if !defined(_MSC_VER) && defined(VK_ENTRY_USE_WEAK)
+@@ -215,7 +215,38 @@
+     % endif
+   % endfor
+ };
+ % endfor
++
++% if gen_weak and 'wsi' in prefixes:
 +#ifdef __APPLE__
-+/* Mach-O's weak reference is weak_import: a plain weak, hidden, undefined symbol is an
-+ * error to ld64 ("symbol(s) not found"), where ELF resolves it to NULL. The WSI table is
-+ * the one that relies on that: the driver supplies the device entrypoints it names. */
-+#define VK_ENTRY_WEAK __attribute__ ((weak_import))
-+#else
- #define VK_ENTRY_WEAK __attribute__ ((weak))
-+#endif
- #else
- #define VK_ENTRY_WEAK
- #endif
-@@ -73,5 +80,12 @@
- #ifndef _WIN32
-+#if defined(__APPLE__) && defined(VK_ENTRY_USE_WEAK)
-+/* A hidden weak reference is what Mach-O has not got (see VK_ENTRY_WEAK above). Only the
-+ * translation unit that defines VK_ENTRY_USE_WEAK -- the table's own -- gives up its
-+ * symbols' hidden visibility, because that is the unit whose symbols stay optional. */
-+#define VK_ENTRY_HIDDEN
-+#else
- #define VK_ENTRY_HIDDEN __attribute__ ((visibility("hidden")))
-+#endif
- #else
- #define VK_ENTRY_HIDDEN
- #endif
++/*
++ * The tables name every entrypoint, and Mach-O will not leave one undefined: ld64 here
++ * refuses even a weak reference ("symbol(s) not found"), where ELF resolves it to NULL.
++ * A weak definition satisfies it, and a file of this library that defines the same
++ * entrypoint for real wins over it. Nothing reaches these: the driver's own table is
++ * filled first, and the WSI entrypoints that exist are defined here strongly.
++ */
++% for e in entrypoints:
++% if e.guard is not None:
++#ifdef ${e.guard}
++% endif
++VKAPI_ATTR ${e.return_type} VKAPI_CALL
++wsi_${e.name}(${e.decl_params()}) __attribute__ ((weak))
++{
++% for p in e.params:
++   (void)${p.name};
++% endfor
++% if e.return_type != 'void':
++   return (${e.return_type}) 0;
++% endif
++}
++% if e.guard is not None:
++#endif // ${e.guard}
++% endif
++% endfor
++#endif // __APPLE__
++% endif
++
+ 
+ % if entrypoints == device_entrypoints:
+ % for v, entrypoint_v in zip(tmpl_variants, tmpl_variants_sanitized):
