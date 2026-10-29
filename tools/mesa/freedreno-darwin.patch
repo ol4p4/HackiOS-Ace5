@@ -398,3 +398,27 @@ Only in b2/src/gallium/frontends/osmesa: osmesa.c.orig
     }
 +#endif
     if (pthread_cond_init(&device->timeline_cond, &condattr) != 0) {
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -2254,3 +2254,18 @@
+       (device->timeline_semaphore_export_handle_types &
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+ }
++
++#ifdef __APPLE__
++/*
++ * The WSI dispatch table names every device entrypoint and expects the driver's table to
++ * supply the ones WSI does not implement: the generated file is, in its own words, "the only
++ * place we rely on undefined symbols to fall back to NULL". ld64 does not leave one
++ * undefined, and names this one; nothing on this port asks for micromaps.
++ */
++VKAPI_ATTR VkResult VKAPI_CALL
++wsi_WriteMicromapsPropertiesEXT(VkDevice device, uint32_t micromapCount,
++                                const VkMicromapEXT *pMicromaps, VkQueryType queryType,
++                                size_t stride, void *pData, size_t dataSize)
++{
++   (void)device; (void)micromapCount; (void)pMicromaps; (void)queryType;
++   (void)stride; (void)pData; (void)dataSize;
++   return VK_ERROR_FEATURE_NOT_PRESENT;
++}
++#endif
