@@ -1042,26 +1042,42 @@ was blocked, in this order, and each is now answered:
    `symbol(s) not found`, where ELF resolves it to NULL. Measured with a probe
    built by the same xnu-clang and ld64. Mesa relies on that weak semantics in
    every generated dispatch table (the WSI, vk_common and cmd-enqueue tables
-   name entrypoints that nothing defines, expecting NULL). Two answers:
-   the generator emits **weak definitions under `__APPLE__` for every table
-   except the driver's own** (`tu` keeps its NULLs: there an undefined symbol
-   is what says the driver does not have the command) — 721 per table, exact
-   signatures from vk.xml, strong definitions win; and the dylib links with
-   `-undefined,dynamic_lookup` so the driver tables' remaining weak references
-   stay weak. A genuinely missing strong symbol will still stop the gate at
-   dlopen.
+   name entrypoints that nothing defines, expecting NULL). The dylib links with
+   `-undefined,dynamic_lookup`: dyld binds a missing **weak** reference to NULL,
+   which is the ELF behaviour the tables are written for, and a missing
+   **strong** one — the shim's C++-mangled names before the header gained its
+   `extern "C"` — fails loudly at dlopen instead (`symbol not found in flat
+   namespace __Z14drmSyncobjWaitiPjjxjS_`, which the gate did).
+   An earlier attempt generated weak **definitions** (stubs returning
+   NOT_PRESENT) for the fallback tables instead: it linked, but it poisoned the
+   dispatch — `vk_instance_init` fills empty slots from the WSI table
+   (fill=false), a stub took `vkEnumeratePhysicalDevices` before
+   `vk_common_instance_entrypoints` could, and the gate answered
+   `step 3: VK_ERROR_FEATURE_NOT_PRESENT`. NULL is the correct value; the
+   stubs were removed.
 5. The gate's Vulkan headers come from the build host (`libvulkan-dev`); they
    are copied out as their own include root (`vulkan/` + `vk_video/`), because
    `-I/usr/include` lets the host's libc answer an iOS compile's `<stdint.h>`.
 
-Measured in CI: `libvulkan_freedreno.dylib` 10,518,148 bytes, exports
-`vk_icdGetInstanceProcAddr`/`vk_icdNegotiateLoaderICDInterfaceVersion`; the
-build also strips it, fixes its install name, and ships it into the root as
-`/redwood/lib/libvulkan_freedreno.dylib` with the gate as
+Measured in CI: `libvulkan_freedreno.dylib` 10,518,148 bytes (the build also
+strips it, fixes its install name and checks the ICD exports); it ships into the
+root as `/redwood/lib/libvulkan_freedreno.dylib` with the gate as
 `/redwood/bin/turnip_test` (`rc.jobs.turnip` runs it after the settle).
-The hardware gate has not run yet: steps 1–7 (ICD, instance, physical device,
-device+queue, host-visible memory, image, empty submit→fence) answer "can
-Turnip talk to RedwoodGPU at all" and each fails in a different place.
+
+The gate on the phone, so far (2026-10-29):
+
+- boot 1, no `--touch`: `turnip_test` ran, `dlopen` failed —
+  `symbol not found in flat namespace __Z14drmSyncobjWaitiPjjxjS_` (the
+  `extern "C"` answer above).
+- boot 2, with `--touch`: **step 1 (the ICD answers
+  `vk_icdGetInstanceProcAddr`) and step 2 (`vkCreateInstance`) pass**; step 3
+  (`vkEnumeratePhysicalDevices`) answered `VK_ERROR_FEATURE_NOT_PRESENT`, which
+  was the stubs' doing (above), not the driver's: the ICD loads and the
+  instance is created.
+- The next boot runs the library with the stubs removed. Steps 1–7 (ICD,
+  instance, physical device, device+queue, host-visible memory, image, empty
+  submit→fence) answer "can Turnip talk to RedwoodGPU at all" and each fails in
+  a different place.
 
 **Family update 2026-10-28: the PCIe Wi-Fi route now has working in-family
 code.** `azzlantern/hackios-thyme` (Mi 10S, SM8250-AC / SD870 — the same SoC and

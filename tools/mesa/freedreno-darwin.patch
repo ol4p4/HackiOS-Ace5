@@ -398,54 +398,6 @@ Only in b2/src/gallium/frontends/osmesa: osmesa.c.orig
     }
 +#endif
     if (pthread_cond_init(&device->timeline_cond, &condattr) != 0) {
---- a/src/vulkan/util/vk_entrypoints_gen.py
-+++ b/src/vulkan/util/vk_entrypoints_gen.py
-@@ -215,7 +215,45 @@
-     % endif
-   % endfor
- };
- % endfor
-+
-+% if gen_weak and any(p != 'tu' for p in prefixes):
-+% for p in prefixes:
-+% if p != 'tu':
-+#ifdef __APPLE__
-+/*
-+ * The tables name every entrypoint, and Mach-O will not leave one undefined: ld64 here
-+ * refuses even a weak reference ("symbol(s) not found"), where ELF resolves it to NULL.
-+ * A weak definition satisfies it, and a file that defines the same entrypoint for real
-+ * wins over it. The driver's own table (prefix tu) keeps its NULLs: there an undefined
-+ * symbol is what says the driver does not have the command. These prefixes are the
-+ * runtime's and WSI's fallback tables, where a filled entry answers NOT_PRESENT.
-+ */
-+% for e in entrypoints:
-+% if e.guard is not None:
-+#ifdef ${e.guard}
-+% endif
-+VKAPI_ATTR ${e.return_type} VKAPI_CALL
-+${p}_${e.name}(${e.decl_params()}) __attribute__ ((weak))
-+{
-+% for q in e.params:
-+   (void)${q.name};
-+% endfor
-+% if e.return_type == 'VkResult':
-+   return VK_ERROR_FEATURE_NOT_PRESENT;
-+% elif e.return_type != 'void':
-+   return (${e.return_type}) 0;
-+% endif
-+}
-+% if e.guard is not None:
-+#endif // ${e.guard}
-+% endif
-+% endfor
-+#endif // __APPLE__
-+% endif
-+% endfor
-+% endif
-+
- 
- % if entrypoints == device_entrypoints:
- % for v, entrypoint_v in zip(tmpl_variants, tmpl_variants_sanitized):
 --- a/src/freedreno/vulkan/meson.build
 +++ b/src/freedreno/vulkan/meson.build
 @@ -183,5 +183,6 @@
