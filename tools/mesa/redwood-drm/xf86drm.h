@@ -16,7 +16,9 @@
 #include "drm-uapi/drm.h"
 
 #define DRM_NODE_PRIMARY        0
+#define DRM_NODE_CONTROL        1
 #define DRM_NODE_RENDER         2
+#define DRM_NODE_MAX            3
 #define DRM_CLOEXEC             O_CLOEXEC
 #define DRM_RDWR                O_RDWR
 
@@ -48,10 +50,33 @@ int drmPrimeFDToHandle(int fd, int surface, uint32_t *handle);
 int drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle);
 int drmSyncobjDestroy(int fd, uint32_t handle);
 int drmSyncobjReset(int fd, const uint32_t *handles, uint32_t count);
+int drmSyncobjSignal(int fd, const uint32_t *handles, uint32_t count);
+int drmSyncobjTimelineSignal(int fd, const uint32_t *handles, const uint64_t *points, uint32_t count);
+int drmSyncobjQuery(int fd, uint32_t *handles, uint64_t *points, uint32_t count);
+int drmSyncobjWait(int fd, uint32_t *handles, uint32_t count, int64_t timeout_ns, uint32_t flags,
+    uint32_t *first_signaled);
+int drmSyncobjTimelineWait(int fd, uint32_t *handles, const uint64_t *points, uint32_t count,
+    int64_t timeout_ns, uint32_t flags, uint32_t *first_signaled, uint64_t *points_signaled);
 int drmSyncobjFDToHandle(int fd, int obj_fd, uint32_t *handle);
 int drmSyncobjHandleToFD(int fd, uint32_t handle, int *obj_fd);
 int drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd);
 int drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd);
+
+/*
+ * The device list Turnip's instance walks (vk_instance.c calls drmGetDevices2, and hands each
+ * device to tu_physical_device_try_create, which opens the render node and asks for its stat).
+ * There is one device and no /dev/dri here; the device is made up, naming the node
+ * drmOpenWithType() opens. What the fields of Linux's _drmDevice beyond these two are for --
+ * buses and such -- nothing of ours reads.
+ */
+typedef struct _drmDevice {
+	char **nodes;                   /* DRM_NODE_MAX node paths, NULL where there is none */
+	int available_nodes;            /* which nodes nodes[] has, as 1 << the node */
+	int bustype;
+} drmDevice, *drmDevicePtr;
+
+int drmGetDevices2(uint32_t flags, drmDevicePtr devices[], int max_devices);
+void drmFreeDevices(drmDevicePtr devices[], int count);
 
 /* Not libdrm's: a buffer's memory in this process, in place of mmap() on the device (freedreno_bo.c is patched to call these). */
 void *redwood_drm_map(int fd, uint32_t handle, uint64_t size);

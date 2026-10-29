@@ -83,12 +83,23 @@
    build_by_default : false,
  )
  
+--- a/src/freedreno/vulkan/meson.build
++++ b/src/freedreno/vulkan/meson.build
+@@ -100,7 +100,8 @@
+ if freedreno_kmds.contains('msm')
+   tu_flags += '-DTU_HAS_MSM'
+   libtu_files += files('tu_knl_drm_msm.cc', 'tu_knl_drm.cc')
++  libtu_files += files('../../redwood-drm/redwood_drm.c')
+   tu_deps += dep_libdrm
+ endif
+
+ if freedreno_kmds.contains('virtio')
 --- a/src/freedreno/drm/msm/msm_priv.h
 +++ b/src/freedreno/drm/msm/msm_priv.h
 @@ -176,7 +176,16 @@
     if (ns == OS_TIMEOUT_INFINITE)
        ns = 3600ULL * NSEC_PER_SEC; /* 1 hour timeout is almost infinite */
- 
+
 +#ifdef __APPLE__
 +   /* The kernel's driver goes by the clock that runs on while the machine sleeps,
 +    * mach_continuous_time(), which is this one. CLOCK_MONOTONIC is another on Darwin: the
