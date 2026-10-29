@@ -204,29 +204,51 @@ syncobj_wait(int fd, uint32_t *handles, const uint64_t *points, uint32_t count, 
 static io_connect_t connection;
 static int connection_fd = -1;
 
+/*
+ * The user client, opened on the first ask. freedreno reaches it through
+ * drmOpenWithType(), which also returns its file descriptor; Turnip never
+ * calls that -- it opens the node path on its own -- so every request has to
+ * be able to open the connection for itself.
+ */
+static int
+ensure_connection(void)
+{
+	io_service_t service;
+
+	if (connection_fd >= 0) {
+		return 0;
+	}
+	service = IOServiceGetMatchingService(0, IOServiceMatching(REDWOOD_GPU_SERVICE));
+	if (service == 0) {
+		return ENODEV;
+	}
+	if (IOServiceOpen(service, mach_task_self(), 0, &connection) != 0) {
+		IOObjectRelease(service);
+		return ENODEV;
+	}
+	IOObjectRelease(service);
+	connection_fd = open("/dev/null", O_RDWR);
+	if (connection_fd < 0) {
+		return errno ? errno : ENOENT;
+	}
+	return 0;
+}
+
 int
 drmOpenWithType(const char *name, const char *busid, int type)
 {
-	io_service_t service;
+	int error;
 
 	(void)busid;
 	(void)type;
 	if (strcmp(name, "msm") != 0) {
 		return -1;
 	}
-	if (connection_fd >= 0) {
-		return dup(connection_fd);
-	}
-	service = IOServiceGetMatchingService(0, IOServiceMatching(REDWOOD_GPU_SERVICE));
-	if (service == 0) {
+	error = ensure_connection();
+	if (error != 0) {
+		errno = error;
 		return -1;
 	}
-	if (IOServiceOpen(service, mach_task_self(), 0, &connection) != 0) {
-		IOObjectRelease(service);
-		return -1;
-	}
-	IOObjectRelease(service);
-	connection_fd = open("/dev/null", O_RDWR);
 	return dup(connection_fd);
 }
 
@@ -234,7 +256,13 @@ static int
 call(unsigned number, void *data, size_t size)
 {
 	size_t returned = size;
-	kern_return_t result = IOConnectCallStructMethod(connection, number, data, size, data, &returned);
+	kern_return_t result;
+	int error = ensure_connection();
+
+	if (error != 0) {
+		return error;
+	}
+	result = IOConnectCallStructMethod(connection, number, data, size, data, &returned);
 
 	switch (result) {
 	case 0:
