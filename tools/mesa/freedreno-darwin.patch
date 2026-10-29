@@ -379,3 +379,22 @@ Only in b2/src/gallium/frontends/osmesa: osmesa.c.orig
     /* We use a null software winsys since we always just render to ordinary
      * driver resources.
      */
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -2709,11 +2709,16 @@
+                                  "pthread condattr init");
+       goto fail_timeline_cond;
+    }
++   /* Darwin's condition variables take no clock of their choosing (the realtime one). The
++    * waits here that pass a CLOCK_MONOTONIC time do not block on it, they poll to their
++    * deadline (tu_knl_drm.cc). */
++#ifndef __APPLE__
+    if (pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC) != 0) {
+       pthread_condattr_destroy(&condattr);
+       result = vk_startup_errorf(physical_device->instance,
+                                  VK_ERROR_INITIALIZATION_FAILED,
+                                  "pthread condattr clock setup");
+       goto fail_timeline_cond;
+    }
++#endif
+    if (pthread_cond_init(&device->timeline_cond, &condattr) != 0) {
