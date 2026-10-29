@@ -187,8 +187,10 @@ main(void)
 		VkPhysicalDeviceProperties p;
 
 		pGetPhysicalDeviceProperties(devices[i], &p);
-		printf("turnip_test: device %u: \"%s\", type %d, vendor %#x, driver %#x (version %u.%u.%u), API %u.%u.%u\n",
-		    i, p.deviceName, p.deviceType, p.vendorID, p.driverID,
+		/* VkPhysicalDeviceProperties has no driverID in newer headers (the
+		 * driver's identity moved to VK_KHR_driver_properties): the version. */
+		printf("turnip_test: device %u: \"%s\", type %d, vendor %#x, driver version %u.%u.%u, API %u.%u.%u\n",
+		    i, p.deviceName, p.deviceType, p.vendorID,
 		    VK_API_VERSION_MAJOR(p.driverVersion), VK_API_VERSION_MINOR(p.driverVersion),
 		    VK_API_VERSION_PATCH(p.driverVersion), VK_API_VERSION_MAJOR(p.apiVersion),
 		    VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
@@ -411,7 +413,7 @@ out:
 			pDestroyImage(device, image, NULL);
 		if (memory != VK_NULL_HANDLE)
 			pFreeMemory(device, memory, NULL);
-		pDestroyDevice(device);
+		pDestroyDevice(device, NULL);
 	}
 	free(devices);
 	if (instance != VK_NULL_HANDLE && pDestroyInstance != NULL)
