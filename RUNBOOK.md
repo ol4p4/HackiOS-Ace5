@@ -1358,6 +1358,37 @@ and the aarch64 toolchain; `mk-wrappers.sh` rebuilds the host/bin wrappers with
 the GNU arguments filtered) — written, not yet verified. llvm's ld64.lld is not
 an option: it cannot read the SDK's tbd v4 files.
 
+**Verified 2026-10-30: the WSL loop builds.** Two fixes were needed past the
+linker itself:
+
+1. **The SDK's symlinks are broken on the Windows checkout.** Git materialised
+   every framework's `Headers → Versions/Current/Headers` (and `Current → A`)
+   as a short text file, so `#include <IOKit/IOKitLib.h>` failed inside the
+   libdrm shim — the real header sits at
+   `Versions/A/Headers/IOKitLib.h` and the git tree has it. The tbd and pthread
+   repairs of 10-29 did not cover the framework links.
+   `local/wsl/fix-framework-links.sh` walks the WSL SDK copy and recreates any
+   short file whose whole content is a relative path to an existing target
+   (2 links for IOKit; rerun it after every fresh `copy-sdk.sh`).
+2. **`cross.ini` carried `-isysroot` on the compile args only.** Every meson
+   dependency probe that ends in `-l<name>` therefore linked without a sysroot
+   and failed (`library not found for -lz`), meson quietly answered
+   `Dependency zlib skipped: feature zlib disabled`, and the last link of
+   `libOSMesa.8.dylib` died on undefined `_gzopen` —
+   `src/freedreno/common/freedreno_rd_output.c` calls `gzopen` unconditionally,
+   with no `HAVE_ZLIB` guard. `c_link_args`/`cpp_link_args` now carry
+   `-isysroot` (`b9e85e0`), zlib is back to `auto`, resolves through the SDK's
+   `libz.tbd`, and dyld finds `libz.dylib` on the device. The WSL-only
+   `-Dzlib=disabled` workaround in `build-mesa.sh` is gone.
+
+The build then completes in about 8 minutes: `libOSMesa.8.dylib` 14.8 MB,
+`libredwoodair.dylib` 9.3 MB, `libvulkan_freedreno.dylib` 10.8 MB — the
+Turnip library **without the fallback-table stubs**, linked with
+`-undefined,dynamic_lookup`. `export-outputs.sh` copies the dylib to
+`local/components/`, it is swapped into `local/root-turnip/lib/` and the root
+repacked (3176 blocks). Everything is staged for the gate run; only the phone
+is needed.
+
 Once a local dylib builds: `export-outputs.sh` copies it to
 `local/components/`, the root repack is the same three commands as always, and
 the phone cycle is `reboot` → `enter --stage kernel` → `ramdisk --image
