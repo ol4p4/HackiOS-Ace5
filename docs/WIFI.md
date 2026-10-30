@@ -82,18 +82,21 @@ M1–M3.5 是"移植 + 板级差异"：annibale 给出同 SoC 的寄存器与流
 
 ## 7. ath12k 首次编译（2026-10-30）
 
-`tools/mk-ath12k.sh` 把 Linux 的 ath12k（7.0.14 含 `wifi7/hal_wcn7850.c`）按 ath11k 的方式编到 FreeBSD 15.1 的 LinuxKPI 上；`VERSION=` 可换 Linux 版本。**结论：M5–M6 不是"兄弟脚本加一个 DRIVER 列表"，而且版本选择决定代价。**
+`tools/mk-ath12k.sh` 把 Linux 的 ath12k 按 ath11k 的方式编到 FreeBSD 15.1 的 LinuxKPI 上；`VERSION=` 换 Linux 版本，`LKV=` 换 LinuxKPI 自称的版本。**结论：M5–M6 不是"兄弟脚本加一个 DRIVER 列表"；6.12.1 是最接近的版本，剩余 5 个文件。**
 
 | Linux | 编过的 ath12k 文件 | 失败 | 主要缺口 |
 |---|---|---|---|
-| 7.0.14 | 20 / 37 | 17：core、dp、dp_htt、dp_peer、dp_rx、dp_tx、mac、mhi、p2p、pci、qmi、reg、wifi7/{core,dp_mon,dp_tx,hw}、wmi | LinuxKPI 的 802.11 头比 7.0 旧：`rate_info.eht_ru_alloc`、`ieee80211_mgmt.addba_resp`、`ieee80211_ops.link_sta_statistics`、`WLAN_EXT_CAPA11_BCN_PROTECT`、`WLAN_EID_NON_TX_BSSID_CAP`、radiotap EHT 枚举；通用设施缺 `linux/clk.h`、`mdelay`、`skb_cow_data`、`rcu_read_lock_any_held`、`cleanup_spinlock_bh_t`、`kmalloc_objs` 的参数个数、`struct reserved_mem`、`KHZ_TO_MHZ` |
-| 6.12.1 | 12 / 19 | 7：ce、dp、dp_rx、dp_tx、mac、mhi、pci | 只剩 `mdelay`、`from_timer`、`WLAN_EID_NON_TX_BSSID_CAP`、`IEEE80211_EHT_PHY_CAP4_PSR_SR_SUPP`、`SET_SYSTEM_SLEEP_PM_OPS`；MHI 的 `mhi_*`。芯片支持在（`hw.c` 有 `ATH12K_HW_WCN7850_HW20`） |
+| 7.0.14 | 20 / 37 | 17：core、dp、dp_htt、dp_peer、dp_rx、dp_tx、mac、mhi、p2p、pci、qmi、reg、wifi7/{core,dp_mon,dp_tx,hw}、wmi | LinuxKPI 的 802.11 头比 7.0 旧：`rate_info.eht_ru_alloc`、`ieee80211_mgmt.addba_resp`、`ieee80211_ops.link_sta_statistics`、`WLAN_EXT_CAPA11_BCN_PROTECT`、radiotap EHT 枚举；通用设施缺 `linux/clk.h`、`mdelay`、`skb_cow_data`、`rcu_read_lock_any_held`、`cleanup_spinlock_bh_t`、`kmalloc_objs` 的参数个数、`struct reserved_mem`、`KHZ_TO_MHZ` |
+| 6.16.1 | 9 / 19 | 10 | 同 7.0 的 802.11 漂移（`eht_ru_alloc`、radiotap EHT 枚举、`eml_cap`、`MCS15_DISABLE`）+ `struct reserved_mem`、`rcu_read_lock_any_held`、`system_bh_wq` |
+| 6.12.1（`LKV=70000` 与 `61600` 结果相同） | 14 / 19 | 5：dp_rx、dp_tx、mac、mhi、pci | 只剩 `skb_cow_data`/`pskb_put`、`list_cut_before`、`cfg80211_find_ext_elem`、3 个 mac80211 op 签名（LinuxKPI 多一个 `link_id` 参数）、PM ops 初始化器、`mhi_power_down_keep_dev` |
 
-已补的编译层 shim（`wifi/lx/include/`，只解决编译，不代表功能）：`linux/panic_notifier.h`（+ `wifi/lx/src/lx_panic.c`）、`acmacosx.h`（ACPICA 在 `__APPLE__` 下找不到的平台头）、`linux/of_graph.h`、`linux/rcupdate.h`（`RCU_LOCKDEP_WARN`）。`lx_bus.c` 是 ath11k 的 AHB 总线（include 了 ath11k 的 `pcic.h`），不编进 ath12k 对象。
+已补的编译层 shim（`wifi/lx/include/`，只解决编译，不代表功能）：`linux/panic_notifier.h`（+ `wifi/lx/src/lx_panic.c`）、`acmacosx.h`（ACPICA 在 `__APPLE__` 下找不到的平台头）、`linux/of_graph.h`、`linux/rcupdate.h`（`RCU_LOCKDEP_WARN`）、`linux/delay.h` 与 `linux/timer.h`（`from_timer` 别名；LinuxKPI 在 `LINUXKPI_VERSION>=61600` 只给 `timer_container_of`）、`linux/pm.h`（`SET_LATE_SYSTEM_SLEEP_PM_OPS`）、`linux/ieee80211.h`（`WLAN_EID_NON_TX_BSSID_CAP`、`IEEE80211_EHT_PHY_CAP4_PSR_SR_SUPP`）。`lx_bus.c` 是 ath11k 的 AHB 总线（include 了 ath11k 的 `pcic.h`），不编进 ath12k 对象。
+
+`LKV` 对 6.12.1 没有区别：LinuxKPI 的 mac80211 操作表不按 `LINUXKPI_VERSION` 回退，三个 `link_id` 签名差仍在。要么在 `mac.c` 里加薄包装，要么改 LinuxKPI。
 
 三条路线：
 
-1. **钉 6.12.1 的 ath12k**（推荐先做）：12/19 已过，补上面五个小项后重测，预期只剩 MHI。
+1. **钉 6.12.1 的 ath12k**（推荐）：14/19 已过，剩余 4 类是小助手/签名适配 + MHI；芯片支持在（`hw.c` 有 `ATH12K_HW_WCN7850_HW20`）。
 2. **补 LinuxKPI 到 7.0**：7.0 的 17 个失败文件对应几十处 802.11/cleanup/slab 差异，还要跟 FreeBSD 的补丁集合并；代价最大。
 3. **K90 的 Plan A**：不用 ath12k 的 mac80211 层，手写最小 WMI；绕开 802.11 头，但 MHI 仍要自己写。
 

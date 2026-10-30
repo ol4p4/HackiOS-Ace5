@@ -9,4 +9,8 @@
 #undef WME_AC_VI
 #undef WME_AC_VO
 #undef WME_NUM_AC
+/* Linux's own headers pull these in transitively; LinuxKPI's set does not, and
+ * ath12k uses mdelay() and from_timer() without including them. */
+#include <linux/delay.h>
+#include <linux/timer.h>
 #include <lx_more.h>

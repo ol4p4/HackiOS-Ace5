@@ -113,7 +113,7 @@ CFLAGS="-mkernel -mgeneral-regs-only -fno-builtin -fno-common -ffreestanding -fn
 	-D__FreeBSD__=15 -D_KERNEL -DKLD_MODULE -DHAVE_KERNEL_OPTION_HEADERS -include opt_global.h
 	-I$W/include -Igen -I$S -I$S/contrib/ck/include
 	-I$S/compat/linuxkpi/common/include -I$S/compat/linuxkpi/dummy/include
-	-include $S/compat/linuxkpi/common/include/linux/kconfig.h -DLINUXKPI_VERSION=70000"
+	-include $S/compat/linuxkpi/common/include/linux/kconfig.h -DLINUXKPI_VERSION=${LKV:-70000}"
 DFLAGS="-Isrc/ath12k -Isrc/ath12k/wifi7 -Isrc -include $W/include/lx_prelude.h -DCONFIG_ATH12K
 	-DCONFIG_ATH12K_DEBUG -DKBUILD_MODNAME=\"ath12k\""
 source "$ROOT/xnu-env.sh"
@@ -122,6 +122,13 @@ for h in lx qmi; do
 done
 DFLAGS="$DFLAGS -DLX_REDWOOD_LX_H=\"$XNU_SRC/bsd/sys/redwood_lx.h\" -DLX_REDWOOD_QMI_H=\"$XNU_SRC/bsd/sys/redwood_qmi.h\""
 mkdir -p obj out
+# The objects depend on the LinuxKPI version the build pretends to be; start
+# over when it changes, or a stale object from the other value is reused.
+if [ "$(cat obj/.lkv 2>/dev/null)" != "${LKV:-70000}" ]; then
+	rm -rf obj
+	mkdir -p obj
+	echo "${LKV:-70000}" > obj/.lkv
+fi
 rm -f obj/*.err
 compile() {		# compile SOURCE OBJECT [FLAGS]: only when the object is older than anything it was made of
 	local src=$1 obj=$2
