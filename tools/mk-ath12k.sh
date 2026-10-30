@@ -14,15 +14,17 @@
 # file wanted; whatever links but is not built becomes a named stub in
 # out/stubs.txt. A failure here is an answer, not a regression.
 #
-#   VERSION   of Linux (default 7.0.14, the release LinuxKPI is written for;
-#             override to test an older ath12k against the same LinuxKPI)
+#   VERSION   of Linux (default 6.12.1: 14 of 19 ath12k files compile against
+#             LinuxKPI 15.1; 7.0.14 and 6.16.1 need far more LinuxKPI work —
+#             see docs/WIFI.md §7)
 #   SHA256    of the tarball; "skip" accepts any (for a version probe)
+#   LKV       the Linux version LinuxKPI pretends to be (default 70000)
 #   B         build directory (default xnu-deps/build/ath12k)
 #
 # usage: tools/mk-ath12k.sh [fetch]        "fetch" stops when the driver's sources are there
 set -e
-VERSION=${VERSION:-7.0.14}
-SHA256=${SHA256:-de9999b784d2293f00d39c62d8f92a08ab8a54bc4e80ffd250a0c09cb07a0f98}
+VERSION=${VERSION:-6.12.1}
+SHA256=${SHA256:-0193b1d86dd372ec891bae799f6da20deef16fc199f30080a4ea9de8cef0c619}
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 B=${B:-$ROOT/xnu-deps/build/ath12k}
 ATH=drivers/net/wireless/ath
