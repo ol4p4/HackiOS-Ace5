@@ -11,8 +11,9 @@
   the cadence the system is actually running the display at, and shows it large
   enough that one screenshot answers the question.
 
-  It is served from the small root (file:///redwood/share/web/refresh.html) so
-  no network is needed: Wi-Fi is not ported yet.
+  It is served from the small root by webserve on loopback and opened as
+  http://127.0.0.1:8080/ (rc.jobs.safari): SpringBoard refuses a file:// URL
+  handed to it by another process, and Wi-Fi is not ported yet.
 -->
 <style>
   html, body { margin: 0; height: 100%; background: #000; color: #fff;

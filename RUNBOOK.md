@@ -1466,3 +1466,46 @@ place of the hand-written Metal frontend — is therefore not a plan any more bu
 a working stack: what remains for a Vulkan-composited desktop is WSI, swapchain
 and the CoreAnimation bridge, the same list UniXNU worked through.
 
+
+**Measured 2026-10-30 14:17: Safari works on loopback, and the device says 60.0 Hz.**
+The refresh-rate page (`userland/share/web/refresh.html`) is now opened for real
+(`logs/giulia/20261030-141725-*`, recipe `tools/ace5/rc.jobs.safari`), and the
+answer is on one screenshot: **60.0 Hz, 16.7 ms a frame, 16.0–17.0 ms, 4000
+frames in 67 s, "on cadence"** — no frame over 20 ms, and a one-bar histogram
+at the 16 ms bucket. What it took to get there:
+
+1. **`file://` is refused, and not because Safari is missing.** The 14:07 run's
+   log says `battery_test: SpringBoard was asked to open
+   file:///redwood/share/web/refresh.html: it REFUSES`; `MobileSafari.app` is in
+   `system.apfs` (and `local/ios165` is only fetcher scripts — the image, not the
+   tree, is the place to look). `SBSOpenSensitiveURLAndUnlock` hands `prefs:` and
+   http(s) URLs to their applications, but a file URL from another process is
+   not something iOS opens. The upstream POCO project opens `https://yandex.ru`
+   the same way and reports Safari working, so the scheme was the variable.
+2. **`webserve`** (`userland/src/webserve.c`, built by
+   `local/wsl/build-webserve.sh`) serves `/redwood/share/web` on
+   `127.0.0.1:8080`; `rc.jobs.safari` starts it with the trailing `&`
+   (`init.c`'s run_rc "do not wait"), prints `net_test show` for the record, and
+   opens `http://127.0.0.1:8080/`. `net_test show` confirms `lo0: inet
+   127.0.0.1`, and the log's `SpringBoard was asked to open
+   http://127.0.0.1:8080/: it does` plus `webserve: GET / -> 200 refresh.html
+   (4788 bytes)` (twice) is the whole path: SpringBoard → Safari → WebKit →
+   CFNetwork → loopback → our server. No radio is involved.
+3. **What 60 Hz means here.** The page reports its viewport as
+   `375×812 @3.00×` — the display is presenting 1125×2436, i.e. the iPhone X
+   class of screen. Those are not ProMotion devices, so CoreAnimation's display
+   link runs at 60 Hz by design, and 60.0 with a 16.0–17.0 ms spread is the
+   compositor pacing the run at exactly what it asks for. 120 Hz is therefore
+   not a bug to fix in the present path: it would need both a ProMotion device
+   identity and a 120 Hz mode in `MiniIOMobileFramebuffer`, and nothing in the
+   four system-app groups depends on it.
+4. **The "10 frames" impression.** `redwood-gl` counts in hundreds during the
+   same session (30, 200, …, 1200 frames, ~0.45 ms waiting for the picture and
+   3–4 ms a frame) while rAF logged 4000 callbacks: the present path draws when a
+   client commits, and the page only changes its text every ten frames, so an
+   idle compositor simply looks slow from the host side. It is not capped.
+5. Safari's own UI renders too (tab bar, `AA`, URL field, share/bookmark/tab
+   buttons) and the status-bar clock advanced 6:18 → 6:19 across the series —
+   the first browser screenshot of this port, and the cheapest way to test any
+   page from now on: drop it in `userland/share/web/`, open
+   `http://127.0.0.1:8080/<name>`.

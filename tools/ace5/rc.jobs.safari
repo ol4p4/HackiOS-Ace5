@@ -1,0 +1,15 @@
+# Commands run by the launchd job com.redwood.demo (see com.redwood.demo.plist).
+# The refresh-rate page on the device itself (RC_JOBS=rc.jobs.safari). SpringBoard
+# refuses a file:// URL handed to it by another process ("it REFUSES"), so the page
+# is served on loopback instead -- which needs no radio -- and opened as an http URL,
+# the same way rc.jobs.safari opens yandex.ru on a port with Wi-Fi. webserve keeps
+# running (the trailing & is run_rc's "do not wait") so reloads work; it says each
+# request on the console, which is how the log tells "Safari never asked" from
+# "Safari asked and WebKit did not paint".
+/redwood/bin/webserve /redwood/share/web 8080 &
+/redwood/bin/net_test show
+/redwood/bin/rwtouch wait 40
+/redwood/bin/battery_test open http://127.0.0.1:8080/
+/redwood/bin/hello_dyn SAFARI_OPEN
+/redwood/bin/rwtouch wait 60
+/bin/ps -A
