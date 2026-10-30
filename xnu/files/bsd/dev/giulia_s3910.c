@@ -46,7 +46,12 @@ static void s3910_thread(__unused void *arg, __unused wait_result_t wait) {
     if (rc) goto failed;
     printf("s3910: ready; max=%u,%u, 10 contacts, polled SPI\n",h->max_x,h->max_y);
     for (unsigned tick=0;;tick++) {
-        if (!s39_get(h,162) || tick%10==0) {
+        /* Read every pass. The attention line (162) is high between reports and
+         * its low pulse is shorter than the 8 ms sample, so the old
+         * `|| tick%10==0` fallback set the real cadence at 80 ms (~12 Hz), and
+         * dragging felt like steps. One header read is ~100 us of bit-banged
+         * SPI, so polling every pass costs about 1% of a core. */
+        {
             rc=s39_read(h);
             if (rc<0) {
                 if (++errors>=10) { release_all(); goto failed; }
