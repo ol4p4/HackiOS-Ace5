@@ -1578,7 +1578,11 @@ Only the board-level differences (base addresses, GPIOs, RPMh rails, SMMU
 mapping) need to be re-derived. Those facts are now exported from the DTB into
 `docs/ACE5-HW.md` (2026-10-30), including the vendor `qcom,phy-sequence` and
 `qcom,pcie-sm-seq`; `tools/ace5/pcie-regs.py` generates
-`xnu/files/bsd/dev/giulia_pcie_regs.h` from them.
+`xnu/files/bsd/dev/giulia_pcie_regs.h` from them. `tools/mk-ath12k.sh` also
+answered the M5–M6 question: ath12k of Linux 7.0.14 fails on 17 files (the
+LinuxKPI 802.11 headers are older than 7.0), while 6.12.1 fails on 7
+(`mdelay`, `from_timer`, two 802.11 constants, PM ops, MHI). See
+`docs/WIFI.md` §7.
 
 **Host-side M1 is ready (2026-10-30).** `xnu/files/bsd/dev/giulia_pcie.c`
 implements `pcie_step=1` (read-only survey: GDSC/clock/reset state, PARF/PHY/DBI

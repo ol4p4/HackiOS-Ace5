@@ -47,7 +47,7 @@ WCN6750 与 WCN7850 的差别只在**总线与固件协议**：6750 走 WPSS（A
 | M3 | BAR0 映射、MHI 寄存器可读、MSI 落点、**QMP open** | `MHI_READY`/`MHIVER` 读出，写 MSI 后收到一次中断；QMP 握手返回 | MSI 控制器 0x17110040 的编程；QMP 邮箱 99 |
 | M3.5 | **apps SMMU/QTB context、IOVA 窗、端点 DMA 映射** | 一次 host→device 的 DMA 往返（host 写一块 buffer，模块读回同一个值） | SID `0x1401` 的路由与 context；与 DisplayDxe/保留区撞窗（K90 放弃准则第 4 条） |
 | M4 | MHI 主机状态机 + **BHI/BHIe 固件下载** | `mhi: device in M0`；DB 通道可写；`EE` 同步完成 | 模块停在 PBL（K90 实测），必须由 host 下载：先 BHI 下 `amss.bin` 前 512 KiB，再 BHIe 下全量。固件来源 `/vendor/firmware_mnt/image/kiwi`（modem 分区）或 linux-firmware `ath12k/WCN7850/hw2.0/`；版本/长度/SHA-256 必须固定 |
-| M5 | QRTR/QMI：board data 下发，ath12k 起 | `ath12k: firmware ready`；`wlan0` 出现在 `net_test show` | board-2.bin/regdb 的来源与国家码要写死；MAC 地址来源（thyme 不给 `wifi_mac=` 就扫不到网）；board file 版本与固件 API 对齐 |
+| M5 | QRTR/QMI：board data 下发，ath12k 起 | `ath12k: firmware ready`；`wlan0` 出现在 `net_test show` | board-2.bin/regdb 的来源与国家码要写死；MAC 地址来源（thyme 不给 `wifi_mac=` 就扫不到网）；board file 版本与固件 API 对齐；**ath12k 版本要钉**（见 §7：7.0.14 的 802.11 头对不上 LinuxKPI，6.12.1 只差 MHI 与几个宏） |
 | M6 | mac80211/扫描/加入 | 设置里扫到 AP、加入、Safari 打开 `https://example.com` | 走既有 `wifi/lx` 的 802.11/wpa 层 |
 
 M1–M3.5 是"移植 + 板级差异"：annibale 给出同 SoC 的寄存器与流程，thyme 给出 MHI 的接口面，本板要改的是基址、GPIO、RPMh 轨和 SMMU 映射。M4 的 `mhi_*` 接口正好是 ath12k 要的那一小把（`mhi_alloc_controller/mhi_register_controller/mhi_prepare_for_power_up/mhi_sync_power_up/mhi_prepare_for_transfer/mhi_queue_*`），FreeBSD LinuxKPI 没有 MHI 框架，这一层要由我们提供。M5–M6 是"接上 ath12k"，理论上是 `mk-ath11k.sh` 的兄弟脚本加 `DRIVER` 列表。
@@ -79,3 +79,22 @@ M1–M3.5 是"移植 + 板级差异"：annibale 给出同 SoC 的寄存器与流
 6. 板级校准/BDF 缺失可能只有 2.4G 保守速率——可接受，不算失败。
 7. **工期**：真机窗口累计 4–8 周；从开工到"可用联网"保守 1.5–3 个月（K90 的估计，`local/refs/k90-wcn7850-plan.md:96,114`）。本计划不承诺更短。
 8. **待验证**：WLAN 模块是否和 GPU/TrustZone 一样有冷启动状态残留（`RUNBOOK.md:1105-1108`）；第一次 M1 上机顺带记录。
+
+## 7. ath12k 首次编译（2026-10-30）
+
+`tools/mk-ath12k.sh` 把 Linux 的 ath12k（7.0.14 含 `wifi7/hal_wcn7850.c`）按 ath11k 的方式编到 FreeBSD 15.1 的 LinuxKPI 上；`VERSION=` 可换 Linux 版本。**结论：M5–M6 不是"兄弟脚本加一个 DRIVER 列表"，而且版本选择决定代价。**
+
+| Linux | 编过的 ath12k 文件 | 失败 | 主要缺口 |
+|---|---|---|---|
+| 7.0.14 | 20 / 37 | 17：core、dp、dp_htt、dp_peer、dp_rx、dp_tx、mac、mhi、p2p、pci、qmi、reg、wifi7/{core,dp_mon,dp_tx,hw}、wmi | LinuxKPI 的 802.11 头比 7.0 旧：`rate_info.eht_ru_alloc`、`ieee80211_mgmt.addba_resp`、`ieee80211_ops.link_sta_statistics`、`WLAN_EXT_CAPA11_BCN_PROTECT`、`WLAN_EID_NON_TX_BSSID_CAP`、radiotap EHT 枚举；通用设施缺 `linux/clk.h`、`mdelay`、`skb_cow_data`、`rcu_read_lock_any_held`、`cleanup_spinlock_bh_t`、`kmalloc_objs` 的参数个数、`struct reserved_mem`、`KHZ_TO_MHZ` |
+| 6.12.1 | 12 / 19 | 7：ce、dp、dp_rx、dp_tx、mac、mhi、pci | 只剩 `mdelay`、`from_timer`、`WLAN_EID_NON_TX_BSSID_CAP`、`IEEE80211_EHT_PHY_CAP4_PSR_SR_SUPP`、`SET_SYSTEM_SLEEP_PM_OPS`；MHI 的 `mhi_*`。芯片支持在（`hw.c` 有 `ATH12K_HW_WCN7850_HW20`） |
+
+已补的编译层 shim（`wifi/lx/include/`，只解决编译，不代表功能）：`linux/panic_notifier.h`（+ `wifi/lx/src/lx_panic.c`）、`acmacosx.h`（ACPICA 在 `__APPLE__` 下找不到的平台头）、`linux/of_graph.h`、`linux/rcupdate.h`（`RCU_LOCKDEP_WARN`）。`lx_bus.c` 是 ath11k 的 AHB 总线（include 了 ath11k 的 `pcic.h`），不编进 ath12k 对象。
+
+三条路线：
+
+1. **钉 6.12.1 的 ath12k**（推荐先做）：12/19 已过，补上面五个小项后重测，预期只剩 MHI。
+2. **补 LinuxKPI 到 7.0**：7.0 的 17 个失败文件对应几十处 802.11/cleanup/slab 差异，还要跟 FreeBSD 的补丁集合并；代价最大。
+3. **K90 的 Plan A**：不用 ath12k 的 mac80211 层，手写最小 WMI；绕开 802.11 头，但 MHI 仍要自己写。
+
+MHI 是三条路都绕不开的：`mhi_power_down_keep_dev`、`mhi_download_rddm_image` 等，LinuxKPI 没有 MHI 总线——正是 M4 要提供的那个 `mhi_*` 层。
