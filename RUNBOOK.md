@@ -1599,8 +1599,11 @@ the new file. The phone cycle is:
 
     reboot → enter --stage kernel → ramdisk --image local/system-metal.apfs
     → run --seconds 300 --bootcpu 1 --touch --pcie 1
+          --gpu-probe 20 --gpu-direct --gpu-keep
           --kernel out/giulia-kernel/mach.ace5-public
           --root-image local/root-daily-fw.apfs
+    (the GPU flags are what publish RedwoodGPU; without them CoreAnimation
+    software-renders and every UI judgement is about the CPU, not the port)
 
 Step 1 writes nothing and decides whether step 2 starts from a cold or a warm
 RC0.
@@ -1622,6 +1625,38 @@ Also new: `tools/ace5/app-smoke.py`, the 16.5 gate `docs/DRIVERS.md` named
 but did not have. On the 2026-10-30 14:21 log it scores network PARTIAL
 (loopback and Safari pass, Wi-Fi blocked) and basic FAIL (Settings was not
 opened in that run); `--group` judges only the group a run exercised.
+
+**Touch and the renderer, measured on the phone (2026-10-30 evening).**
+Two separate findings from a session of drag tests:
+
+- **The S3910 poll loop read reports only every 10th tick.** The attention
+  line (162) sits high between reports and its low pulse is shorter than
+  the 8 ms sample, so `|| tick%10==0` set the real cadence: 80 ms, about
+  12.5 Hz — measured 643/603/629 reports in three 45 s windows. Reading
+  every pass costs ~100 µs of bit-banged SPI and the same build measured
+  up to 89.8 reports/s, bad=0 (`giulia_s3910.c`).
+- **Without the GPU flags, CoreAnimation software-renders.** The
+  RedwoodGPU service is published only by `ace5_gpu_keep=1`
+  (`giulia_adreno.c`), and `inject.c` falls back silently: "no GPU to draw
+  with: CoreAnimation keeps its software renderer". Every run from 18:17
+  to 19:00 lacked `--gpu-probe 20 --gpu-direct --gpu-keep`, drew
+  1125×2436 on the CPU, and felt like steps; two UI stalls (2 frames/min,
+  no crash, 2.8 GB free) appeared ~4 and ~7 min in. The render artifacts
+  seen on software (white halo around a home-screen icon, the App Library
+  search bar ghosting the home screen) still need a GPU-run comparison
+  before they are called GL-path bugs. The daily recipe must carry the
+  GPU flags whenever the UI is being evaluated.
+
+**mach.ace5-pcie mount panic, bisected (2026-10-30 evening).** The
+pcie+wifi kernel panicked twice at `vfs_mountroot`
+(`kmem_alloc(…, 16777216, 0x100021): failed with 3`, before any driver
+init). WSL builds of the original sources, of the wifi-lookup change
+alone, and of the PCIe driver alone all boot to SpringBoard; so does
+`mach.touchtest` as the first boot after a fresh loader entry and
+staging. Neither half reproduces it and the panic has not recurred since
+— `mach.ace5-pcie` needs one rebuild and retest before the PCIe line
+trusts that binary. The bisect kernels (`mach.origtest`, `mach.wifitest`,
+`mach.pcietest`) and scripts are in `local/` (not committed).
 
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
