@@ -1593,7 +1593,21 @@ the new file. The phone cycle is:
           --root-image local/root-daily-fw.apfs
 
 Step 1 writes nothing and decides whether step 2 starts from a cold or a warm
-RC0. Also new: `tools/ace5/app-smoke.py`, the 16.5 gate `docs/DRIVERS.md` named
+RC0.
+
+**Build check 2026-10-30 (WSL x86_64).** `xnu/apply.sh` (75 changed, 125 new
+files) + `xnu-deps/setup.sh --stage1/--stage2` + `xnu-build.sh` compile
+`giulia_pcie.o` and link it: `_giulia_pcie_init` and `_pcie_thread` are in
+`mach.development.bcm2837` (15,100,448 bytes). The build then stops in
+`check_all_exports` ("exported name not in import list: IOService::…"), a
+host-tool/symbolset mismatch unrelated to this change — the kernel binary is
+already linked at that point. Three host fixes were needed for WSL: the six
+dependency repos and the macOS SDK prefetched through the Windows proxy (WSL
+could not reach github.com), `uuid-dev` installed, and `/usr/bin/env python`
+pointed at `python3`. The built kernel is at
+`out/giulia-kernel/mach.ace5-pcie`.
+
+Also new: `tools/ace5/app-smoke.py`, the 16.5 gate `docs/DRIVERS.md` named
 but did not have. On the 2026-10-30 14:21 log it scores network PARTIAL
 (loopback and Safari pass, Wi-Fi blocked) and basic FAIL (Settings was not
 opened in that run); `--group` judges only the group a run exercised.
