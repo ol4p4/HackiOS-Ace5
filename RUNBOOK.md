@@ -1396,3 +1396,35 @@ local/system-metal.apfs` → `run --seconds 300 --bootcpu 1 --touch --kernel
 out/giulia-kernel/mach.ace5-public --root-image local/root-turnip.apfs`. The
 gate then answers step 3 for real: with `ensure_connection()` in, the next
 expected failure is none — or the first real device-creation data the port has.
+
+**Measured 2026-10-30 12:48: TURNIP GATE PASS (steps 1–7).** Three pieces on top
+of the stub removal (commit sequence in `tools/mesa/`):
+
+1. `turnip-darwin.patch` — Turnip's `msm_bo_map`
+   (`src/freedreno/vulkan/tu_knl_drm_msm.cc`) mmapped the shim's fake device fd,
+   which can never deliver a buffer's memory; on `__APPLE__` it now calls the
+   shim's `redwood_drm_map` (the `IOConnectMapMemory64` path freedreno's own
+   patch has used all along), and `tu_knl.cc`'s `tu_bo_unmap` calls
+   `redwood_drm_unmap` instead of `munmap` (the mapping is owned by the
+   kernel's driver, and the reserved-PROT_NONE replacement is not provided).
+   Placed allocations (`placed_addr != NULL`, kIOMapAnywhere is what the
+   kernel does) are refused rather than silently ignored.
+2. `redwood_drm.c`: `redwood_drm_map` opens the user client itself
+   (`ensure_connection()`), in line with the shim's own comment that every
+   request must be able to open it.
+3. `tools/vulkan/turnip_test.c`: step 5 prints each sub-step (allocate, map,
+   pointer, write, unmap, map again) — the previous run crashed inside step 5
+   with no detail, because the pre-patch `munmap` of an IOConnect mapping left
+   the re-map without a readable picture of where it died.
+
+The gate (`logs/giulia/20261030-124816-run.log`, GPU kept alive with
+`--gpu-probe 20 --gpu-direct --gpu-keep --touch`): ICD load, `vkCreateInstance`,
+**physical device "Turnip Adreno (TM) 750", vendor 0x5143, API 1.4.305**,
+`vkCreateDevice` with a queue, host-visible memory written and read back, an
+image bound to memory, and an **empty command buffer submitted with the fence
+signalled** — the full submission path (command buffer → BOs → RedwoodGPU ring
+→ GPU → fence) executed on real hardware. The Vulkan route — Mesa Turnip in
+place of the hand-written Metal frontend — is therefore not a plan any more but
+a working stack: what remains for a Vulkan-composited desktop is WSI, swapchain
+and the CoreAnimation bridge, the same list UniXNU worked through.
+

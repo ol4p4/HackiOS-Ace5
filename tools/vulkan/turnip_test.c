@@ -300,12 +300,26 @@ main(void)
 	    .allocationSize = 4096,
 	    .memoryTypeIndex = memoryType,
 	};
+	printf("turnip_test:   allocating 4096 bytes of type %u\n", memoryType);
+	fflush(stdout);
 	CHECK(5, "vkAllocateMemory(4096, host visible)", pAllocateMemory(device, &allocate, NULL, &memory));
 	CHECK(5, "vkMapMemory", pMapMemory(device, memory, 0, 4096, 0, &mapped));
+	printf("turnip_test:   mapped at %p\n", mapped);
+	fflush(stdout);
 	((uint32_t *)mapped)[0] = 0x50495255u;      /* "URIP" */
 	((uint32_t *)mapped)[1] = 0x4e495255u;      /* "URIN" */
+	printf("turnip_test:   wrote %08x %08x, reading back before unmap: %08x %08x\n",
+	    ((uint32_t *)mapped)[0], ((uint32_t *)mapped)[1],
+	    ((uint32_t *)mapped)[0], ((uint32_t *)mapped)[1]);
+	fflush(stdout);
+	printf("turnip_test:   unmapping\n");
+	fflush(stdout);
 	pUnmapMemory(device, memory);
+	printf("turnip_test:   unmapped, mapping again\n");
+	fflush(stdout);
 	CHECK(5, "vkMapMemory(again)", pMapMemory(device, memory, 0, 4096, 0, &mapped));
+	printf("turnip_test:   mapped again at %p\n", mapped);
+	fflush(stdout);
 	if (((uint32_t *)mapped)[0] != 0x50495255u || ((uint32_t *)mapped)[1] != 0x4e495255u) {
 		printf("turnip_test: FAILED at step 5: the memory did not keep what was written (%#x %#x)\n",
 		    ((uint32_t *)mapped)[0], ((uint32_t *)mapped)[1]);

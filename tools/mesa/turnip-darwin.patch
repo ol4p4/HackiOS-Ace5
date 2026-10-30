@@ -1,0 +1,64 @@
+--- a/src/freedreno/vulkan/tu_knl_drm_msm.cc
++++ b/src/freedreno/vulkan/tu_knl_drm_msm.cc
+@@ -735,6 +735,14 @@
+ static VkResult
+ msm_bo_map(struct tu_device *dev, struct tu_bo *bo, void *placed_addr)
+ {
++#ifdef __APPLE__
++   /* No mmap() on a device here: the kernel's driver maps the buffer in this
++    * process (src/redwood-drm, in place of libdrm); placed_addr is not
++    * honoured, the kernel maps anywhere (kIOMapAnywhere). */
++   void *map = redwood_drm_map(dev->fd, bo->gem_handle, bo->size);
++   if (map == (void *)-1)
++      return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
++#else
+    uint64_t offset = tu_gem_info(dev, bo->gem_handle, MSM_INFO_GET_OFFSET);
+    if (!offset)
+       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+@@ -745,6 +753,7 @@
+                     dev->fd, offset);
+    if (map == MAP_FAILED)
+       return vk_error(dev, VK_ERROR_MEMORY_MAP_FAILED);
++#endif
+ 
+    bo->map = map;
+    TU_RMV(bo_map, dev, bo);
+--- a/src/freedreno/vulkan/tu_knl_drm.cc
++++ b/src/freedreno/vulkan/tu_knl_drm.cc
+@@ -72,7 +72,11 @@
+ 
+    if (bo->map) {
+       TU_RMV(bo_unmap, dev, bo);
++#ifdef __APPLE__
++      redwood_drm_unmap(dev->fd, bo->gem_handle, bo->map);
++#else
+       munmap(bo->map, bo->size);
++#endif
+    }
+ 
+    TU_RMV(bo_destroy, dev, bo);
+--- a/src/freedreno/vulkan/tu_knl.cc
++++ b/src/freedreno/vulkan/tu_knl.cc
+@@ -117,6 +117,14 @@
+ 
+    TU_RMV(bo_unmap, dev, bo);
+ 
++#ifdef __APPLE__
++   /* The mapping came from IOConnectMapMemory64 (src/redwood-drm), so it is
++    * taken down by the kernel's driver, not munmap; the map is not paired
++    * with this process's address space and a reserved (PROT_NONE)
++    * replacement is not provided. */
++   (void)reserve;
++   redwood_drm_unmap(dev->fd, bo->gem_handle, bo->map);
++#else
+    if (reserve) {
+       void *map = mmap(bo->map, bo->size, PROT_NONE,
+                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+@@ -126,6 +134,7 @@
+    } else {
+       munmap(bo->map, bo->size);
+    }
++#endif
+ 
+    bo->map = NULL;
+ 
