@@ -96,6 +96,12 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install fonttools Pillow lzfse
 
+      - name: Host self-test
+        run: |
+          set -euo pipefail
+          cd "$ACE5_ROOT"
+          bash tools/ace5/host-selftest.sh
+
       - name: Theos
         run: |
           set -euo pipefail
