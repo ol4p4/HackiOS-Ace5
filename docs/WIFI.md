@@ -36,6 +36,7 @@ WCN6750 与 WCN7850 的差别只在**总线与固件协议**：6750 走 WPSS（A
 - **期望 device id `0x17cb:0x1107`**：同款模块在 K90 的 DT 里是 `supported-ids = 0x1107`；本机 DTB 没有 `qcom,device-id`，枚举时应期待这个号，但以枚举结果为准，再去 ath12k 的 `pci_device_id` 表核对。
 - **缺口——M1 的输入还没导出**：本机 pcie 节点的 clocks、power-domains（`gcc_pcie_0_gdsc`、`gcc_pcie_0_phy_gdsc`）、resets、`perst-gpios`/clkreq/wake 都不在 `docs/ACE5-HW.md` 里。`hw-facts.py` 目前只抽 `reg` 与 `interrupts`，所以 `ACE5-HW.md:82` 只有一个 121 字节的 reg 块。M1 的每一步都依赖这些属性，上机前必须先补。
 - **已知卡点——QMP**：`qcom,qmp = 0x63`（邮箱 99）是 cnss 侧电源握手的 "QMP open"，也是 tycykp 的 WCN7850 尝试卡住的地方（`docs/ACE5-HW.md:18`）。它不能只当背景事实，M1/M3 各要一条独立的验收行。
+- **同族的两道墙**：11 Ultra 的 WCN6855（`17cb:1103`）固件/BDF/NV 已抽取校验，但缺 PCIe LTSSM PIPE 时钟与 MHI/BHI 下载器，链路未起（对应我们的 M1–M4）；dada 的 WCN7850 到了 WMI，但固件大多数运行会死，其 Wi-Fi 驱动目前是临时替身。前者说明 M1 不是走过场，后者说明 M4 之后还有一道固件稳定性墙。
 
 ## 3. 里程碑与验收（每步一次上机，boot-arg 控制，同 `redwood_wifi.c` 的风格）
 
@@ -71,8 +72,9 @@ M1–M3.5 是"移植 + 板级差异"：annibale 给出同 SoC 的寄存器与流
 
 1. **PCIe 起不来**：连续 3 个真机窗口 link-up 失败（PERST/时钟/上电序排查完仍无 LTSSM detect）→ 放弃本轮。嫌疑点：LK/UEFI 是否已初始化 RC0 并被安全态锁住；`pcie_sm` 序列与 bootargs 常量对不上。
 2. **MHI 下载成功但固件不 boot**（SBL 无 state change / QMI 服务不出）≥2 周 → 降级为"能枚举到设备 + 读卡 ID"存档。
-3. **SMMU/IOVA 冲突**：端点 SID `0x1401` 的路由或 context 配置失败，或与 DisplayDxe/保留区撞窗 → DMA 不可用 → 放弃数据面，保留结论。
-4. **数据面 timebox**：M6 开工 2 周无第一笔 TX 完成 → 砍到"QMI 握手通"为止。
-5. 板级校准/BDF 缺失可能只有 2.4G 保守速率——可接受，不算失败。
-6. **工期**：真机窗口累计 4–8 周；从开工到"可用联网"保守 1.5–3 个月（K90 的估计，`local/refs/k90-wcn7850-plan.md:96,114`）。本计划不承诺更短。
-7. **待验证**：WLAN 模块是否和 GPU/TrustZone 一样有冷启动状态残留（`RUNBOOK.md:1105-1108`）；第一次 M1 上机顺带记录。
+3. **M4 过了但固件不稳**：连续多次启动里固件在 WMI/校准阶段死掉（dada 的 WCN7850 现状）≥2 周 → 只保留"能起、能读卡 ID"的结论，不追数据面。
+4. **SMMU/IOVA 冲突**：端点 SID `0x1401` 的路由或 context 配置失败，或与 DisplayDxe/保留区撞窗 → DMA 不可用 → 放弃数据面，保留结论。
+5. **数据面 timebox**：M6 开工 2 周无第一笔 TX 完成 → 砍到"QMI 握手通"为止。
+6. 板级校准/BDF 缺失可能只有 2.4G 保守速率——可接受，不算失败。
+7. **工期**：真机窗口累计 4–8 周；从开工到"可用联网"保守 1.5–3 个月（K90 的估计，`local/refs/k90-wcn7850-plan.md:96,114`）。本计划不承诺更短。
+8. **待验证**：WLAN 模块是否和 GPU/TrustZone 一样有冷启动状态残留（`RUNBOOK.md:1105-1108`）；第一次 M1 上机顺带记录。

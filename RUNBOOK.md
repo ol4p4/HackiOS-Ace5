@@ -1118,6 +1118,45 @@ the desktop is still CPU-rendered; `WuuuWeiii/ios-sweet-ci` (polaris, SDM845) is
 working the GPU publish/lazy/reset lifecycle as a patch series; `b1ackm4x`'s
 OnePlus 9 imported upstream modem staging and native Bluetooth helpers.
 
+**Family update 2026-10-30: the field changed under this line.** In the ten days
+since the 2026-10-27 survey the family went from a handful of repos to roughly
+thirty device ports. Three developments matter here:
+
+1. **Metal now runs on Adreno elsewhere.** `superboyyy/hakios-arm64e-dada`
+   (Xiaomi 15, SM8750 — the K90's SoC) reports iOS 26 on `xnu-12377.121.6`,
+   arm64e userland, 8 cores with PAC and SCMI clocks, the iOS 26 home screen,
+   touch and on-demand storage; its GPU path is **Metal → metal2vulkan → Turnip
+   → its own kernel driver on the Adreno 830**, with the Liquid Glass core
+   shaders checked pixel-by-pixel against Apple's GPU on a Mac. Separately,
+   `g11930/HackiOS-Xiaomi11Ultra` (SM8350) claims Metal on an Adreno 660 (FD660,
+   `metal_profile=1` plus an injected `metal-enable`). The building blocks are
+   public: `UniXNU/AdrenoMetal`, `steelbrain/metal2vulkan`, and even Mali ports
+   (`Ken-u/MaliMetal`). This retires the 2026-10-27 line "Metal/Turnip works
+   nowhere in the family". What is still true: *this* tree has no Metal path,
+   and the GL path is what ships.
+2. **Wi-Fi's wall is after M4, not at enumeration.** The 11 Ultra's WCN6855
+   (`17cb:1103`) has firmware/BDF/NV extracted and byte-checked, but no PCIe
+   LTSSM PIPE clock and no MHI/BHI downloader, so the link never comes up —
+   the same class as our M1–M4. dada's WCN7850 gets as far as WMI, but the
+   firmware dies in most runs and its current Wi-Fi driver is a stand-in. So
+   passing M4 does not mean a working radio; budget a firmware-stability phase.
+3. **SM8650 now has four UniXNU ports**: `Asultop/UniXNU-NX769J` (RedMagic 9,
+   all images build, not booted), `YX2748198202-lab/UniXNU-shennong` (Xiaomi 14
+   Pro, reaches `Failed to mount root device`), `Axiang-dev/UniXNU-caihong`
+   (OnePlus Pad Pro) and `peiyuesheng666/UniXNU-PHY120` (Find X7 Ultra). None
+   has GPU or Wi-Fi yet, so there is no A750 work to take, but their board
+   descriptions are same-SoC cross-checks for UFS/UEFI/4 KiB pages. **No second
+   giulia/PKG110 port exists.**
+
+Also worth reading: `yechenan/pudding-ios` (Xiaomi 17, SM8850, iOS 16.7.16,
+4 KiB pages, incremental over `ShueiTsuki/data-a-live` + `dipa-studio/ios-sweet`
++ UniXNU); `Scion-Project/scion` (QEMU/Pyre emulated iPhone 11 to an iOS 14 home
+screen, and AVF/pKVM running XNU + iOS 16.5 in about 80 s on a Pixel 10 — a
+virtualization route, not a bare-metal port); `tanosshi/xnuroid` (a Darwin
+Mach-O loader plus graphics translation runtime, not XNU).
+`dipa-studio/ios-sweet` (Redmi Note 10 Pro, SM7150) is the 1.1k-star upstream
+many of these forks build on, and it renders on the CPU only.
+
 **Measured 2026-10-30: on the GL path the Control Center is correct, and the
 51 % frames were `--metal`.** A screenshot series (`--shots 20`) over one boot
 is what showed it: home screen 55.2 % black, then Control Center at **0.3 %
@@ -1522,7 +1561,8 @@ acceptance test for each item, in `docs/GPU.md` — DVFS (the GPU has only ever
 been voted the stock minimum clock, though the 13-point DCVS table is uploaded),
 runtime power collapse/DPMS, UBWC, the per-frame IOSurface texture cost,
 per-client page tables, the Metal frontend (first draw printed once under
-`metal_profile=1`; MPS still incomplete), Vulkan WSI, and perf counters; the
+`metal_profile=1`; MPS still incomplete, though dada now has
+Metal→metal2vulkan→Turnip on an Adreno 830), Vulkan WSI, and perf counters; the
 first two to do are DVFS (the RPMh vote mechanism exists in `redwood_adsp.c`)
 and the texture cache in `eagl.c`. Backlight and 120 Hz are recorded there as
 not needed for the gate.
