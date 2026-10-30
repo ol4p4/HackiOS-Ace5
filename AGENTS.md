@@ -10,3 +10,9 @@
   host checks do not establish device stability or a working feature.
 - Scope is OnePlus Ace 5 PKG110 / giulia. Use the dedicated tools/ace5 workflow,
   not the upstream redwood flashing or Wi-Fi paths.
+- Phone courtesy (2026-10-30, user request): when a hardware run finishes and no
+  further phone step is imminent — host-side work remains, the session is
+  wrapping up, or the user may need the phone — run
+  `phone.py --serial b4cf8812 reboot` so the device comes back to Android
+  instead of sitting in the loader. Back-to-back runs may stay in the loader;
+  say so explicitly, and always return to Android before ending the session.
