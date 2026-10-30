@@ -14,7 +14,7 @@
 
 WCN6750 与 WCN7850 的差别只在**总线与固件协议**：6750 走 WPSS（AP 侧 DSP，`redwood_wifi.c` 的 SMEM/SMP2P/IPCC/GLINK/QRTR 那 16 步就是它），7850 是**独立 PCIe 模块，固件跑在模块内部，AP 通过 MHI 与它通信**。所以本线的增量是：
 
-1. **PCIe0 主机控制器——移植，不是新写**。同 SoC（SM8750）的 annibale/K90 已经在 2026-10-27 跑通 RC0 上电、Gen1 x2 链路、WCN7850 BAR0 与 BHI PBL 读取（同族仓库 annibale；本地摘要 `local/refs/k90-wcn7850-plan.md:3,107`，`local/` 不入库）；thyme 的 `umi_pcie.c`/`umi_mhi.c` 是另一块 SoC 上的完整联网路径（本地摘要 `local/refs/thyme-port-summary.md`）。本线的做法是 **diff 这两份代码与本板 DTB，只搬 SM8650 的寄存器序列**；Linux 的 `pcie-qcom.c`/`phy-qcom-qmp-pcie.c` 只作寄存器语义参照。
+1. **PCIe0 主机控制器——移植，不是新写**。同 SoC（SM8750）的 annibale/K90 已经在 2026-10-27 跑通 RC0 上电、Gen1 x2 链路、WCN7850 BAR0 与 BHI PBL 读取（同族仓库 annibale；本地摘要 `local/refs/k90-wcn7850-plan.md:3,107`，`local/` 不入库）；thyme 的 `umi_pcie.c`/`umi_mhi.c` 是另一块 SoC 上的完整联网路径（本地摘要 `local/refs/thyme-port-summary.md`）。本线的做法是 **diff 这两份代码与本板 DTB，只搬 SM8650 的寄存器序列**；Linux 的 `pcie-qcom.c`/`phy-qcom-qmp-pcie.c` 只作寄存器语义参照。三机的常量对照（哪些能抄、哪些必须重取）见 `docs/PCIe-DIFF.md`。
 2. **MHI host**：接口面照 thyme `umi_mhi.c`，状态机照 Linux `drivers/bus/mhi`。
 3. **ath12k** 接到 `mk-ath12k.sh`（PCI + MHI 路径），以及 board data 的 QMI（QRTR over MHI）。
 4. cnss 外壳：RPMh 供电（`vdd-wlan-*` 七路）、`wlan_en`/`sw_ctrl`/`bt_en` 引脚、保留内存。
