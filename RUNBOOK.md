@@ -1582,7 +1582,9 @@ mapping) need to be re-derived. Those facts are now exported from the DTB into
 answered the M5–M6 question: ath12k of Linux 7.0.14 fails on 17 files (the
 LinuxKPI 802.11 headers are older than 7.0), 6.16.1 is no better, and 6.12.1
 fails on 5 (skb/list helpers, `cfg80211_find_ext_elem`, three mac80211 op
-signatures, PM ops, MHI). See `docs/WIFI.md` §7. The firmware budget is
+signatures, PM ops, MHI). After the helper shims it is 17 of 19: only
+`mac.c` (three `link_id` mac80211 op signatures) and `mhi.c` (the MHI
+layer M4 owns) remain. See `docs/WIFI.md` §7. The firmware budget is
 measured too: WCN7850's `amss.bin`/`m3.bin`/`board-2.bin` total 8.41 MiB and
 the repacked root image is 18.95 MiB, 13.05 MiB under the 32 MiB cap, so the
 small image still works; `redwood_wifi_driver_file()` now falls back to
