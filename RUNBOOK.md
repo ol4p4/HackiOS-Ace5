@@ -1118,7 +1118,45 @@ the desktop is still CPU-rendered; `WuuuWeiii/ios-sweet-ci` (polaris, SDM845) is
 working the GPU publish/lazy/reset lifecycle as a patch series; `b1ackm4x`'s
 OnePlus 9 imported upstream modem staging and native Bluetooth helpers.
 
-**The clock and Now Playing are not running at all.** `SpringBoard` asks for
+**Measured 2026-10-30: on the GL path the Control Center is correct, and the
+51 % frames were `--metal`.** A screenshot series (`--shots 20`) over one boot
+is what showed it: home screen 55.2 % black, then Control Center at **0.3 %
+black for ten shots and 200 s**
+(`logs/giulia/20261030-140009-screen-005.png` — connection card, rotation lock,
+Focus, both sliders at full height, the four buttons, the audio pill, the blurred
+wallpaper; the status-bar clock and the Now Playing card are still empty, which
+are the content-service items below). Nothing is torn, clipped or noisy. Four
+things had been hiding this:
+
+- **The compositor draws into the default framebuffer.** The new one-shot counts
+  line says `framebuffer 0 colour 0` and `0 drawn` on every frame: `gl_osmesa.c`
+  points the default framebuffer at the surface's own memory, so CoreAnimation
+  never draws into a named texture of ours. Every `target && drawn` branch in
+  `frame_end` — the copy into the surface, and `glshow` — is dead in this
+  configuration. `glshow` now pastes into the **widest target surface** at frame
+  end regardless of that bookkeeping, and works: it answered "there is no
+  texture of 455 x 456" with the inventory `1:1125x2436 2:1125x2436 3:194x237`,
+  i.e. the 455x456 blur target only exists while the Control Center animates in.
+- **`metal_props on` fails without `metal=1`**:
+  `IORegistryEntrySetCFProperties failed 0xe00002c7 (kIOReturnUnsupported: boot
+  the kernel with metal=1)`. None of the runs since 2026-10-28 passed
+  `--metal`, so RedwoodMetal was never engaged in any of them — and the 51 %
+  Control Center is the `--metal` picture, not the GL one.
+- **The "screen goes black" was an app.** The 10-28 `rc.jobs` opens Photos at
+  ~90 s (`battery_test open photos-redirect://`); Photos draws nothing, so every
+  later screenshot was 99.8 % black. That is what the earlier "run-to-run
+  variable" readings were measuring: whichever app was in the foreground at the
+  moment of the capture. Use a job script that leaves the screen in the state
+  being measured (`etc/rc.jobs.cc` for Control Center, `etc/rc.jobs.safari` for
+  the panel-cadence page).
+- **A local `eagl.c` loop exists**: `local/wsl/build-eagl.sh` builds
+  `libredwood-gl.dylib` on the WSL toolchain in seconds (needs the mesa output
+  tree from `build-mesa.sh`), so a one-line change no longer waits 20 minutes for
+  CI.
+
+So the graphics line's remaining items are the two content services below and
+the bounded `--metal` regression, not the GL compositor.
+
 `com.apple.chronoservices` and launchd answers "Could not find job with label
 com.apple.chronod", 559 times in one session; `/usr/libexec` has no `chronod`,
 but `System/Library/PrivateFrameworks/ChronoCore.framework/Support/chronod` and
