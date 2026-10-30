@@ -124,7 +124,7 @@ def wait_device(serial):
         time.sleep(1)
     raise RuntimeError(f'Device {serial} did not appear; no flash fallback is attempted')
 
-def screenshot(index=None):
+def screenshot(index=None, prefix=None):
     ensure_loader()
     w, h, stride = map(int, getvar('screen').split())
     fb('oem', 'screenshot')
@@ -143,8 +143,10 @@ def screenshot(index=None):
         return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d))
     # A run with --shots takes many: the index keeps them in order and apart even
     # when two land in the same second.
+    # One run names every shot with the same prefix, so the series groups: the
+    # index says the order, the prefix says which boot it belongs to.
     suffix = '' if index is None else f'-{index:03d}'
-    png = logs / (time.strftime('%Y%m%d-%H%M%S') + '-screen' + suffix + '.png')
+    png = logs / ((prefix or time.strftime('%Y%m%d-%H%M%S')) + '-screen' + suffix + '.png')
     png.write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) +
                     chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b''))
     raw_path.unlink()
@@ -316,7 +318,7 @@ try:
             if next_shot is not None and time.monotonic() >= next_shot:
                 shot_count += 1
                 try:
-                    screenshot(shot_count)
+                    screenshot(shot_count, live_prefix)
                 except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
                     print(f'Screenshot {shot_count} failed: {error}', flush=True)
                 next_shot += args.shots

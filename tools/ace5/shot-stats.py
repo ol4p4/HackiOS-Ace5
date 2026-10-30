@@ -35,6 +35,11 @@ def groups(paths):
         runs.setdefault(key, []).append((index, path))
     for key in runs:
         runs[key].sort(key=lambda item: item[0])
+    # Shots taken before phone.py named them with the run's prefix carry the time
+    # of the shot itself, so each looks like its own run. One series, in order.
+    if len(runs) > 1 and all(len(shots) == 1 for shots in runs.values()):
+        merged = sorted((item for shots in runs.values() for item in shots), key=lambda i: i[1].name)
+        return {merged[0][1].name.split('-screen')[0]: [(n + 1, p) for n, (_, p) in enumerate(merged)]}
     return runs
 
 

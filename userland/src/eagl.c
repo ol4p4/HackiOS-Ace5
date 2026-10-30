@@ -1061,26 +1061,59 @@ frame_end(struct eagl *e, bool finished)
 		}
 	}
 	waited = now_us();
+	{
+		/*
+		 * What the display path was handed, once per process. glshow needs an image
+		 * that is both a target and one something drew into, and when it stayed
+		 * silent nothing said whether there was no such image or the argument never
+		 * arrived. Counts, the bound framebuffer/texture and the argument, together.
+		 */
+		static unsigned told;
+
+		if (told++ < 3) {
+			unsigned targets = 0, drawns = 0, shareds = 0, mirrors = 0;
+
+			for (unsigned i = 0; i < e->image_count; i++) {
+				targets += e->images[i].target != 0;
+				drawns += e->images[i].drawn != 0;
+				shareds += e->images[i].shared != 0;
+				mirrors += e->images[i].mirror != 0;
+			}
+			say("redwood-gl: frame %u: %u images (%u target, %u drawn, %u shared, %u mirror), "
+			    "framebuffer %u colour %u; glshow wants %d x %d, shown_texture %u\n",
+			    e->frames + 1, e->image_count, targets, drawns, shareds, mirrors,
+			    e->framebuffer, e->colour, (int)shown_wanted[0], (int)shown_wanted[1], shown_texture);
+		}
+	}
 	for (unsigned i = 0; i < e->image_count; i++) {
 		if (e->images[i].target && e->images[i].drawn) {
-			/*
-			 * Why a glshow boot-arg can come back with no line at all: the display is
-			 * shown only from an image that is both this pass's target and one something
-			 * drew into. Said once, with what the run saw of the argument, so "the page
-			 * never came" and "the argument never arrived" stop looking the same.
-			 */
-			static unsigned told;
-
-			if (told++ < 2) {
-				say("redwood-gl: display image %u: target+drawn, shared=%d mirror=%u; glshow wants %d x %d, shown_texture %u\n",
-				    i, (int)e->images[i].shared, e->images[i].mirror, (int)shown_wanted[0],
-				    (int)shown_wanted[1], shown_texture);
-			}
 			copied += !e->images[i].shared;
 			target_to_surface(e, &e->images[i]);
 			if (shown_texture != 0) {
 				show_texture(e, &e->images[i]);
 			}
+		}
+	}
+	/*
+	 * glshow has to work on the path this port actually takes: the compositor draws into
+	 * the default framebuffer, which gl_osmesa.c points at the surface's own memory, so no
+	 * image is ever "drawn" through the bookkeeping above and the whole copy path is dead
+	 * here. Paste into the widest target surface instead -- it is the one on screen -- and
+	 * let show_texture's own report say which texture it found.
+	 */
+	if (shown_texture != 0) {
+		struct image *widest = NULL;
+
+		for (unsigned i = 0; i < e->image_count; i++) {
+			if (!e->images[i].target || e->images[i].surface == NULL) {
+				continue;
+			}
+			if (widest == NULL || e->images[i].width > widest->width) {
+				widest = &e->images[i];
+			}
+		}
+		if (widest != NULL) {
+			show_texture(e, widest);
 		}
 	}
 	if (!e->in_frame) {
