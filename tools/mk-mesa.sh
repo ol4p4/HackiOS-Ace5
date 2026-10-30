@@ -90,6 +90,12 @@ ar = 'llvm-ar'
 ranlib = 'llvm-ranlib'
 strip = 'llvm-strip'
 pkg-config = 'false'
+# The link line needs the sysroot too, or every dependency probe that ends in
+# -l<name> (zlib is the one that matters: freedreno_rd_output.c calls gzopen
+# unconditionally) fails with "library not found", meson quietly disables the
+# dependency, and the final link of libOSMesa dies on undefined _gzopen.
+c_link_args = ['-isysroot', '$SDK']
+cpp_link_args = ['-isysroot', '$SDK']
 
 [host_machine]
 system = 'darwin'
