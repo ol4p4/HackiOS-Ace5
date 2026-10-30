@@ -373,9 +373,13 @@ redwood_drm_map(int fd, uint32_t handle, uint64_t size)
 {
 	mach_vm_address_t address = 0;
 	mach_vm_size_t mapped = 0;
+	int error = ensure_connection();
 
 	(void)fd;
 	(void)size;
+	if (error != 0) {
+		return (void *)-1;              /* mmap()'s MAP_FAILED */
+	}
 	/*
 	 * Linux gives freedreno its buffers write-combined, with no cache of this processor's between
 	 * the program and the memory the GPU sees. So does the kernel's driver here: the memory is
