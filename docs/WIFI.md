@@ -32,9 +32,9 @@ WCN6750 与 WCN7850 的差别只在**总线与固件协议**：6750 走 WPSS（A
 - 供电（RPMh，七路成对给上下电电压）：`vdd-wlan-aon/dig/io/io12/rfa1/rfa2/vdd-wlan`（0xee480/0xdfa20/0x1b7740/0x124f80/0x1c7140/0x1414a0/0xe57e0，单位 µV）。
 - 保留内存：`cnss_wlan_region`；ramdump 动态区 `0x780000`。
 - QRTR：`/soc/qcom,qrtr-mhi-cnss` 在 DT 里就写着 **MHI**——这条总线的协议栈是确定的。
-- **`pcie_sm_regs=0x1D07000`**：stock Android cmdline 里就有（`RUNBOOK.md:1016`），K90 的 RC0 上电序列也用它。本机 DTB 的 `reg` 块里没有这个基址，必须当常量传入。
-- **期望 device id `0x17cb:0x1107`**：同款模块在 K90 的 DT 里是 `supported-ids = 0x1107`；本机 DTB 没有 `qcom,device-id`，枚举时应期待这个号，但以枚举结果为准，再去 ath12k 的 `pci_device_id` 表核对。
-- **缺口——M1 的输入还没导出**：本机 pcie 节点的 clocks、power-domains（`gcc_pcie_0_gdsc`、`gcc_pcie_0_phy_gdsc`）、resets、`perst-gpios`/clkreq/wake 都不在 `docs/ACE5-HW.md` 里。`hw-facts.py` 目前只抽 `reg` 与 `interrupts`，所以 `ACE5-HW.md:82` 只有一个 121 字节的 reg 块。M1 的每一步都依赖这些属性，上机前必须先补。
+- **`pcie_sm_regs=0x1D07000`**：stock Android cmdline 里就有（`RUNBOOK.md:1016`），K90 的 RC0 上电序列也用它。本机 DTB 的 `reg` 块里 `conf` 就是它（`0x1d07000+0x7000`），不需要外部常量。
+- **设备号 `0x17cb:0x1107`**：本机 DTB 的 `supported-ids` 与 QRTR 的 `qcom,dev-id` 都写 `0x1107`（vendor `0x17cb`）；枚举时核对，再去 ath12k 的 `pci_device_id` 表。
+- **M1 的输入已导出（2026-10-30）**：`hw-facts.py` 现在抽 clocks/clock-names、resets/reset-names、`perst-gpio`/`qcom,pcie-clkreq-gpio`/`wake-gpio`、`reg-names`、`ranges`、`iommu-map`/`msi-map`、`qcom,phy-*`、`qcom,pcie-sm-*`，`docs/ACE5-HW.md` 附录是完整表。关键值：parf `0x1c00000`、phy `0x1c06000`、dbi `0x60000000`、elbi `0x60001000`、iatu `0x60100000`、conf/pcie_sm `0x1d07000`；PERST/CLKREQ/WAKE = GPIO 94/95/96；RID `0x100` → SID `0x1401`；`cnss_wlan_region` 32 MiB；`qcom,phy-sequence`（1701 字节）就在 DTB 里。
 - **已知卡点——QMP**：`qcom,qmp = 0x63`（邮箱 99）是 cnss 侧电源握手的 "QMP open"，也是 tycykp 的 WCN7850 尝试卡住的地方（`docs/ACE5-HW.md:18`）。它不能只当背景事实，M1/M3 各要一条独立的验收行。
 - **同族的两道墙**：11 Ultra 的 WCN6855（`17cb:1103`）固件/BDF/NV 已抽取校验，但缺 PCIe LTSSM PIPE 时钟与 MHI/BHI 下载器，链路未起（对应我们的 M1–M4）；dada 的 WCN7850 到了 WMI，但固件大多数运行会死，其 Wi-Fi 驱动目前是临时替身。前者说明 M1 不是走过场，后者说明 M4 之后还有一道固件稳定性墙。
 
@@ -56,8 +56,8 @@ M1–M3.5 是"移植 + 板级差异"：annibale 给出同 SoC 的寄存器与流
 
 ## 4. 立即要做的下一步（主机侧，不需要手机）
 
-1. **先 diff，再抄**：取 annibale 的 `redwood_pcie.c`（同 SM8750）与 thyme 的 `umi_pcie.c`/`umi_mhi.c`，对着本板 DTB 逐项列出"同/异"；只把 SM8650 的寄存器序列（Linux `pcie-qcom.c`、`phy-qcom-qmp-pcie.c` 里的对应段）抄成 `giulia_pcie_regs.h`（GPL 隔离，同 `giulia_gpu_regs.h` 的做法）。
-2. **补硬件属性**：扩展 `tools/ace5/hw-facts.py`，把 `qcom,pcie@1c00000` 的 clocks、power-domains、resets、`perst-gpios`/clkreq/wake 导进 `docs/ACE5-HW.md`；对照 reg 块确认 DBI/ATu/ELBI/PARF 基址，并核对 `pcie_sm_regs=0x1D07000`。
+1. **先 diff，再抄**：取 annibale 的 `redwood_pcie.c`（同 SM8750）与 thyme 的 `umi_pcie.c`/`umi_mhi.c`，对着本板 DTB 逐项列出"同/异"；Linux `pcie-qcom.c`、`phy-qcom-qmp-pcie.c` 里的对应段只作寄存器语义对照，不整段照抄。
+2. **把 DTB 里的序列变成头文件**：从 `qcom,phy-sequence`（offset/value/delay 三元组）、`qcom,pcie-sm-seq`、`qcom,pcie-sm-branch-seq` 生成 `giulia_pcie_regs.h` 的初稿。这些是厂商数据，不是 GPL；和从 Linux 抄来的寄存器语义分开放，并在文件头注明来源。基址已核对：parf/phy/dbi/elbi/iatu/conf 见 `docs/ACE5-HW.md`，`conf` 就是 `pcie_sm_regs=0x1D07000`。
 3. 写 `xnu/files/bsd/dev/giulia_pcie.c` 的 M1 步骤（只读+复位+PHY，绝不写端点），boot-arg `pcie_step=N`；同时给 `phone.py` 加 `--pcie`（或让 `ACE5_CMDLINE` 能覆盖默认的 `wifi=0`，避免命令行里出现两个 `wifi=`）。
 
 ## 5. 明确不做

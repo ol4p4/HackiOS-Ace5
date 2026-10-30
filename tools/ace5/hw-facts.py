@@ -20,7 +20,21 @@ SECTIONS = [
      ('wifi', 'wlan', 'wcn', 'cnss', 'icnss', 'qca', 'pcie', 'pcie@', 'bluetooth'),
      ('qcom,qmp', 'qcom,wlan', 'qcom,bt-en-gpio', 'qcom,sw-ctrl-gpio', 'qcom,stream-id-range',
       'qcom,iova-width', 'qcom,num-qtb-ports', 'qcom,rc-num', 'qcom,firmware-name',
-      'qcom,vdd-', 'qcom,vreg_pdc_map')),
+      'qcom,vdd-', 'qcom,vreg_pdc_map', 'qcom,pmu_vreg_map', 'qcom,pdc_init_table',
+      # PCIe host-controller facts the M1/M2 steps stand on: register bases,
+      # the vendor PHY and state-machine sequences, GPIOs, clock/reset names,
+      # the RID->SID map and the IOVA windows.
+      'reg-names', 'clocks', 'clock-names', 'clock-frequency', 'clock-suppressible',
+      'power-domains', 'power-domain-names', 'resets', 'reset-names',
+      'perst-gpio', 'wake-gpio', 'qcom,pcie-clkreq-gpio',
+      'ranges', 'iommu-map', 'msi-map', 'qcom,smmu-sid-base', 'qcom,slv-addr-space-size',
+      'qcom,phy-', 'qcom,pcie-sm-', 'qcom,dbi-debug-reg', 'qcom,parf-debug-reg',
+      'qcom,aux-clk-freq', 'qcom,boot-option', 'qcom,pcie-phy-ver',
+      'qcom,num-parf-testbus-sel', 'qcom,ep-latency', 'qcom,l1-2-', 'qcom,drv-',
+      'qcom,config-recovery', 'qcom,same-dt-multi-dev', 'qcom,bus-bw-cfg',
+      'qcom,icc-path-count', 'supported-ids', 'qcom,dev-id', 'memory-region',
+      'wlan-en-gpio', 'qcom,iommu-', 'use-nv-mac', 'use-pm-domain',
+      'mpm_wake_set_gpios', 'cnss-enable-self-recovery', 'interrupt-names', 'gdsc-')),
     ('Display / backlight',
      ('mdss', 'dsi', 'backlight', 'wled', 'pwm', 'panel'),
      ('qcom,mdss-dsi-panel-name', 'qcom,mdss-dsi-panel-width', 'qcom,mdss-dsi-panel-height',
@@ -66,6 +80,34 @@ def brief(text_value, limit=96):
     return text_value
 
 
+# Register maps and SID/IOVA maps are the point of the PCIe rows; truncating them
+# at the default width is what hid the DBI/ATu bases in the first place.
+LIMITS = {'reg': 400, 'ranges': 400, 'iommu-map': 400, 'msi-map': 400,
+          'qcom,vreg_pdc_map': 400, 'qcom,pmu_vreg_map': 400,
+          'qcom,pcie-sm-seq': 400, 'qcom,pcie-sm-branch-seq': 400,
+          'qcom,pcie-sm-debug': 400}
+
+
+def string_list(value):
+    """NUL-separated printable runs: *-names and the vreg/PDC tables."""
+    if not value:
+        return None
+    try:
+        as_text = value.decode('utf-8')
+    except UnicodeDecodeError:
+        return None
+    if '\0' not in as_text or any(ord(ch) < 32 and ch != '\0' for ch in as_text):
+        return None
+    if ord(as_text[0]) < 32:  # a big-endian cell such as 0x5f, not a string
+        return None
+    parts = [part for part in as_text.split('\0') if part]
+    if not parts or len(parts[0]) < 2:
+        return None
+    if not any(ch.isprintable() and not ch.isspace() for ch in parts[0]):
+        return None
+    return ' | '.join(parts)
+
+
 def parse(data):
     magic, total, off_struct, off_strings, _, version, last, bootid, size_strings, size_struct = \
         struct.unpack_from('>10I', data)
@@ -107,6 +149,9 @@ def text(value):
 def show(name, value):
     if name in ('compatible', 'status', 'model', 'qcom,firmware-name', 'qcom,board-id'):
         return ' '.join(text(value).split('\0')) if name == 'compatible' else text(value)
+    listed = string_list(value)
+    if listed is not None:
+        return listed
     if len(value) and len(value) % 4 == 0:
         words = struct.unpack('>%dI' % (len(value) // 4), value)
         if name in ('reg', 'interrupts', 'interrupts-extended'):
@@ -145,12 +190,14 @@ def main():
                 keep.append('`%s`' % show('compatible', props['compatible']))
             for name in ('reg', 'interrupts'):
                 if name in props:
-                    keep.append('%s: `%s`' % (name, brief(show(name, props[name]))))
+                    keep.append('%s: `%s`' % (name, brief(show(name, props[name]),
+                                                          LIMITS.get(name, 96))))
             for name in sorted(props):
                 if name in ('compatible', 'reg', 'interrupts') or name in DROP:
                     continue
                 if name.startswith(wanted):
-                    keep.append('%s: `%s`' % (name, brief(show(name, props[name]))))
+                    keep.append('%s: `%s`' % (name, brief(show(name, props[name]),
+                                                          LIMITS.get(name, 96))))
             rows.append((path, keep))
         lines.append('### %s\n' % title)
         if not rows:
@@ -166,6 +213,17 @@ def main():
 
     body = '\n'.join(lines)
     if args.out:
+        # The document's top half is hand-written prose; only the appendix below
+        # the first section heading is generated. Keep the prose when the target
+        # already has it, so the documented command regenerates in place.
+        marker = '### Wi-Fi / connectivity'
+        try:
+            with open(args.out, encoding='utf-8') as handle:
+                old = handle.read()
+        except FileNotFoundError:
+            old = ''
+        if marker in old:
+            body = old.split(marker, 1)[0] + body
         with open(args.out, 'w', encoding='utf-8', newline='\n') as handle:
             handle.write(body)
         print('wrote %s (%d bytes)' % (args.out, len(body)), file=sys.stderr)

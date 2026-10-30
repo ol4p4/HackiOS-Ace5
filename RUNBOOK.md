@@ -1575,8 +1575,10 @@ The first host-side step is a diff, not a transcription: annibale's
 2026-10-27, thyme's `umi_pcie.c`/`umi_mhi.c` give the MHI interface; Linux's
 `pcie-qcom.c` and `phy-qcom-qmp-pcie.c` are the register-sequence reference.
 Only the board-level differences (base addresses, GPIOs, RPMh rails, SMMU
-mapping) need to be re-derived, and the PCIe node's clocks/power-domains/resets/
-GPIOs have to be exported from the DTB before M1.
+mapping) need to be re-derived. Those facts are now exported from the DTB into
+`docs/ACE5-HW.md` (2026-10-30), including the vendor `qcom,phy-sequence` and
+`qcom,pcie-sm-seq`; the next host-side step is generating `giulia_pcie_regs.h`
+from them.
 
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
