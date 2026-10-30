@@ -52,7 +52,7 @@ WCN6750 与 WCN7850 的差别只在**总线与固件协议**：6750 走 WPSS（A
 
 M1–M3.5 是"移植 + 板级差异"：annibale 给出同 SoC 的寄存器与流程，thyme 给出 MHI 的接口面，本板要改的是基址、GPIO、RPMh 轨和 SMMU 映射。M4 的 `mhi_*` 接口正好是 ath12k 要的那一小把（`mhi_alloc_controller/mhi_register_controller/mhi_prepare_for_power_up/mhi_sync_power_up/mhi_prepare_for_transfer/mhi_queue_*`），FreeBSD LinuxKPI 没有 MHI 框架，这一层要由我们提供。M5–M6 是"接上 ath12k"，理论上是 `mk-ath11k.sh` 的兄弟脚本加 `DRIVER` 列表。
 
-**容量预算**：`phone.py` 的小根镜像上限 32 MiB（`tools/ace5/phone.py:272-273`）。WCN7850 的 `amss.bin`、`m3.bin`、`board-2.bin`、regdb 都要进 `fw/`，加上已有的 GPU 四件（`local/root-daily-fw.apfs` 已经 10.7 MB）。M4 之前必须做一次预算；超了就先把固件换成分区读取或第二个 ramdisk，不能到 M4 才发现。
+**容量预算（2026-10-30 实测）**：小根镜像上限 32 MiB = 33,554,432 字节（`tools/ace5/phone.py:272-273`）。WCN7850 三件实测：`amss.bin` 6,090,816 + `m3.bin` 299,660 + `board-2.bin` 2,431,968 = **8,822,444 字节（8.41 MiB）**；`regdb.bin` 不在 linux-firmware 的 WCN7850 目录里（ath12k 先取 `board-2.bin` 里的 REGDB IE，最后才退回 `regdb.bin`）。把三件放进 `local/root-daily` 的 `fw/` 重打（`mkapfs.py -z --plain fw`）：镜像从 10,743,808 涨到 **19,873,792 字节（18.95 MiB）**，**余量 13,680,640 字节（13.05 MiB）**。结论：**装得下**，不需要分区读取或第二个 ramdisk；但 `fw/` 按 `--plain` 不压缩，后面 ADSP 那几十 MB 固件不能再走这条路。固件查找也已放宽：`redwood_wifi_driver_file()` 对未知名字回落到 `fw/<basename>`（原来只认 WCN6750 的 `board.bin`/`regdb.bin`），否则 ath12k 的 `amss.bin`/`m3.bin`/`board-2.bin` 根本读不到。
 
 ## 4. 立即要做的下一步（主机侧，不需要手机）
 

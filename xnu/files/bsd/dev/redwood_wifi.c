@@ -3994,7 +3994,9 @@ redwood_wifi_driver_file(const char *name, uint64_t *size)
 			return image_file(files[i][1], size);
 		}
 	}
-	return NULL;
+	/* ath12k asks for its own names (amss.bin, m3.bin, board-2.bin, regdb.bin);
+	 * they are staged under fw/ like the WCN6750's files. */
+	return image_file(last, size);
 }
 
 /*

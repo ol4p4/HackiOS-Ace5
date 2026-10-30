@@ -1582,7 +1582,11 @@ mapping) need to be re-derived. Those facts are now exported from the DTB into
 answered the M5–M6 question: ath12k of Linux 7.0.14 fails on 17 files (the
 LinuxKPI 802.11 headers are older than 7.0), 6.16.1 is no better, and 6.12.1
 fails on 5 (skb/list helpers, `cfg80211_find_ext_elem`, three mac80211 op
-signatures, PM ops, MHI). See `docs/WIFI.md` §7.
+signatures, PM ops, MHI). See `docs/WIFI.md` §7. The firmware budget is
+measured too: WCN7850's `amss.bin`/`m3.bin`/`board-2.bin` total 8.41 MiB and
+the repacked root image is 18.95 MiB, 13.05 MiB under the 32 MiB cap, so the
+small image still works; `redwood_wifi_driver_file()` now falls back to
+`fw/<basename>` so ath12k can read them.
 
 **Host-side M1 is ready (2026-10-30).** `xnu/files/bsd/dev/giulia_pcie.c`
 implements `pcie_step=1` (read-only survey: GDSC/clock/reset state, PARF/PHY/DBI
@@ -1602,14 +1606,15 @@ RC0.
 **Build check 2026-10-30 (WSL x86_64).** `xnu/apply.sh` (75 changed, 125 new
 files) + `xnu-deps/setup.sh --stage1/--stage2` + `xnu-build.sh` compile
 `giulia_pcie.o` and link it: `_giulia_pcie_init` and `_pcie_thread` are in
-`mach.development.bcm2837` (15,100,448 bytes). The build then stops in
+`mach.development.bcm2837` (15,100,448 bytes). The first build stops in
 `check_all_exports` ("exported name not in import list: IOService::…"), a
 host-tool/symbolset mismatch unrelated to this change — the kernel binary is
-already linked at that point. Three host fixes were needed for WSL: the six
-dependency repos and the macOS SDK prefetched through the Windows proxy (WSL
-could not reach github.com), `uuid-dev` installed, and `/usr/bin/env python`
-pointed at `python3`. The built kernel is at
-`out/giulia-kernel/mach.ace5-pcie`.
+already linked at that point, and a second `xnu-build.sh` run then exits 0
+(2026-10-30, after the `redwood_wifi.o` firmware-lookup change). Three host
+fixes were needed for WSL: the six dependency repos and the macOS SDK
+prefetched through the Windows proxy (WSL could not reach github.com),
+`uuid-dev` installed, and `/usr/bin/env python` pointed at `python3`. The
+built kernel is at `out/giulia-kernel/mach.ace5-pcie`.
 
 Also new: `tools/ace5/app-smoke.py`, the 16.5 gate `docs/DRIVERS.md` named
 but did not have. On the 2026-10-30 14:21 log it scores network PARTIAL
