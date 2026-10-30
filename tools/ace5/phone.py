@@ -43,6 +43,9 @@ run.add_argument('--live-log', action='store_true',
                  help='Save live log snapshots every 10 seconds; requires CPU 1 and a finite run')
 run.add_argument('--live-interval', type=float, default=10,
                  help='Seconds between live-log snapshots, 0.1 to 60 (default 10)')
+run.add_argument('--shots', type=float, default=0,
+                 help='Take a screenshot every N seconds during the run (0: only the one at the end). '
+                      'A series is what tells "the picture drifted" from "the boot started bad"')
 run.add_argument('--gpu-step-delay', type=int, default=0,
                  help='Pause 0 to 3000 ms before each new GPU core register access for tracing')
 run.add_argument('--gpu-direct', action='store_true',
@@ -121,7 +124,7 @@ def wait_device(serial):
         time.sleep(1)
     raise RuntimeError(f'Device {serial} did not appear; no flash fallback is attempted')
 
-def screenshot():
+def screenshot(index=None):
     ensure_loader()
     w, h, stride = map(int, getvar('screen').split())
     fb('oem', 'screenshot')
@@ -138,7 +141,10 @@ def screenshot():
         rows += b'\0' + rgb
     def chunk(t, d):
         return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d))
-    png = logs / (time.strftime('%Y%m%d-%H%M%S') + '-screen.png')
+    # A run with --shots takes many: the index keeps them in order and apart even
+    # when two land in the same second.
+    suffix = '' if index is None else f'-{index:03d}'
+    png = logs / (time.strftime('%Y%m%d-%H%M%S') + '-screen' + suffix + '.png')
     png.write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) +
                     chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b''))
     raw_path.unlink()
@@ -285,6 +291,11 @@ try:
         next_live = time.monotonic() + live_interval
         live_prefix = time.strftime('%Y%m%d-%H%M%S')
         live_count = 0
+        # --shots: a picture every N seconds, so one boot yields a series instead of
+        # a single frame at the end. Frame 1 tells whether it started clean, frame N
+        # whether it drifted — the distinction that "4 % vs 51 % black" needed.
+        shot_count = 0
+        next_shot = time.monotonic() + args.shots if args.shots > 0 else None
         while True:
             result = fb('getvar', 'result')
             if 'result: running' not in result:
@@ -302,7 +313,14 @@ try:
                 elif 'no live kernel' not in response:
                     raise RuntimeError('Live-log request failed: '+response.strip())
                 next_live=time.monotonic()+live_interval
-            time.sleep(min(2,live_interval))
+            if next_shot is not None and time.monotonic() >= next_shot:
+                shot_count += 1
+                try:
+                    screenshot(shot_count)
+                except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
+                    print(f'Screenshot {shot_count} failed: {error}', flush=True)
+                next_shot += args.shots
+            time.sleep(min(2, live_interval))
         log = logs / (time.strftime('%Y%m%d-%H%M%S') + '-' + args.command + '.log')
         # Fetch immediately: idle "oem log" would discard the staged kernel log.
         fb('get_staged', log)

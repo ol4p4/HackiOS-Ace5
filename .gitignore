@@ -87,6 +87,11 @@ __pycache__/
 !/userland/src/
 !/userland/libmini/
 !/userland/var/
+# Local pages a run opens in Safari (file:///redwood/share/web/...): the
+# refresh-rate page measures the panel on the device itself, no network.
+!/userland/share/
+/userland/share/*
+!/userland/share/web/
 /ios165/*
 !/ios165/fetch.sh
 !/ios165/*.py

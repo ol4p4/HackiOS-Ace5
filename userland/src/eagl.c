@@ -1063,6 +1063,19 @@ frame_end(struct eagl *e, bool finished)
 	waited = now_us();
 	for (unsigned i = 0; i < e->image_count; i++) {
 		if (e->images[i].target && e->images[i].drawn) {
+			/*
+			 * Why a glshow boot-arg can come back with no line at all: the display is
+			 * shown only from an image that is both this pass's target and one something
+			 * drew into. Said once, with what the run saw of the argument, so "the page
+			 * never came" and "the argument never arrived" stop looking the same.
+			 */
+			static unsigned told;
+
+			if (told++ < 2) {
+				say("redwood-gl: display image %u: target+drawn, shared=%d mirror=%u; glshow wants %d x %d, shown_texture %u\n",
+				    i, (int)e->images[i].shared, e->images[i].mirror, (int)shown_wanted[0],
+				    (int)shown_wanted[1], shown_texture);
+			}
 			copied += !e->images[i].shared;
 			target_to_surface(e, &e->images[i]);
 			if (shown_texture != 0) {

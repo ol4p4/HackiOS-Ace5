@@ -36,6 +36,12 @@ jobs = args.jobs or REPO / 'tools/ace5' / ('rc.jobs.metal' if args.metal else 'r
 copies = [(args.components / name, Path('lib') / name) for name in
           ['libOSMesa.8.dylib', 'libredwood-gl.dylib']]
 copies += [(args.components / 'gl_test', Path('bin/gl_test')), (jobs, Path('etc/rc.jobs'))]
+# The local pages a run opens in Safari (file:///redwood/share/web/...): the
+# refresh-rate page measures the panel's real cadence on the device itself,
+# which no host-side frame count can answer.
+if (REPO / 'userland/share/web').is_dir():
+    copies += [(REPO / 'userland/share/web' / name, Path('share/web') / name)
+               for name in sorted(p.name for p in (REPO / 'userland/share/web').iterdir() if p.is_file())]
 if args.display_test:
     copies += [(args.components / 'display_test', Path('bin/display_test'))]
 if args.metal:
