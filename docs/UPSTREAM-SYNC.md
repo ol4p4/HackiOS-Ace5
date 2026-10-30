@@ -14,8 +14,9 @@ stage 20.
 1. Cherry-pick generic subsystems and fixes; never a device-specific driver.
 2. Keep the `redwood_*` names. Upstream renamed them to `hakios.*` and touched
    ~364 files; following that rename is pure churn until a full rebase is chosen.
-3. Every pick must pass `tools/ace5/host-selftest.sh` and the CI kernel build
-   before it goes near the phone.
+3. Every pick must pass `tools/ace5/host-selftest.sh` (run it yourself — CI does
+   not run it) and a CI kernel build (dispatch `build-kernel.yml` by hand; there
+   is no push/PR trigger) before it goes near the phone.
 4. Use `git cherry-pick -x` so the upstream commit id is recorded, and resolve
    conflicts in favour of our giulia constants.
 
@@ -35,7 +36,7 @@ stage 20.
 
 | Area | Reason |
 | --- | --- |
-| WiFi (`hakios.wifi.c`, `lx`, `sta`, `wlfw`, ath11k glue) | POCO is WCN6855/ath11k; the Ace 5 is WCN7850. Use UniXNU `Ath12kWifi` as the reference instead |
+| WiFi (`hakios.wifi.c`, `lx`, `sta`, `wlfw`, ath11k glue) | POCO is WCN6750/ath11k; the Ace 5 is WCN7850. Use UniXNU `Ath12kWifi` as the reference instead |
 | Audio (`adsp`, `audio`, `sound`, `speaker`, `mic`, `guard`) | SM8650 ADSP/PAS layout and the SIA9177 amps are POCO-specific; a port, not a pick |
 | Haptics, cameras, torch, buttons, battery, cpufreq | POCO register maps; useful only as templates |
 | Cellular / IPA (`mpss`, `ipa`, `nas`, `qmi`, `cell`) | The `soc_*` override support is worth having, but the modem PAS id is not in this phone's tree (`soc_pas_mpss` is missing in `devices/ace5/soc.args`) and the IPA version may differ. Take the framework after the modem work starts |
@@ -51,7 +52,7 @@ git fetch upstream
 git log --oneline upstream/main ^HEAD -- xnu/files/bsd/dev/redwood_ufs.c
 git cherry-pick -x <sha>
 tools/ace5/host-selftest.sh
-# then a CI kernel build before any phone run
+# then dispatch build-kernel.yml by hand before any phone run (no push trigger)
 ```
 
 Record each pick below with its upstream id and the local commit, so a later

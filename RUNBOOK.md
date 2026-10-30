@@ -4,7 +4,7 @@ This runbook is for the OnePlus Ace 5 port (`YiKongk/HackiOS-Ace5`). It covers:
 
 - **Phase 0** — backup and hardware extraction (read-only on the phone).
 - **Phase 1** — SMP: `cpus=` / `cpumask=` boot arguments, 1 → 2 → 4 → 8 cores.
-- **Phase 2** — `var_store` persistence: carve a `darwin` partition, enable UFS writes, persist `/private/var`. **Blocked on PKG110 as of 2026-10-25: `userdata` is metadata-encrypted; see the blocker note in the Phase 2 section.**
+- **Phase 2** — `var_store` persistence: carve a `darwin` partition, enable UFS writes, persist `/private/var`. **Executed 2026-10-26; the `userdata` metadata-encryption concern was resolved by reading the plaintext f2fs superblock on the mapper device — see the Phase 2 section.**
 
 Not covered here: full root-on-userdata (needs a writable APFS, which this tree does not have), iOS 18 (a different kernel/rootfs stack), Wi-Fi, audio, camera.
 
@@ -1511,21 +1511,32 @@ at the 16 ms bucket. What it took to get there:
    `http://127.0.0.1:8080/<name>`.
 
 **Handoff 2026-10-30 (line 1 closed, line 2 planned).** The GPU line is done as
-far as the four system-app groups need it: the GL path is correct, the panel runs
-at the 60.0 Hz iOS asks for, and Safari renders. What remains on that line is
-written down, with evidence and an acceptance test for each item, in
-`docs/GPU.md` — DVFS (the GPU has only ever been voted the stock minimum clock),
-runtime power collapse/DPMS, UBWC, the per-frame IOSurface texture cost, per-client
-page tables, the never-engaged Metal frontend, Vulkan WSI, and perf counters; the
-first two to do are DVFS (the RPMh code exists in `redwood_adsp.c`) and the
-texture cache in `eagl.c`. Backlight and 120 Hz are recorded there as not needed
-for the gate.
+far as the four system-app groups need it: the GL path is correct, the
+CoreAnimation display link runs at 60 Hz (rAF-measured, not an optical panel
+measurement), and Safari renders. The closure rests on single-boot evidence: the
+Control Center 0.3 % figure is one boot's screenshot series, the two-run
+stability that `docs/DRIVERS.md` asks for is not done, and
+`tools/ace5/app-smoke.py` does not exist yet — `docs/GPU.md` §5 records this
+boundary. What remains on that line is written down, with evidence and an
+acceptance test for each item, in `docs/GPU.md` — DVFS (the GPU has only ever
+been voted the stock minimum clock, though the 13-point DCVS table is uploaded),
+runtime power collapse/DPMS, UBWC, the per-frame IOSurface texture cost,
+per-client page tables, the Metal frontend (first draw printed once under
+`metal_profile=1`; MPS still incomplete), Vulkan WSI, and perf counters; the
+first two to do are DVFS (the RPMh vote mechanism exists in `redwood_adsp.c`)
+and the texture cache in `eagl.c`. Backlight and 120 Hz are recorded there as
+not needed for the gate.
 
-The next line is Wi-Fi: `docs/WIFI.md` has the six milestones, the DTB facts they
-stand on, and the pieces already in the tree (`wifi/lx`, `tools/mk-ath11k.sh`,
-the QRTR code in `redwood_wifi.c`). The first host-side step is lifting the
-register sequences from Linux's `pcie-qcom.c` and `phy-qcom-qmp-pcie.c` into a
-GPL-isolated header, the way `giulia_gpu_regs.h` was lifted from KGSL.
+The next line is Wi-Fi: `docs/WIFI.md` has the milestones, the DTB facts they
+stand on, the capacity budget, the abandon criteria, and the pieces already in
+the tree (`wifi/lx`, `tools/mk-ath11k.sh`, the QRTR code in `redwood_wifi.c`).
+The first host-side step is a diff, not a transcription: annibale's
+`redwood_pcie.c` is the same SM8750 and already read RC0 link-up and BAR0 on
+2026-10-27, thyme's `umi_pcie.c`/`umi_mhi.c` give the MHI interface; Linux's
+`pcie-qcom.c` and `phy-qcom-qmp-pcie.c` are the register-sequence reference.
+Only the board-level differences (base addresses, GPIOs, RPMh rails, SMMU
+mapping) need to be re-derived, and the PCIe node's clocks/power-domains/resets/
+GPIOs have to be exported from the DTB before M1.
 
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and

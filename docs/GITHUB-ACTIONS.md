@@ -1,6 +1,8 @@
 # 用 GitHub Actions 构建 Ace 5（无 Linux ARM64 主机）
 
-`ubuntu-24.04-arm` 对公开仓库免费，4 核 / 16 GB / 约 120 GB 可用空间，足够跑完 UEFI、XNU、Mesa/userland 和两个 APFS 镜像。构建产物分成两个 artifact：`ace5-kernel`（约 27 MB，含内核、三个 boot image、RAM root 和手机侧工具）和 `ace5-system`（约 2.4 GB，带 iOS 系统盘），保留 7 天。
+`ubuntu-24.04-arm` 对公开仓库免费，4 核 / 16 GB / 约 120 GB 可用空间，足够跑完 UEFI、XNU、Mesa/userland 和两个 APFS 镜像。构建产物只上传一个 artifact：`ace5-kernel`（约 27 MB，含内核、三个 boot image、RAM root 和手机侧工具），保留 7 天。**iOS 系统盘 `local/system-metal.apfs` 只构建和校验，不上传**——它是 Apple 的系统卷，公开 artifact 等于再分发（见 workflow 里 "deliberately NOT uploaded" 的注释）。
+
+工作流只有 `workflow_dispatch`，没有 push/PR 触发；它也不跑 `tools/ace5/host-selftest.sh` 或任何主机测试。
 
 ## 1. 公开 fork
 
@@ -32,8 +34,8 @@ gh run watch --repo <you>/HackiOS-Ace5
 4. Mu-Silicium（pin `42fe5637`）+ 本机编译 BaseTools。
 5. UEFI + kernel 阶段 boot image，以及 persist 阶段 boot image（`allowed_partition_write: logdump, darwin`）。
 6. XNU（`xnu-8796.121.2` + `redwood.patch`）。
-7. `ios165/fetch.sh`（从 Apple CDN 取 4.7 GB + 2.7 GB 镜像成员）、Mesa、userland、两个 APFS 镜像，`apfsck` 校验。
-8. 上传 `ace5-kernel` 和 `ace5-system`。
+7. `ios165/fetch.sh`（从 Apple CDN 取 4.7 GB + 2.7 GB 镜像成员）、Mesa（`AIR=1 VULKAN=1`）、userland、两个 APFS 镜像，`apfsck` 校验。
+8. 上传 `ace5-kernel`（系统盘不传）。
 
 ## 3. 下载并安装
 
@@ -44,18 +46,12 @@ gh run download <run-id> --repo <you>/HackiOS-Ace5 -n ace5-kernel -D local/ci-ar
 python3 tools/ace5/install-artifact.py local/ci-artifact
 ```
 
-要看 iOS 界面时再下系统盘（2.4 GB，可以晚点下）：
-
-```bash
-gh run download <run-id> --repo <you>/HackiOS-Ace5 -n ace5-system -D local/ci-artifact
-python3 tools/ace5/install-artifact.py local/ci-artifact
-```
+iOS 系统盘不在 artifact 里。需要它时在 Linux ARM64 主机上自己构建：`tools/ace5/prepare-gpu-system.py` + `tools/apfs/mkapfs.py`，命令与 workflow 里 prepare-gpu-system / mkapfs 那两步相同。
 
 旧运行可能只有一个 `ace5-build`；先看实际名字：`gh run view <run-id> --json artifacts --jq '.artifacts[].name'`。
 
 脚本会：
 
-- 把 `system-metal.apfs.part-aa/ab/ac` 拼回 `local/system-metal.apfs`；
 - 复制 `out/giulia-kernel/mach.ace5-public`、`hackios-giulia-kernel.img/.json`、`out/giulia-persist/hackios-giulia-persist.img/.json`、`out/giulia/hackios-giulia-diagnostic.img/.json`、`local/root-daily.apfs`、`local/tools/f2fs-resize`；
 - 校验 Mach-O、`ANDROID!` 和 APFS `NXSB` magic。
 
@@ -95,6 +91,6 @@ ACE5_CPUS=1 python3 tools/ace5/phone.py --serial "$ACE5_SERIAL" run \
 | `hackios-giulia-diagnostic.img` | ~2 MB | 只读诊断阶段 |
 | `local/tools/f2fs-resize` | 2.7 KB | 手机上收缩 `/data` 的静态 aarch64 工具 |
 | `local/root-daily.apfs` | 11 MB | RAM root（`--root-image`） |
-| `local/system-metal.apfs` | 2.38 GB | iOS 16.5 系统盘（`ramdisk --image`） |
+| `local/system-metal.apfs` | 2.38 GB | iOS 16.5 系统盘（`ramdisk --image`）；只构建，不上传 |
 
-`system-metal.apfs` 超过 GitHub 单文件上传的稳妥范围，所以按 900 MB 分片；`install-artifact.py` 负责拼回。
+系统盘不在 artifact 里，本机构建后直接 `ramdisk --image`，不需要分片。

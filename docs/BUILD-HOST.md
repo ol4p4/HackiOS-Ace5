@@ -40,7 +40,8 @@ sudo apt-get install -y \
   clang-18 lld-18 llvm-18 \
   flex bison m4 perl autoconf automake libtool pkg-config libncurses-dev \
   python3 python3-venv python3-pip meson ninja-build nasm uuid-dev \
-  gcc-aarch64-linux-gnu device-tree-compiler acpica-tools 7zip
+  gcc-aarch64-linux-gnu device-tree-compiler acpica-tools 7zip \
+  glslang-tools libvulkan-dev
 export PATH="/usr/lib/llvm-18/bin:$PATH"
 ```
 
@@ -154,12 +155,12 @@ cp xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.b
 
 ```bash
 bash ios165/fetch.sh
-AIR=1 DRIVERS=softpipe,freedreno tools/mk-mesa.sh
+AIR=1 VULKAN=1 DRIVERS=softpipe,freedreno tools/mk-mesa.sh
 GL=1 PREBUILT= bash userland/build.sh
 tools/ace5/build-gpu-userland.sh local/components --metal
 ```
 
-`ios165/fetch.sh` 从 Apple CDN 下载约 7 GB，5–15 分钟。Mesa 固定 25.0.7，脚本会校验 SHA-256。
+`ios165/fetch.sh` 从 Apple CDN 下载约 7 GB，5–15 分钟。Mesa 固定 25.0.7，脚本会校验 SHA-256。`VULKAN=1` 才会构建 `libvulkan_freedreno.dylib`（Turnip），它需要 `glslang-tools` 和 `libvulkan-dev`；不加就只构建 GL，`turnip_test` 也没有 ICD 可加载。
 
 生成小 root 和系统目录：
 

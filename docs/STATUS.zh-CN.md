@@ -2,6 +2,8 @@
 
 记录对象：OnePlus Ace 5 PKG110 / giulia，SM8650，Adreno 750v2（芯片 ID `0x43051401`），Synaptics S3910。原 Android 环境为 Android 16、KernelSU root。以下是真机基线的历史结果；整理后的公开源码本次做了哪些检查，见[发布记录](RELEASE.zh-CN.md)。
 
+> **2026-10-25 快照**：本页是当时的真机基线。此后 SMP（7 核）、`var_store` 持久化与 Turnip gate 1–7 已完成，Wi-Fi 计划见 [WIFI.md](WIFI.md)；当前状态以 [GPU.md](GPU.md) / [DRIVERS.md](DRIVERS.md) 为准。本文的"单核""无持久化"不再描述当前分支。
+
 ## 硬件与系统
 
 | 项目 | 证据 / 当前边界 |

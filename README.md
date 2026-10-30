@@ -5,6 +5,8 @@
 
 **本次公开的是 Wi‑Fi 适配前、经过实机验证的源码基线。Wi‑Fi 尚不可用；这不是可日用 ROM，也没有完整 Metal 兼容或稳定 60 FPS 的承诺。**
 
+> **2026-10-25 快照**：本页描述的是公开基线。当前分支的 SMP（7 核）、`var_store` 持久化、Turnip gate 1–7 与 Wi-Fi 计划都晚于该快照；当前状态以 [docs/GPU.md](docs/GPU.md)、[docs/WIFI.md](docs/WIFI.md)、[docs/DRIVERS.md](docs/DRIVERS.md) 为准。
+
 本仓库将内核、loader 和用户空间源码放在同一个工作目录，克隆一次即可获得项目自己的源码。Apple 系统文件、SDK、设备固件、DTB、分区备份和预编译镜像均需在本地准备，不随仓库分发。
 
 ## 文档入口
