@@ -1509,3 +1509,24 @@ at the 16 ms bucket. What it took to get there:
    the first browser screenshot of this port, and the cheapest way to test any
    page from now on: drop it in `userland/share/web/`, open
    `http://127.0.0.1:8080/<name>`.
+
+**Handoff 2026-10-30 (line 1 closed, line 2 planned).** The GPU line is done as
+far as the four system-app groups need it: the GL path is correct, the panel runs
+at the 60.0 Hz iOS asks for, and Safari renders. What remains on that line is
+written down, with evidence and an acceptance test for each item, in
+`docs/GPU.md` — DVFS (the GPU has only ever been voted the stock minimum clock),
+runtime power collapse/DPMS, UBWC, the per-frame IOSurface texture cost, per-client
+page tables, the never-engaged Metal frontend, Vulkan WSI, and perf counters; the
+first two to do are DVFS (the RPMh code exists in `redwood_adsp.c`) and the
+texture cache in `eagl.c`. Backlight and 120 Hz are recorded there as not needed
+for the gate.
+
+The next line is Wi-Fi: `docs/WIFI.md` has the six milestones, the DTB facts they
+stand on, and the pieces already in the tree (`wifi/lx`, `tools/mk-ath11k.sh`,
+the QRTR code in `redwood_wifi.c`). The first host-side step is lifting the
+register sequences from Linux's `pcie-qcom.c` and `phy-qcom-qmp-pcie.c` into a
+GPL-isolated header, the way `giulia_gpu_regs.h` was lifted from KGSL.
+
+The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
+carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
+`local/root-daily-fw.apfs` is repacked from it.
