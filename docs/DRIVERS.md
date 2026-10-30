@@ -43,4 +43,4 @@ XNU 没有 Linux 的驱动模型：没有 `platform_driver`/`probe`/设备树绑
 
 ## 16.5 的出门闸门
 
-出门闸门是 `tools/ace5/app-smoke.py` 覆盖四组系统应用全绿（基础/联网/音频/相机）才谈 iOS 26；**该脚本尚未实现，四组也还没有用例**，目前只是定义。第三方 App 安装与适配不在本轮。
+出门闸门是 `tools/ace5/app-smoke.py` 覆盖四组系统应用全绿（基础/联网/音频/相机）才谈 iOS 26。脚本已实现：读一次 `phone.py run` 的日志，逐条给 PASS / FAIL / BLOCKED（未移植的子系统），`--group` 只判本次跑过的那组。第三方 App 安装与适配不在本轮。

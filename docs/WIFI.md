@@ -32,9 +32,9 @@ WCN6750 与 WCN7850 的差别只在**总线与固件协议**：6750 走 WPSS（A
 - 供电（RPMh，七路成对给上下电电压）：`vdd-wlan-aon/dig/io/io12/rfa1/rfa2/vdd-wlan`（0xee480/0xdfa20/0x1b7740/0x124f80/0x1c7140/0x1414a0/0xe57e0，单位 µV）。
 - 保留内存：`cnss_wlan_region`；ramdump 动态区 `0x780000`。
 - QRTR：`/soc/qcom,qrtr-mhi-cnss` 在 DT 里就写着 **MHI**——这条总线的协议栈是确定的。
-- **`pcie_sm_regs=0x1D07000`**：stock Android cmdline 里就有（`RUNBOOK.md:1016`），K90 的 RC0 上电序列也用它。本机 DTB 的 `reg` 块里 `conf` 就是它（`0x1d07000+0x7000`），不需要外部常量。
+- **`pcie_sm_regs=0x1D07000`**：stock Android cmdline 里就有（`RUNBOOK.md:1016`），K90 的 RC0 上电序列也用它。本机 DTB 的 `reg` 块里 `pcie_sm` 就是它（`0x1d07000+0x7000`），不需要外部常量。
 - **设备号 `0x17cb:0x1107`**：本机 DTB 的 `supported-ids` 与 QRTR 的 `qcom,dev-id` 都写 `0x1107`（vendor `0x17cb`）；枚举时核对，再去 ath12k 的 `pci_device_id` 表。
-- **M1 的输入已导出（2026-10-30）**：`hw-facts.py` 现在抽 clocks/clock-names、resets/reset-names、`perst-gpio`/`qcom,pcie-clkreq-gpio`/`wake-gpio`、`reg-names`、`ranges`、`iommu-map`/`msi-map`、`qcom,phy-*`、`qcom,pcie-sm-*`，`docs/ACE5-HW.md` 附录是完整表。关键值：parf `0x1c00000`、phy `0x1c06000`、dbi `0x60000000`、elbi `0x60001000`、iatu `0x60100000`、conf/pcie_sm `0x1d07000`；PERST/CLKREQ/WAKE = GPIO 94/95/96；RID `0x100` → SID `0x1401`；`cnss_wlan_region` 32 MiB；`qcom,phy-sequence`（1701 字节）就在 DTB 里。
+- **M1 的输入已导出（2026-10-30）**：`hw-facts.py` 现在抽 clocks/clock-names、resets/reset-names、`perst-gpio`/`qcom,pcie-clkreq-gpio`/`wake-gpio`、`reg-names`、`ranges`、`iommu-map`/`msi-map`、`qcom,phy-*`、`qcom,pcie-sm-*`，`docs/ACE5-HW.md` 附录是完整表。关键值：parf `0x1c00000`、phy `0x1c06000`、dbi `0x60000000`、elbi `0x60000f20`、atu `0x60001000`、conf `0x60100000`、pcie_sm `0x1d07000`；PERST/CLKREQ/WAKE = GPIO 94/95/96；RID `0x100` → SID `0x1401`；`cnss_wlan_region` 32 MiB；`qcom,phy-sequence`（115 步）就在 DTB 里。
 - **已知卡点——QMP**：`qcom,qmp = 0x63`（邮箱 99）是 cnss 侧电源握手的 "QMP open"，也是 tycykp 的 WCN7850 尝试卡住的地方（`docs/ACE5-HW.md:18`）。它不能只当背景事实，M1/M3 各要一条独立的验收行。
 - **同族的两道墙**：11 Ultra 的 WCN6855（`17cb:1103`）固件/BDF/NV 已抽取校验，但缺 PCIe LTSSM PIPE 时钟与 MHI/BHI 下载器，链路未起（对应我们的 M1–M4）；dada 的 WCN7850 到了 WMI，但固件大多数运行会死，其 Wi-Fi 驱动目前是临时替身。前者说明 M1 不是走过场，后者说明 M4 之后还有一道固件稳定性墙。
 
@@ -42,7 +42,7 @@ WCN6750 与 WCN7850 的差别只在**总线与固件协议**：6750 走 WPSS（A
 
 | # | 内容 | 验收（日志/现象） | 风险 |
 |---|---|---|---|
-| M1 | PCIe0 控制器复位、时钟、PHY 上电与 LTSSM 训练 | `link up, speed gen2/gen3, width x1/x2`；`pcie0: link training done` | 时钟树（crm）与 PHY 组合序列最杂；以 annibale `redwood_pcie.c` 为底，Linux 只作寄存器参照 |
+| M1 | PCIe0 控制器复位、时钟、PHY 上电与 LTSSM 训练 | `link up, speed gen2/gen3, width x1/x2`；`pcie0: link training done` | 时钟树与 PHY 组合序列最杂；**代码已就位**：`giulia_pcie.c` 的 `pcie_step=1`（只读勘察）/`2`（上电+链路），PHY 序列来自 DTB |
 | M2 | 配置空间访问 + 枚举 + **PARF RID→SID 读回** | 读到 vendor `0x17cb`（期望 device id `0x1107`）与 BAR0 大小；`cnss_pci0` 出现；RID `0x100` → SID `0x1401` 可读回 | ECAM 窗口/ATu 配置；K90 实测 PARF bypass=1、RID 链出现环、SID 未验证（`local/refs/k90-wcn7850-plan.md:73,135-137`） |
 | M3 | BAR0 映射、MHI 寄存器可读、MSI 落点、**QMP open** | `MHI_READY`/`MHIVER` 读出，写 MSI 后收到一次中断；QMP 握手返回 | MSI 控制器 0x17110040 的编程；QMP 邮箱 99 |
 | M3.5 | **apps SMMU/QTB context、IOVA 窗、端点 DMA 映射** | 一次 host→device 的 DMA 往返（host 写一块 buffer，模块读回同一个值） | SID `0x1401` 的路由与 context；与 DisplayDxe/保留区撞窗（K90 放弃准则第 4 条） |
@@ -56,8 +56,9 @@ M1–M3.5 是"移植 + 板级差异"：annibale 给出同 SoC 的寄存器与流
 
 ## 4. 立即要做的下一步（主机侧，不需要手机）
 
+0. **上机（M1）**：`phone.py run --pcie 1 --kernel out/giulia-kernel/mach.ace5-public --root-image local/root-daily-fw.apfs` 先跑只读勘察，确认基址、GDSC 与时钟状态；再 `--pcie 2` 上电并等链路。
 1. **先 diff，再抄**：取 annibale 的 `redwood_pcie.c`（同 SM8750）与 thyme 的 `umi_pcie.c`/`umi_mhi.c`，对着本板 DTB 逐项列出"同/异"；Linux `pcie-qcom.c`、`phy-qcom-qmp-pcie.c` 里的对应段只作寄存器语义对照，不整段照抄。
-2. **把 DTB 里的序列变成头文件**：从 `qcom,phy-sequence`（offset/value/delay 三元组）、`qcom,pcie-sm-seq`、`qcom,pcie-sm-branch-seq` 生成 `giulia_pcie_regs.h` 的初稿。这些是厂商数据，不是 GPL；和从 Linux 抄来的寄存器语义分开放，并在文件头注明来源。基址已核对：parf/phy/dbi/elbi/iatu/conf 见 `docs/ACE5-HW.md`，`conf` 就是 `pcie_sm_regs=0x1D07000`。
+2. **把 DTB 里的序列变成头文件**：从 `qcom,phy-sequence`（offset/value/delay 三元组）、`qcom,pcie-sm-seq`、`qcom,pcie-sm-branch-seq` 生成 `giulia_pcie_regs.h` 的初稿。这些是厂商数据，不是 GPL；和从 Linux 抄来的寄存器语义分开放，并在文件头注明来源。基址已核对：parf/phy/dbi/elbi/atu/conf/pcie_sm 见 `docs/ACE5-HW.md`。
 3. 写 `xnu/files/bsd/dev/giulia_pcie.c` 的 M1 步骤（只读+复位+PHY，绝不写端点），boot-arg `pcie_step=N`；同时给 `phone.py` 加 `--pcie`（或让 `ACE5_CMDLINE` 能覆盖默认的 `wifi=0`，避免命令行里出现两个 `wifi=`）。
 
 ## 5. 明确不做

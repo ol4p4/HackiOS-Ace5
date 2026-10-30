@@ -206,6 +206,7 @@ static const struct cdevsw touch_cdevsw = {
 };
 
 extern void giulia_s3910_init(void);
+extern void giulia_pcie_init(void);
 
 void
 redwood_input_init(void)
@@ -225,6 +226,7 @@ redwood_input_init(void)
 	redwood_ufs_init();
 	redwood_net_init();
 	redwood_adreno_init();
+	giulia_pcie_init();
 	redwood_wifi_init();
 	redwood_adsp_init();
 }

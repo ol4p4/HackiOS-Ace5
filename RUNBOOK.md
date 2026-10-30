@@ -1577,8 +1577,26 @@ The first host-side step is a diff, not a transcription: annibale's
 Only the board-level differences (base addresses, GPIOs, RPMh rails, SMMU
 mapping) need to be re-derived. Those facts are now exported from the DTB into
 `docs/ACE5-HW.md` (2026-10-30), including the vendor `qcom,phy-sequence` and
-`qcom,pcie-sm-seq`; the next host-side step is generating `giulia_pcie_regs.h`
-from them.
+`qcom,pcie-sm-seq`; `tools/ace5/pcie-regs.py` generates
+`xnu/files/bsd/dev/giulia_pcie_regs.h` from them.
+
+**Host-side M1 is ready (2026-10-30).** `xnu/files/bsd/dev/giulia_pcie.c`
+implements `pcie_step=1` (read-only survey: GDSC/clock/reset state, PARF/PHY/DBI
+registers, the PERST/CLKREQ/WAKE pins) and `pcie_step=2` (GDSCs, clock votes,
+core and PHY resets, the 115-step vendor PHY sequence, PERST/WLAN_EN, then the
+link poll). `phone.py run --pcie 1|2` passes the boot-arg; the tree applies with
+the new file. The phone cycle is:
+
+    reboot → enter --stage kernel → ramdisk --image local/system-metal.apfs
+    → run --seconds 300 --bootcpu 1 --touch --pcie 1
+          --kernel out/giulia-kernel/mach.ace5-public
+          --root-image local/root-daily-fw.apfs
+
+Step 1 writes nothing and decides whether step 2 starts from a cold or a warm
+RC0. Also new: `tools/ace5/app-smoke.py`, the 16.5 gate `docs/DRIVERS.md` named
+but did not have. On the 2026-10-30 14:21 log it scores network PARTIAL
+(loopback and Safari pass, Wi-Fi blocked) and basic FAIL (Settings was not
+opened in that run); `--group` judges only the group a run exercised.
 
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and

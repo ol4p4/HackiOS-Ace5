@@ -35,6 +35,8 @@ run.add_argument('--verbose', action='store_true')
 run.add_argument('--kernel', type=Path, help='Explicit locally built Mach-O kernel')
 run.add_argument('--root-image', type=Path, help='Local small APFS image, e.g. with device firmware')
 run.add_argument('--touch', action='store_true', help='Enable the giulia S3910 driver; requires --kernel')
+run.add_argument('--pcie', type=int, choices=[1, 2],
+                 help='Ace 5 PCIe0: 1 read-only survey, 2 power-up and link training; requires --kernel')
 run.add_argument('--gpu-probe', type=int, choices=range(1, 21),
                  help='Ace 5 GPU probe: 1 GCC, 2 GPUCC, 3 CX power, 4 XO clocks/GMU, 5 TCM, 6 streams, 7 firmware, 8 SMMU, 9 operating clocks, 10 GMU boot, 11 HFI query, 12 power tables, 13 core firmware, 14 scheduler memory, 15 GX power, 16 GPU SMMU and firmware, 17 CP initialization, 18 ZAP authentication, 19 nonsecure CP DMA, 20 BR/BV indirect buffer; requires --kernel')
 run.add_argument('--bootcpu', type=int, choices=[0, 1], default=0,
@@ -208,6 +210,10 @@ try:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
             commandline += ' ace5_touch=1'
+        if args.command == 'run' and args.pcie:
+            if not args.kernel:
+                raise RuntimeError('--pcie requires an explicit locally built --kernel')
+            commandline += f' pcie_step={args.pcie}'
         if args.command == 'run' and args.verbose:
             commandline += ' -v'
         if args.command == 'run' and args.gpu_direct:

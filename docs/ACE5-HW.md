@@ -18,7 +18,7 @@ python3 tools/ace5/hw-facts.py dtb/giulia.dtb --out docs/ACE5-HW.md   # 重新�
 - 控制通道：`qcom,qmp: 0x63`（QMP 邮箱 99）——这就是 tycykp 卡住的 "QMP open"。
 - 电源域：`qcom,vdd-wlan-*`（aon/dig/io/io12/rfa1/rfa2，每个都成对给出上电/下电的目标电压）、`cnss_wlan_region` 保留内存、`qcom,wlan-ramdump-dynamic: 0x780000`。
 - **M1 需要的寄存器与引脚（2026-10-30 从本机 DTB 抽出，附录有全表）**：
-  - `reg-names`：parf `0x1c00000+0x3000`、phy `0x1c06000+0x2000`、dm_core `0x60000000+0xf1d`、elbi `0x60001000+0x1000`、iatu `0x60100000+0x100000`、conf `0x1d07000+0x7000`（与 stock cmdline 的 `pcie_sm_regs=0x1D07000` 对上）。
+  - `reg-names`：parf `0x1c00000+0x3000`、phy `0x1c06000+0x2000`、dm_core（DBI）`0x60000000+0xf1d`、elbi `0x60000f20+0xa8`、iatu（ATU）`0x60001000+0x1000`、conf（ECAM）`0x60100000+0x100000`、pcie_sm `0x1d07000+0x7000`（与 stock cmdline 的 `pcie_sm_regs=0x1D07000` 对上）。
   - `ranges`：io `0x60200000+1 MiB`、mem `0x60300000+0x3d00000`。
   - GPIO（TLMM phandle 197）：PERST `94`、CLKREQ `95`、WAKE `96`；cnss 侧 WLAN_EN `16`、BT_EN `17`、SW_CTRL `18`、WLAN_SW_CTRL `19`。
   - 时钟/复位：只有一路 `gcc_cnoc_pcie_sf_axi_clk`（gcc phandle 44, id 11）；复位 `pcie_0_core_reset`、`pcie_0_phy_reset`；PHY 供电 `gdsc-phy-vdd-supply`。
