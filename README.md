@@ -20,6 +20,7 @@
 | [架构与开发](docs/DEVELOPMENT.zh-CN.md) | 源码分层、测试入口、提交规范 |
 | [发布范围与清理记录](docs/RELEASE.zh-CN.md) | 基线版本、排除内容、发布检查 |
 | [历史适配笔记](docs/ACE5.md) | 早期试验、寄存器和诊断过程；历史阶段不代表当前功能 |
+| [REA 使用规范](docs/REA.zh-CN.md) | 逆向辅助工具的能力边界、成本层级与使用配额 |
 | [署名和许可证](NOTICE.md) | HackiOS、XNU、Mu-Silicium、Mesa 等来源 |
 
 ## 本版本实际支持什么
