@@ -1744,6 +1744,40 @@ lines are self-consistent (the zigzag measures 3.40 s, Safari sees
 gestures of the long round (832 of ~1400 samples survive), so frames.py
 sees only the tail of the round.
 
+**The transition stalls are the render clock, not the renderer
+(2026-10-31, host-side analysis of the same log).** Inside the CC
+retract the slow frames draw in 0.6–2.4 ms, wait 1.0 ms for the GPU,
+and the processors are near idle — but the window server *begins* each
+frame exactly **100.0 ms** after the one before, thirteen frames in a
+row (±0.2 ms), with beat 0.0 (the driver's too-late-resync path every
+time). 100.0 ms is six refreshes; other stalls land on four (66.9 ms)
+and two (33.4 ms); before the stretch, three frames were drawn
+back-to-back (began gaps 0.0) while SwapEnd was held 16/32/49 ms —
+commits were queued, the render clock was the limiter. On the iPhone X
+QuartzCore does not take the driver's vsync (inject.c: CADeviceUseVBL
+is an A7–A10 path there) and runs its own CADisplayTimer, whose phase
+it sets from the frame timings of a display driver this one is not — a
+copy driver whose beat resyncs whenever a frame is late. Fed those
+timings, the timer falls into a lock step of whole refreshes during
+transitions: the CC retract at 39 fps, the App Library entry at 40 with
+51 % of steps over 16.7 ms, the drags' exact 38.2 ms idles. The
+machinery for the other path exists on both sides and has never been
+run: boot-arg **ca_vbl=1** sets CA_FORCE_TIMER=1 in backboardd, and the
+driver answers IOMobileFramebufferEnableVSyncNotifications with
+kFBNotifyVSync — a self-correcting 60 Hz thread_call sending (refresh
+time, presented time, count). Plan when next on device: one run with
+ca_vbl=1 (plus a one-line driver log when the callback registers, so
+"CA never asked" is distinguishable from "the path is broken");
+pass/fail from tools/frames.py — the retract at 55+ fps with under 3 %
+over 33 ms, no whole-refresh stalls in the retract window
+(local/mine-retract.py), the end-to-end lag from 30.0 ms towards
+~24–27 ms as the app+frame-wait share shrinks. If the screen freezes,
+drop the boot-arg — nothing else changes. Not candidates, with
+reasons: fb_queue=1 (measured worse here: 33 % over 16.7 ms against
+28 %); fb_beat=0 (the beat is a symptom reporter here, not the cause);
+renderer-side throughput work (the CC pull already holds 58 fps with
+the blur on).
+
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
 `local/root-daily-fw.apfs` is repacked from it.
