@@ -1238,15 +1238,9 @@ IOMobileFramebufferUserClient::registerNotificationPort(mach_port_t port, UInt32
 	IOLockLock(fLock);
 	old = fPorts[type];
 	fPorts[type] = port;
-	fRefcons[type] = refCon;
-	if (type == kFBNotifyVSync && port != NULL && !fVSyncRunning && !fClosed) {
-		/* (ca_vbl=1: QuartzCore registered the port through IOConnectSetNotificationPort
-		 * and waits for the refresh messages; the notifications selector it never calls) */
-		fVSyncRunning = true;
-		IOLog("MiniIOMobileFramebuffer: vsync notifications armed (port registered, refcon %llx)\n",
-		    (unsigned long long) refCon);
-		armVSync();
-	}
+	/* (the port alone does not arm vsync: the client's callback comes through the
+	 * notifications selector, and only then does the async reference have a
+	 * function for QuartzCore's completion dispatcher to call -- see vsync()) */
 	IOLockUnlock(fLock);
 	if (old != NULL) {
 		releaseNotificationPort(old);
@@ -1283,36 +1277,38 @@ void
 IOMobileFramebufferUserClient::vsync(void)
 {
 	OSAsyncReference64 ref;
-	io_user_reference_t args[3];            /* three 64-bit numbers: this refresh,
-	                                           the same again, a counter */
+	io_user_reference_t args[6];
 	uint64_t now;
 	bool send = false;
 
 	IOLockLock(fLock);
 	now = fVSyncTime;
-	/* the port is the whole registration as far as QuartzCore is concerned
-	 * (ca_vbl=1: it registered one and never called the notifications selector):
-	 * send with the callback unset rather than staying silent for ever */
-	if (fClosed || fPorts[kFBNotifyVSync] == NULL) {
+	/* The real driver sends only once the client has registered its callback
+	 * through the notifications selector: the async reference carries that
+	 * callback, and QuartzCore's completion dispatcher calls it. On the iPhone X
+	 * QuartzCore registers the port and never the callback -- Apple never ran
+	 * its VBL path on A11 -- and sending with the callback unset hands the
+	 * dispatcher a bad function to call (the crashes of 2026-10-31). */
+	if (fClosed || fCallbacks[kFBNotifyVSync] == 0 || fPorts[kFBNotifyVSync] == NULL) {
 		fVSyncRunning = false;
 	} else {
 		fVSyncCount++;
 		setAsyncReference64(ref, fPorts[kFBNotifyVSync], fCallbacks[kFBNotifyVSync], fRefcons[kFBNotifyVSync], fTask);
-		/* args are io_user_reference_t, u64 each: the time split into u32 halves
-		 * here used to arrive as six arguments, and the reader of the first three
-		 * saw a half timestamp that wraps every 4.3 seconds */
-		args[0] = now;
-		args[1] = now;
-		args[2] = fVSyncCount;
-		if (fVSyncCount <= 3) {
-			IOLog("MiniIOMobileFramebuffer: vsync notification %u sent\n", fVSyncCount);
-		}
+		/* three 64-bit numbers as six 32-bit halves, as Apple's own IOMFB sends
+		 * them (its sender at 0xfffffff005c1d854 in the iPhone X kernel
+		 * collection splits each of the three values exactly so) */
+		args[0] = (uint32_t) now;
+		args[1] = now >> 32;
+		args[2] = (uint32_t) now;
+		args[3] = now >> 32;
+		args[4] = (uint32_t) fVSyncCount;
+		args[5] = fVSyncCount >> 32;
 		send = true;
 		armVSync();
 	}
 	IOLockUnlock(fLock);
 	if (send) {
-		sendAsyncResult64WithOptions(ref, kIOReturnSuccess, args, 3, kIOUserNotifyOptionCanDrop);
+		sendAsyncResult64WithOptions(ref, kIOReturnSuccess, args, 6, kIOUserNotifyOptionCanDrop);
 	}
 }
 
