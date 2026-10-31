@@ -1685,10 +1685,18 @@ dwell. Finger 9, so the touch controller's own reports never collide
 with the script; coordinates span the panel as 0..65535 on both axes.
 Its first dry encoding pass also exposed an unsigned-wraparound bug — a
 leftward drag computed `(to-from)` in uint32 and teleported the finger
-to x=65535; interpolation is int64 now. The script covers the Run A
-frame decomposition; the end-to-end latency number still needs the
-finger-0 zigzag pairing `tools/latency.py` fits on plus a screen
-recording.
+to x=65535; interpolation is int64 now. Each round ends with a
+horizontal zigzag (five halves, ~3 s): `tools/latency.py` fits the
+page's movement to the finger's along the axis the touch turns in —
+auto-detected, and `--finger 9` reads the scripted finger. With
+`touch_auto_exit=1` the script ends the run itself (five held fingers,
+the loader's designed exit) right after the zigzag, so `phone.py
+recording` (new: `oem recording` stages what the kernel left,
+`get_staged` fetches it) always gets a `rec_ring` recording whose last
+frames are the zigzag. Recording recipe: `rec_secs=1200 rec_ring=1
+rec_mb=256 rec_step=4` — 256 MB is the size that did not respring
+SpringBoard, and step 4 makes the ring hold ~8.7 s, enough for the 3 s
+zigzag plus the exit.
 
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and

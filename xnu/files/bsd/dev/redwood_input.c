@@ -144,13 +144,18 @@ redwood_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y)
 /*
  * Boot-arg touch_auto=SECONDS: SECONDS after this driver is up, a thread replays a fixed
  * gesture set through the same queue a finger uses -- slow Control Center pulls, page
- * swipes, a dwell in the App Library -- so frame timing and rendering can be measured
- * unattended (the K90 port's TouchProbe does the same). Finger 9, so the touch
- * controller's own reports never collide with the script. Coordinates span the panel
- * as 0..65535 on both axes, like s39_decode() scales them.
+ * swipes, a dwell in the App Library, and a horizontal zigzag for the end-to-end lag
+ * fit (tools/latency.py needs a touch that turns back on itself) -- so frame timing and
+ * rendering can be measured unattended (the K90 port's TouchProbe does the same). Finger
+ * 9, so the touch controller's own reports never collide with the script. Coordinates
+ * span the panel as 0..65535 on both axes, like s39_decode() scales them. Boot-arg
+ * touch_auto_exit=1 ends the run after the zigzag with five fingers held -- the loader
+ * stages the rec_ring recording for "phone.py recording", and the ring then holds the
+ * zigzag for certain.
  */
 static uint64_t auto_touch_channel;             /* slept on, woken only by its deadline */
 static uint32_t auto_touch_seconds;
+static uint32_t auto_touch_exit;
 
 static void
 auto_sleep(unsigned ms)
@@ -180,6 +185,32 @@ auto_gesture(uint32_t from_x, uint32_t from_y, uint32_t to_x, uint32_t to_y,
 	redwood_touch_post(REDWOOD_TOUCH_UP, 9, to_x, to_y);
 }
 
+/*
+ * One down..up drag that turns back on itself: the end-to-end lag fit reads the turns
+ * (a monotone drag's delay hides inside its speed). Halves swings between x0 and x1;
+ * five is four turns and ~200 samples, both above what the fit asks for.
+ */
+static void
+auto_zigzag(uint32_t x0, uint32_t y, uint32_t x1, unsigned halves, unsigned steps, unsigned ms)
+{
+	unsigned h, i;
+	uint32_t x = x0;
+
+	redwood_touch_post(REDWOOD_TOUCH_DOWN, 9, x, y);
+	auto_sleep(ms);
+	for (h = 0; h < halves; h++) {
+		uint32_t from = h % 2 ? x1 : x0;
+		uint32_t next = h % 2 ? x0 : x1;
+
+		for (i = 1; i <= steps; i++) {
+			x = (uint32_t)((int64_t)from + ((int64_t)next - (int64_t)from) * (int64_t)i / (int64_t)steps);
+			redwood_touch_post(REDWOOD_TOUCH_MOVE, 9, x, y);
+			auto_sleep(ms);
+		}
+	}
+	redwood_touch_post(REDWOOD_TOUCH_UP, 9, x, y);
+}
+
 static void
 auto_touch_thread(__unused void *arg, __unused wait_result_t wait)
 {
@@ -207,6 +238,23 @@ auto_touch_thread(__unused void *arg, __unused wait_result_t wait)
 		auto_sleep(10000);
 		auto_gesture(5000, 33000, 60000, 33000, 18, 16);
 		auto_sleep(5000);
+		/* Back on the home screen: the horizontal zigzag the lag fit reads --
+		 * the page tracks the finger one to one, and the turns make its
+		 * delay visible. Five halves, about three seconds. */
+		auto_zigzag(56000, 33000, 14000, 5, 40, 16);
+		auto_sleep(2000);
+		if (auto_touch_exit) {
+			/* Five held fingers end the run (exit_hold_elapsed): back to
+			 * the loader, which stages the recording -- with the zigzag
+			 * the last thing the ring holds. */
+			unsigned f;
+
+			for (f = 20; f < 20 + EXIT_FINGERS; f++) {
+				redwood_touch_post(REDWOOD_TOUCH_DOWN, f, 32768, 32768);
+			}
+			auto_sleep(3000);
+			return;
+		}
 		(void)round;
 	}
 }
@@ -291,6 +339,7 @@ redwood_input_init(void)
 	}
 	if (PE_parse_boot_argn("touch_auto", &auto_seconds, sizeof(auto_seconds)) && auto_seconds) {
 		auto_touch_seconds = auto_seconds;
+		PE_parse_boot_argn("touch_auto_exit", &auto_touch_exit, sizeof(auto_touch_exit));
 		if (kernel_thread_start(auto_touch_thread, NULL, &auto_thread) == KERN_SUCCESS) {
 			thread_deallocate(auto_thread);
 		}

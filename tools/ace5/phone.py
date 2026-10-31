@@ -69,6 +69,9 @@ run.add_argument('--fb-filter', choices=['bilinear', 'nearest'],
                  help='Display scaling filter; nearest trades edge smoothness for less CPU work')
 run.add_argument('--gpu-display', action='store_true',
                  help='Experimental A750 hardware scaling directly into the panel; requires --gpu-keep')
+sub.add_parser('recording',
+               help='Fetch the screen recording the last run left in memory (boot-args rec_secs=, '
+                    'rec_ring=1); the loader stages it with "oem recording"')
 selftest = sub.add_parser('selftest')
 selftest.add_argument('--kernel', type=Path, help='Explicit locally built Mach-O kernel')
 selftest.add_argument('--dry-run', action='store_true',
@@ -346,6 +349,16 @@ try:
             raise RuntimeError(f'A750 backend did not start; see {log}')
     elif args.command == 'screenshot':
         screenshot()
+    elif args.command == 'recording':
+        ensure_loader()
+        answer = fb('oem', 'recording', check=False)
+        print(answer.strip())
+        if 'FAILED' in answer:
+            raise RuntimeError('no recording to fetch: the run needs rec_secs= (rec_ring=1 keeps the '
+                               'last frames) and the kernel must have returned to the loader')
+        path = logs / (time.strftime('%Y%m%d-%H%M%S') + '-recording.raw')
+        fb('get_staged', path, timeout=600)
+        print(path, f'{path.stat().st_size:,} bytes')
     else:
         ensure_loader()
         print(fb('reboot'))

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-latency.py RUN.log [MORE.log ...] [RECORDING.raw]: how far behind the finger the phone's screen is.
+latency.py RUN.log [MORE.log ...] [RECORDING.raw] [--finger N]: how far behind the finger the phone's screen is.
 (More logs: the live ones of the same run, XL_FOLLOW=N XL_FOLLOW_KEEP=1, which keep what the run's log loses.)
 
 A run with boot-arg touch_lat=1 writes a line at every stage a touch passes on its way to the panel,
@@ -21,6 +21,10 @@ was put in the panel's memory. A "zigzag" of rwtouch (the finger up and down ove
 without letting go) then gives the latency from end to end: the list follows the finger, and the
 time by which the list's movement lags the finger's is found by fitting the one to the other (a
 constant offset -- the scroll view's slop before it starts to follow -- does not matter; the turns do).
+--finger N reads a scripted finger instead of the real chip's finger 0 (a run with touch_auto=
+gestures on finger 9). The axis a touch turns in is found per touch: y for a finger over a vertical
+list, x for the scripted horizontal page drags -- the content follows along that axis, and so does
+the fit.
 The stages are averaged over the same frames and samples, and what is left between the event
 system and the frame -- the application's handling and the wait for the next frame of
 CoreAnimation's clock -- is the difference.
@@ -94,22 +98,30 @@ def recording(path):
     return out, width, height
 
 
-def zigzags(samples):
-    """Touches with many moves, finger 0: (down time, up time, [(t, y)])."""
+def zigzags(samples, finger=0):
+    """Touches with many moves on one finger: (down time, up time, axis, [(t, x, y)]).
+
+    Finger 0 is the touch chip's own; a scripted run (touch_auto=) gestures on
+    another. The axis is the coordinate the touch turns in -- y for a finger
+    over a vertical list, x for the scripted horizontal page drags; the content
+    follows along that axis, and so does the fit."""
     out, current = [], None
-    for t, kind, finger, x, y in samples:
-        if finger != 0:
+    for t, kind, f, x, y in samples:
+        if f != finger:
             continue
         if kind == 1:
-            current = [(t, y)]
+            current = [(t, x, y)]
         elif kind == 2 and current is not None:
-            current.append((t, y))
+            current.append((t, x, y))
         elif kind == 3 and current is not None:
-            current.append((t, y))
-            ys = [p[1] for p in current]
-            turns = sum(1 for i in range(1, len(ys) - 1) if (ys[i] - ys[i - 1]) * (ys[i + 1] - ys[i]) < 0)
-            if len(current) > 30 and turns >= 3:
-                out.append((current[0][0], t, current))
+            current.append((t, x, y))
+            if len(current) > 30:
+                for axis in (1, 0):
+                    v = [p[1 + axis] for p in current]
+                    turns = sum(1 for i in range(1, len(v) - 1) if (v[i] - v[i - 1]) * (v[i + 1] - v[i]) < 0)
+                    if turns >= 3:
+                        out.append((current[0][0], t, axis, current))
+                        break
             current = None
     return out
 
@@ -129,17 +141,25 @@ def shift(a, b, most):
     return best
 
 
-def content_offsets(frames, t0, t1, height):
-    """The list's position in each frame between t0 and t1, in rows of the recording, relative to the first."""
+def content_offsets(frames, t0, t1, height, width, axis=1):
+    """The content's position in each frame between t0 and t1, relative to the first:
+    in rows of the recording for a vertical list (axis 1), in columns for a
+    horizontal page (axis 0)."""
     chosen = [(t, p) for t, p in frames if t0 <= t <= t1]
     out = []
     if not chosen:
         return out
-    top, bottom = int(height * 0.15), int(height * 0.90)
+    if axis == 1:
+        rows = (int(height * 0.15), int(height * 0.90))
+        cols = (int(width * 0.10), int(width * 0.90))
+    else:
+        rows = (int(height * 0.10), int(height * 0.90))
+        cols = (int(width * 0.15), int(width * 0.90))
     previous, offset = None, 0
     for t, pixels in chosen:
-        grey = pixels[top:bottom, :, :].astype(np.float32).mean(axis=2)
-        grey = grey[:, grey.shape[1] // 10: grey.shape[1] * 9 // 10]
+        grey = pixels[rows[0]:rows[1], cols[0]:cols[1], :].astype(np.float32).mean(axis=2)
+        if axis == 0:
+            grey = grey.T                       # columns become rows: shift() finds the page's columns
         if previous is not None:
             offset += shift(previous, grey, 48)
         out.append((t, offset))
@@ -147,10 +167,11 @@ def content_offsets(frames, t0, t1, height):
     return out
 
 
-def fit_lag(offsets, touch, height):
-    """The lag (us) at which the list's position best follows the finger's: least squares with an offset and a gain."""
+def fit_lag(offsets, touch, span, axis=1):
+    """The lag (us) at which the content best follows the finger's: least squares with an offset
+    and a gain. axis 1 fits the finger's y over the height, axis 0 its x over the width."""
     tt = np.array([p[0] for p in touch], dtype=np.float64)
-    ty = np.array([p[1] for p in touch], dtype=np.float64) / 65535.0 * height
+    ty = np.array([p[1 + axis] for p in touch], dtype=np.float64) / 65535.0 * span
     ft = np.array([o[0] for o in offsets], dtype=np.float64)
     fy = np.array([o[1] for o in offsets], dtype=np.float64)
     best = None
@@ -176,8 +197,14 @@ def mean(values):
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    logs = [a for a in sys.argv[1:] if not a.endswith('.raw')]
-    raws = [a for a in sys.argv[1:] if a.endswith('.raw')]
+    argv = sys.argv[1:]
+    finger = 0
+    while '--finger' in argv:
+        at = argv.index('--finger')
+        finger = int(argv[at + 1])
+        argv = argv[:at] + argv[at + 2:]
+    logs = [a for a in argv if not a.endswith('.raw')]
+    raws = [a for a in argv if a.endswith('.raw')]
     samples, reads, frames, swaps, shows, chip = parse(micros_lines(logs))
     print(f'latency.py: {len(samples)} samples, {len(reads)} read by the window server, {len(frames)} frames drawn, '
           f'{len(swaps)} handed over, {len(shows)} shown; {len(chip)} reports read from the touch chip')
@@ -188,13 +215,15 @@ def main():
               f'reading a report takes {mean(took) / 1000:.2f} ms')
     pictures, width, height = recording(raws[0]) if raws else ([], 0, 0)
     totals = []
-    for number, (down, up, touch) in enumerate(zigzags(samples)):
+    for number, (down, up, axis, touch) in enumerate(zigzags(samples, finger)):
         moves = [p for p in touch[1:-1]]
-        print(f'zigzag {number + 1}: {len(touch)} samples over {(up - down) / 1000:.0f} ms')
+        print(f'zigzag {number + 1}: {len(touch)} samples over {(up - down) / 1000:.0f} ms, '
+              f'{"horizontal" if axis == 0 else "vertical"}')
         result = None
         if pictures:
-            offsets = content_offsets(pictures, down, up + 400000, height)
-            result = fit_lag(offsets, moves, height) if len(offsets) > 10 else None
+            offsets = content_offsets(pictures, down, up + 400000, height, width, axis)
+            result = fit_lag(offsets, moves, width if axis == 0 else height, axis) \
+                if len(offsets) > 10 else None
         if result is None:
             print('  (no frames of it in the recording)')
             continue
