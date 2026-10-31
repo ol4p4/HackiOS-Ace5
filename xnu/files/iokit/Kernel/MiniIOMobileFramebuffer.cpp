@@ -159,6 +159,11 @@ extern "C" bool RedwoodGPUDisplay(MiniIOSurface *, const int32_t *, const int32_
     uint8_t *, uint32_t, uint32_t, uint32_t, bool);
 static TUNABLE(uint32_t, gRefreshHz, "fb_hz", kFBRefreshHz);
 static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
+/* boot-arg fb_minint=1: also publish displayMinRefreshInterval/displayMaxRefreshInterval (the
+ * refresh period in nanoseconds, as a phone's IOMFB does); the modes' SyncRate alone is what this
+ * driver has always published, and whether CoreAnimation's timer reads the one or the other is
+ * an open question (the K90 port's 120 Hz work reads these properties). */
+static TUNABLE(uint32_t, gMinInterval, "fb_minint", 0);
 /*
  * Boot-arg fb_threads=N (1 to 8): so many processors scale a frame onto the panel together (see
  * drawRows()). Three by default: a frame is in the panel's memory 3 ms after its turn instead of 9
@@ -276,6 +281,7 @@ public:
 	uint32_t        fStatHeld, fStatLost;   /* swaps that waited for the one before; that gave up waiting */
 	uint64_t        fSwapTime;              /* when the last swap was handed over */
 	uint32_t        fStatSwapsLate;         /* swaps that came more than a refresh and a quarter after the one before (and no pause) */
+	uint32_t        fStatClockReads;        /* GetCurrentAbsoluteTime calls: how often CA reads the display clock */
 	uint64_t        fStatWaiting;           /* how long frames waited for the GPU here */
 	/* how the display is doing: frames and time spent drawing them here since fStatSince */
 	uint32_t        fStatFrames;
@@ -384,6 +390,16 @@ IOMobileFramebuffer::publishModes(void)
 
 	setProperty("TimingElements", timings);
 	setProperty("ColorElements", colors);
+	if (gMinInterval) {
+		uint64_t period = NSEC_PER_SEC / refreshHz();
+		OSNumber * interval = OSNumber::withNumber(period, 64);
+
+		if (interval != NULL) {
+			setProperty("displayMinRefreshInterval", interval);
+			setProperty("displayMaxRefreshInterval", interval);
+			interval->release();
+		}
+	}
 	OSSafeReleaseNULL(timings);
 	OSSafeReleaseNULL(colors);
 	OSSafeReleaseNULL(timing);
@@ -1096,11 +1112,12 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		absolutetime_to_nanoseconds(fStatBeatWait, &beat);
 		IOLog("MiniIOMobileFramebuffer: %u frames in %llu ms (%llu a second), %llu us each in the driver, after %llu us "
 		    "waiting for the GPU and, %u of them, %llu us for the next refresh; %u swaps waited for the frame before, "
-		    "%u gave up; %u swaps came a refresh late themselves\n", fStatFrames, nanos / NSEC_PER_MSEC,
+		    "%u gave up; %u swaps came a refresh late themselves; %u clock reads\n", fStatFrames, nanos / NSEC_PER_MSEC,
 		    fStatFrames * NSEC_PER_SEC / nanos, drawing / fStatFrames / NSEC_PER_USEC,
 		    waiting / fStatFrames / NSEC_PER_USEC, fStatOnBeat, fStatOnBeat ? beat / fStatOnBeat / NSEC_PER_USEC : 0,
-		    fStatHeld, fStatLost, fStatSwapsLate);
+		    fStatHeld, fStatLost, fStatSwapsLate, fStatClockReads);
 		fStatSwapsLate = 0;
+		fStatClockReads = 0;
 		for (different = 0; different < 8 && fStatSurfaces[different] != 0; different++) {
 		}
 		if (different == 8 && fStatFrames > 8) {
@@ -1443,6 +1460,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		if (args->scalarOutputCount < 1) {
 			return kIOReturnBadArgument;
 		}
+		OSIncrementAtomic(&fOwner->fStatClockReads);
 		out[0] = mach_absolute_time();
 		args->scalarOutputCount = 1;
 		return kIOReturnSuccess;

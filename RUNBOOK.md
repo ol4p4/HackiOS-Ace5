@@ -1861,6 +1861,35 @@ is `fb_beat=0` (show at once, no phase shifts) with the CC retract and
 App Library numbers as the verdict, and if the resync path is the
 poison, `fb_beat=0` should dissolve the whole-refresh lock steps.
 
+**Family survey on this problem (2026-10-31): nobody has met it.** K90
+(annibale) spent 10-30 on rendering correctness (render48–93: stripes,
+icons, UBO alignment) and its desktop runs at 10 fps, where a
+self-timer's degeneration is invisible; its 120 Hz work is the one
+transferable note — CoreAnimation learns the refresh period from
+**displayMinRefreshInterval/displayMaxRefreshInterval** properties, and
+`fb_hz=120` alone did nothing ("beat 8.33 ms but frames stay 16.6 ms
+because CA production ≈9.6 ms > one slot"). K60 (ios-sweet) published
+display modes in its 0218 ("let CoreAnimation drive the panel
+natively") — this driver is at parity on every piece of it
+(TimingElements/ColorElements, GetID=1, GetCurrentAbsoluteTime=77,
+GetBlock 0x40) and K60 is still at panel/DSI bring-up; dodge is
+migrating to hakios; dada (iOS 26, arm64e) landed on 10-31 and is too
+young; the upstream (oosexgang) added `fb_measure=1`, a DSI
+frame-counter measurement, not a fix. So the experiment matrix is ours:
+**arm A `fb_beat=0`** (no beat phase shifts — the timings CA's
+self-timer phases from), **arm C `fb_minint=1`** (publish the refresh
+period properties, the one gap the survey found), and in every arm the
+5-second stats line now ends with **"N clock reads"** — the count of
+GetCurrentAbsoluteTime calls, so the runs say whether CoreAnimation
+polls the display clock at all and how its rate changes through a
+stall. Verdict per arm: CC retract ≥55 fps with under 3 % over 33 ms,
+App Library under 15 % over 16.7 ms, no whole-refresh gaps in
+local/mine-retract.py; then the decision: A wins → make it the daily
+default and re-measure Run A; A loses and clock reads track the stalls
+→ the clock read is the feed, return a beat-aligned time from 77; A
+loses and 77 is never read → the timer phases from swap completions,
+try fb_queue≥3.
+
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
 `local/root-daily-fw.apfs` is repacked from it.
