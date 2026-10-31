@@ -1238,6 +1238,15 @@ IOMobileFramebufferUserClient::registerNotificationPort(mach_port_t port, UInt32
 	IOLockLock(fLock);
 	old = fPorts[type];
 	fPorts[type] = port;
+	fRefcons[type] = refCon;
+	if (type == kFBNotifyVSync && port != NULL && !fVSyncRunning && !fClosed) {
+		/* (ca_vbl=1: QuartzCore registered the port through IOConnectSetNotificationPort
+		 * and waits for the refresh messages; the notifications selector it never calls) */
+		fVSyncRunning = true;
+		IOLog("MiniIOMobileFramebuffer: vsync notifications armed (port registered, refcon %llx)\n",
+		    (unsigned long long) refCon);
+		armVSync();
+	}
 	IOLockUnlock(fLock);
 	if (old != NULL) {
 		releaseNotificationPort(old);
@@ -1280,7 +1289,10 @@ IOMobileFramebufferUserClient::vsync(void)
 
 	IOLockLock(fLock);
 	now = fVSyncTime;
-	if (fClosed || fCallbacks[kFBNotifyVSync] == 0 || fPorts[kFBNotifyVSync] == NULL) {
+	/* the port is the whole registration as far as QuartzCore is concerned
+	 * (ca_vbl=1: it registered one and never called the notifications selector):
+	 * send with the callback unset rather than staying silent for ever */
+	if (fClosed || fPorts[kFBNotifyVSync] == NULL) {
 		fVSyncRunning = false;
 	} else {
 		fVSyncCount++;
@@ -1291,6 +1303,9 @@ IOMobileFramebufferUserClient::vsync(void)
 		args[3] = now >> 32;
 		args[4] = (uint32_t) fVSyncCount;
 		args[5] = fVSyncCount >> 32;
+		if (fVSyncCount <= 3) {
+			IOLog("MiniIOMobileFramebuffer: vsync notification %u sent\n", fVSyncCount);
+		}
 		send = true;
 		armVSync();
 	}
