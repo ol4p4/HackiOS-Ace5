@@ -1311,15 +1311,18 @@ IOMobileFramebufferUserClient::vsync(void)
 	} else {
 		fVSyncCount++;
 		setAsyncReference64(ref, fPorts[kFBNotifyVSync], fCallbacks[kFBNotifyVSync], fRefcons[kFBNotifyVSync], fTask);
-		/* three 64-bit numbers as six 32-bit halves, as Apple's own IOMFB sends
-		 * them (its sender at 0xfffffff005c1d854 in the iPhone X kernel
-		 * collection splits each of the three values exactly so) */
-		args[0] = (uint32_t) now;
-		args[1] = now >> 32;
-		args[2] = (uint32_t) now;
-		args[3] = now >> 32;
-		args[4] = (uint32_t) fVSyncCount;
-		args[5] = fVSyncCount >> 32;
+		/* Three 64-bit numbers as six 32-bit halves. Apple's notification path
+		 * passes three object fields (+0xB0/+0xB8/+0xC0), and QuartzCore's
+		 * completion dispatcher reads the first word as its function pointer --
+		 * a timestamp there is the SIGSEGV of 2026-10-31. Its sender starts at
+		 * 0xfffffff005c1d838 (the 0x...d854 label was +0x1c, the raw-text
+		 * offset); the beat path is a different payload (count, time, delta). */
+		args[0] = (uint32_t) fCallbacks[kFBNotifyVSync];
+		args[1] = fCallbacks[kFBNotifyVSync] >> 32;
+		args[2] = (uint32_t) fRefcons[kFBNotifyVSync];
+		args[3] = fRefcons[kFBNotifyVSync] >> 32;
+		args[4] = (uint32_t) now;
+		args[5] = now >> 32;
 		send = true;
 		armVSync();
 	}

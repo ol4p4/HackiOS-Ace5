@@ -1929,3 +1929,21 @@ fails.
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
 `local/root-daily-fw.apfs` is repacked from it.
+
+**REA/IDA field map for the vsync sender (2026-10-31, static).** The iPhone X
+kernel collection's IOMFB notification sender starts at
+`0xfffffff005c1d838` — the `0x...d854` label used above is +0x1c, the same
+raw-text offset as `iomfb-text.bin`. Its entry `sub_FFFFFFF005C1282C` picks
+two payloads: with the `+0x1640` period set it sends the beat triple
+`(frame count +0x1628, last timestamp +0x1630, delta +0x1638)`; otherwise it
+passes the caller's `(+0xB0, +0xB8, +0xC0)`. The raw sender
+`sub_FFFFFFF005C1D838` splits whichever three 64-bit values it gets into six
+32-bit halves and walks the async-reference list at `+0x1380`, sending each
+ref at `+0x18` with `sendAsyncResult64WithOptions(ref, 0, args, 6, CanDrop)`.
+That is the map the next run needs: the payload's first word must be the
+client's callback, not a timestamp. `vsync()` now sends
+`(fCallbacks[5], fRefcons[5], now)` (code changed 2026-10-31, not yet run);
+`fb_beat` only paces `show()` (`clock_delay_until`) and never touched this
+payload, which is why arm A saw no change. The `+0xB0/+0xB8/+0xC0`
+semantics remain an inference until the notifications selector's write point
+is read.
