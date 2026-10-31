@@ -351,7 +351,7 @@ try:
         screenshot()
     elif args.command == 'recording':
         ensure_loader()
-        answer = fb('oem', 'recording', check=False)
+        answer = call(['fastboot', '-s', 'xnuloader', 'oem', 'recording'], check=False)
         print(answer.strip())
         if 'FAILED' in answer:
             raise RuntimeError('no recording to fetch: the run needs rec_secs= (rec_ring=1 keeps the '
