@@ -1801,6 +1801,44 @@ copies `MiniIOMobileFramebuffer.cpp` too — the 14:16 and 14:26 runs
 silently ran the old driver because the copy list missed it (the
 unchanged binary size was the tell).
 
+**ca_vbl=1, the payload fixed and the receiver's crash (runs 143416,
+161645).** The sender was wrong: `sendAsyncResult64WithOptions` takes
+`io_user_reference_t` args (64-bit each), and the driver packed the
+three 64-bit numbers as six 32-bit halves — the receiver of the first
+three saw a half timestamp that wraps every 4.3 s. With the args as
+three real u64s (now, now, count) the render clock follows the
+notifications: **every gesture and transition runs 60.0–62.6 fps with
+0 % of frame steps over 16.7 ms and 0 % over 33 ms** — the CC retract
+that was 39–44 fps with 9–11 % over 33 ms, the App Library entry that
+was 51 % over 16.7 ms, the drags' exact 38.2 ms idles: gone. The stall
+mechanism (CA's own timer fed by this copy driver's frame timings) is
+confirmed, and the vsync-driven clock is the cure. **But the receiver
+crashes on every notification batch**: backboardd takes SIGSEGV (6
+crashes, 24 respawns in 161645; 7 and 28 with the old payload; zero in
+every run that never delivered a notification), and the screen sits on
+the relaunch spinner through the App Library and zigzag gestures — the
+recording of that run is the spinner, so the end-to-end lag stays at
+the 30.0 ms of the non-ca_vbl run. The crash chain, symbolized from
+the cache: QuartzCore's completion dispatcher at unslid 0x1885024c4
+(`ldp x20, x19, [x0]; blr x20` — the standard {function, context}
+block) is handed a block whose function slot came out as the message's
+first 32-bit timestamp sign-extended (pc 0xffffffffd77b8000 =
+0xd77b8000 = the mach time of the crash at 19.2 MHz), and the deepest
+frame then calls through a vtable slot ([x20+48]) built from message
+data. So QuartzCore parses the notification with a layout that is not
+the generic IOKit async result we send — the first fields it wants are
+a callback and a context, not timestamps. The real protocol is in
+IOKit.framework's IOMobileFramebufferEnableVSyncNotifications stub
+(which selector number it uses, and whether it follows
+IOConnectSetNotificationPort with an async call carrying callback and
+refcon); reading it needs IOKit's image address, and the split cache's
+image list is not in the main header — the planned way in is a scan
+for cached Mach-O headers with a valid export trie (local/find-iokit.py,
+not finished: false-positive headers and slow trie walks first).
+ca_vbl therefore stays opt-in and experimental; the default path is
+unchanged and stable, and the transition stalls remain the known cost
+until the notification format is matched.
+
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
 `local/root-daily-fw.apfs` is repacked from it.
