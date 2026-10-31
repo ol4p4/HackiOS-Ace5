@@ -1203,6 +1203,63 @@ opengl_es(void)
 	gl_function_refused = (void (*)(unsigned))dlsym(library, "redwood_gl_function_refused");
 }
 
+/*
+ * ca_vbl, the second half: the kernel sends the refresh notifications only to
+ * a connection that has both the port (CoreAnimation registers it) and the
+ * client's callback (nothing on this phone registers it). This lends the
+ * notifications a no-op function of our own, on the very connection whose
+ * port QuartzCore registered -- the completion dispatcher then has a valid
+ * pointer to call (the driver sends the callback as the payload's first word;
+ * see RUNBOOK.md's vsync sender field map).
+ */
+static int g_ca_vbl;
+static kern_return_t (*orig_io_connect_set_notification_port)(io_connect_t connect,
+    uint32_t type, mach_port_t port, io_user_reference_t refCon);
+
+static void
+noop_vsync(void)
+{
+}
+
+static kern_return_t
+my_io_connect_set_notification_port(io_connect_t connect, uint32_t type, mach_port_t port,
+    io_user_reference_t refCon)
+{
+	kern_return_t kr;
+
+	if (orig_io_connect_set_notification_port == NULL) {
+		orig_io_connect_set_notification_port =
+		    (kern_return_t (*)(io_connect_t, uint32_t, mach_port_t, io_user_reference_t))
+		    dlsym(RTLD_NEXT, "IOConnectSetNotificationPort");
+	}
+	kr = orig_io_connect_set_notification_port(connect, type, port, refCon);
+	/* type 5 is kFBNotifyVSync: QuartzCore's port on its IOMobileFramebuffer
+	 * connection. The callback must go to that same connection: the driver
+	 * sends to the port with the callback the notifications selector kept. */
+	if (g_ca_vbl && type == 5) {
+		static int lent;
+
+		if (!lent) {
+			uint64_t scalars[4] = { (uint64_t)(uintptr_t) noop_vsync, 0, 5, 0 };
+			kern_return_t r = IOConnectCallScalarMethod(connect, 72, scalars, 4, NULL, NULL);
+
+			lent = 1;
+			say("redwood: ca_vbl: the no-op vsync callback lent to connection %p: %#x\n",
+			    (void *)(uintptr_t) connect, r);
+		}
+	}
+	return kr;
+}
+
+static const struct {
+	const void *replacement;
+	const void *replacee;
+} ca_vbl_interpose[]
+__attribute__((used, section("__DATA,__interpose"))) = {
+	{ (const void *) my_io_connect_set_notification_port,
+	  (const void *) IOConnectSetNotificationPort },
+};
+
 __attribute__((constructor))
 static void
 redwood_init(void)
@@ -1227,6 +1284,7 @@ redwood_init(void)
 		 * whose phase it would set from the frame timings of a display driver this one is not.
 		 */
 		if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 && strstr(arguments, "ca_vbl=1") != NULL) {
+			g_ca_vbl = 1;
 			setenv("CA_FORCE_TIMER", "1", 1);
 			say("redwood: ca_vbl=1: CoreAnimation is to take the display driver's refresh notifications\n");
 		}
