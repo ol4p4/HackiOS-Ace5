@@ -1827,17 +1827,39 @@ first 32-bit timestamp sign-extended (pc 0xffffffffd77b8000 =
 frame then calls through a vtable slot ([x20+48]) built from message
 data. So QuartzCore parses the notification with a layout that is not
 the generic IOKit async result we send — the first fields it wants are
-a callback and a context, not timestamps. The real protocol is in
-IOKit.framework's IOMobileFramebufferEnableVSyncNotifications stub
-(which selector number it uses, and whether it follows
-IOConnectSetNotificationPort with an async call carrying callback and
-refcon); reading it needs IOKit's image address, and the split cache's
-image list is not in the main header — the planned way in is a scan
-for cached Mach-O headers with a valid export trie (local/find-iokit.py,
-not finished: false-positive headers and slow trie walks first).
-ca_vbl therefore stays opt-in and experimental; the default path is
-unchanged and stable, and the transition stalls remain the known cost
-until the notification format is matched.
+a callback and a context, not timestamps. ca_vbl therefore stays opt-in
+and experimental; the default path is unchanged and stable, and the
+transition stalls remain the known cost until the notification format
+is matched.
+
+**ca_vbl=1, closed: Apple never ran this path on A11 (same day, later).**
+The protocol question was settled from Apple's own binaries, not guessed:
+the iPhone X kernel collection (ipsw member `kernelcache.release.iphone10b`,
+IM4P + lzfse, 50.9 MB) holds IOMobileFramebuffer's kext — its code maps
+through the kernel's __PLK_TEXT_EXEC segment (vm 0xfffffff005bf5000 →
+file 0x179d000) — and its vsync sender at **0xfffffff005c1d854** builds
+six arguments by splitting each of three 64-bit values into 32-bit
+halves, exactly as this driver originally did, then
+`sendAsyncResult64WithOptions(ref, 0, args, 6, CanDrop)`. Five such
+senders exist (counts 6, 3, 2, 1, 2 — vsync and other events). The
+registration side: the async reference at client+0x18 carries the
+client's **callback**, which comes only through the notifications
+selector — so the real driver sends only when fCallbacks[5] is set, and
+QuartzCore's completion dispatcher calls that callback. On the iPhone X
+QuartzCore registers the port and never the callback: **Apple's VBL path
+has never run on A11**, and its A11 completion code is not what the
+port's messages meet. That is the SIGSEGV — a notification armed from
+the port alone hands the dispatcher a bad function to call. The sender
+is back to Apple's six-half payload with the callback gate restored
+(014701c), the port registration passive, and **ca_vbl is closed as a
+path on this phone**: it did prove the mechanism (60 fps transitions)
+but the completion protocol cannot be completed from our side. What
+remains is the self-timer itself: CADisplayTimer phases from the frame
+timings this driver reports, and the beat's too-late resync path is
+exactly the input it sees during transitions — so the next experiment
+is `fb_beat=0` (show at once, no phase shifts) with the CC retract and
+App Library numbers as the verdict, and if the resync path is the
+poison, `fb_beat=0` should dissolve the whole-refresh lock steps.
 
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
