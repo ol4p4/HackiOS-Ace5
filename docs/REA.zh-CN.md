@@ -83,6 +83,22 @@ REA 用于理解 Ace 5 移植所需的闭源接口：kernelcache 里的 kext、I
 
 未知：`+0xB0/+0xB8/+0xC0` 的语义（callback/refcon/time 还是时序参数），需要 notifications selector 的写入点。
 
+### 这次分析对项目的实际作用（2026-10-31）
+
+**有帮助，且可执行：**
+
+1. **payload 顺序**：Apple 的通知路径传 `(+0xB0, +0xB8, +0xC0)`，不是时间戳/计数。项目驱动 `MiniIOMobileFramebuffer.cpp::vsync()` 目前发 `(now, now, fVSyncCount)`——第一字仍是时间戳，正是 runbook 记录的崩溃形状。下一次实验应按 runbook 的计划改发 `(fCallbacks[5], fRefcons[5], now)`，本分析为它提供了 Apple 侧证据。
+2. **`fb_beat` 不是 Apple 的 beat 路径**：项目里的 `gOnTheBeat` 只控制 `show()` 的 swap 节拍延迟（`clock_delay_until`），不影响 `vsync()` 的 payload；Apple 的 `+0x1640` 周期路径是另一回事。所以 `fb_beat=0` 不可能改变 vsync payload——这解释了 arm A 为什么“什么都没变”。
+3. **地址修正**：runbook 的 sender 地址 `0x5c1d854` 是函数起点 `0x5c1d838` 的 +0x1c，和裸段偏移同源；打补丁/hook 前必须用 `0x5c1d838`。
+
+**没有改变：**
+
+- 没有运行时证明 no-op callback 能消除崩溃；这仍是下一次真机实验。
+- 没有解决 100 ms 回退（CA 的 10 Hz 无 display-link 回退）。
+- `+0xB0/+0xB8/+0xC0` 的语义仍是推论，需要 notifications selector 的写入点确认。
+
+结论：这次分析值得作为示例——它把 runbook 的假设落到了具体字段和一行代码上，并解释了一个失败实验。
+
 这个示例说明本文的格式：先给地址和代码，再给推论，最后列出未知。具体发现写入 `RUNBOOK.md`，本文只保留方法与示例。
 
 ## 相关文档
