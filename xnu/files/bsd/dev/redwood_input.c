@@ -3,6 +3,7 @@
  */
 #include <kern/clock.h>
 #include <kern/locks.h>
+#include <kern/thread.h>
 #include <kern/thread_call.h>
 #include <libkern/libkern.h>
 #include <miscfs/devfs/devfs.h>
@@ -140,6 +141,76 @@ redwood_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y)
 	touch_post(type, finger, x, y, true);
 }
 
+/*
+ * Boot-arg touch_auto=SECONDS: SECONDS after this driver is up, a thread replays a fixed
+ * gesture set through the same queue a finger uses -- slow Control Center pulls, page
+ * swipes, a dwell in the App Library -- so frame timing and rendering can be measured
+ * unattended (the K90 port's TouchProbe does the same). Finger 9, so the touch
+ * controller's own reports never collide with the script. Coordinates span the panel
+ * as 0..65535 on both axes, like s39_decode() scales them.
+ */
+static uint64_t auto_touch_channel;             /* slept on, woken only by its deadline */
+static uint32_t auto_touch_seconds;
+
+static void
+auto_sleep(unsigned ms)
+{
+	struct timespec ts;
+
+	ts.tv_sec = ms / 1000;
+	ts.tv_nsec = (long)(ms % 1000) * NSEC_PER_MSEC;
+	(void)msleep(&auto_touch_channel, NULL, PZERO, "touch-auto", &ts);
+}
+
+static void
+auto_gesture(uint32_t from_x, uint32_t from_y, uint32_t to_x, uint32_t to_y,
+    unsigned steps, unsigned ms)
+{
+	unsigned i;
+
+	for (i = 1; i <= steps; i++) {
+		/* signed interpolation: an unsigned (to - from) wraps on every
+		 * leftward or upward drag and the finger teleports to an edge */
+		uint32_t x = (uint32_t)((int64_t)from_x + ((int64_t)to_x - (int64_t)from_x) * (int64_t)i / (int64_t)steps);
+		uint32_t y = (uint32_t)((int64_t)from_y + ((int64_t)to_y - (int64_t)from_y) * (int64_t)i / (int64_t)steps);
+
+		redwood_touch_post(i == 1 ? REDWOOD_TOUCH_DOWN : REDWOOD_TOUCH_MOVE, 9, x, y);
+		auto_sleep(ms);
+	}
+	redwood_touch_post(REDWOOD_TOUCH_UP, 9, to_x, to_y);
+}
+
+static void
+auto_touch_thread(__unused void *arg, __unused wait_result_t wait)
+{
+	unsigned round, i;
+
+	auto_sleep(auto_touch_seconds * 1000);
+	printf("redwood-touch: scripted input starts (%us)\n", auto_touch_seconds);
+	for (round = 0;; round++) {
+		/* The home screen is where the stutter shows: ten slow drags, the
+		 * content tracking the finger one to one -- a dropped frame is
+		 * visible in the log as a long interval between moves. */
+		for (i = 0; i < 10; i++) {
+			auto_gesture(56000, 33000, 14000, 33000, 50, 16);       /* drag left, 0.8 s */
+			auto_sleep(400);
+			auto_gesture(14000, 33000, 56000, 33000, 50, 16);       /* drag back */
+			auto_sleep(1200);
+		}
+		for (i = 0; i < 2; i++) {                 /* two Control Center pulls: the blur reference */
+			auto_gesture(61000, 1200, 58000, 47000, 40, 20);
+			auto_sleep(1200);
+			auto_gesture(58000, 47000, 61000, 1200, 40, 20);
+			auto_sleep(1500);
+		}
+		auto_gesture(60000, 33000, 5000, 33000, 18, 16);      /* into the App Library */
+		auto_sleep(10000);
+		auto_gesture(5000, 33000, 60000, 33000, 18, 16);
+		auto_sleep(5000);
+		(void)round;
+	}
+}
+
 static int
 touch_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
 {
@@ -211,10 +282,18 @@ extern void giulia_pcie_init(void);
 void
 redwood_input_init(void)
 {
+	uint32_t auto_seconds = 0;
+	thread_t auto_thread;
 	int major = cdevsw_add(-1, &touch_cdevsw);
 
 	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "redwood-touch") == NULL) {
 		printf("redwood-touch: cannot create the device\n");
+	}
+	if (PE_parse_boot_argn("touch_auto", &auto_seconds, sizeof(auto_seconds)) && auto_seconds) {
+		auto_touch_seconds = auto_seconds;
+		if (kernel_thread_start(auto_touch_thread, NULL, &auto_thread) == KERN_SUCCESS) {
+			thread_deallocate(auto_thread);
+		}
 	}
 	exit_call = thread_call_allocate(exit_hold_elapsed, NULL);
 	redwood_cpufreq_init();

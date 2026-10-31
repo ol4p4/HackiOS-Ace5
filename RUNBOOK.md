@@ -1647,16 +1647,48 @@ Two separate findings from a session of drag tests:
   before they are called GL-path bugs. The daily recipe must carry the
   GPU flags whenever the UI is being evaluated.
 
-**mach.ace5-pcie mount panic, bisected (2026-10-30 evening).** The
-pcie+wifi kernel panicked twice at `vfs_mountroot`
-(`kmem_alloc(…, 16777216, 0x100021): failed with 3`, before any driver
-init). WSL builds of the original sources, of the wifi-lookup change
-alone, and of the PCIe driver alone all boot to SpringBoard; so does
-`mach.touchtest` as the first boot after a fresh loader entry and
-staging. Neither half reproduces it and the panic has not recurred since
-— `mach.ace5-pcie` needs one rebuild and retest before the PCIe line
-trusts that binary. The bisect kernels (`mach.origtest`, `mach.wifitest`,
-`mach.pcietest`) and scripts are in `local/` (not committed).
+**mach.ace5-pcie mount panic, root-caused (2026-10-31).** The pcie+wifi
+kernel panicked twice at `vfs_mountroot` (`kmem_alloc(…, 16777216,
+0x100021): failed with 3`). The bisect of 2026-10-30 evening (original
+sources, wifi-lookup alone, PCIe driver alone all boot; so does
+`mach.touchtest` after a fresh entry and staging) was the right
+experiment with a wrong conclusion — the panic was never in a committed
+change but in the build tree. Symbolizing the backtrace against a
+rebuild of the c229d5f source state (`local/bisect/mach.pciewifi.
+unstripped`) gave `_pcie_thread+0xd4 → io_map+0x164 →
+kmem_alloc_guard_internal+0x690 → __kmem_invalid_object_panic`, and the
+disassembly shows the call: `movz w1, #0x100, lsl #16` — 16 MiB. The WSL
+tree carried a stale `giulia_pcie.c` whose TLMM mapping asked for
+`ml_io_map(0xf000000, 0x1000000)`; every ml_io_map allocation comes from
+the 32 MiB io_submap (`VM_MAP_CREATE_DISABLE_HOLELIST`), the guard
+allocator takes KMA_NOFAIL, and an unservable 16 MiB panics instead of
+returning NULL. The committed repo version has always been `0x100000`
+(1 MiB) — the standing build path simply never copied it over. The
+build scripts that stand for `mach.autotest` now copy `giulia_pcie.c` +
+`giulia_pcie_regs.h` from the repo on every build (`local/wsl/build-auto.
+sh`; the forensic `build-sym.sh` keeps the old tree on purpose, that is
+how the panic got symbolized). The rebuild is verified host-side:
+`_pcie_thread` holds exactly one LSL#16 constant, `movz w1, #0x10,
+lsl #16` (1 MiB), and the whole-kernel tally of that instruction class
+flips exactly one site 0x100→0x10 with every other immediate unchanged.
+`mach.ace5-pcie` needs no retest for this panic; the bisect kernels
+(`mach.origtest`, `mach.wifitest`, `mach.pcietest`) and scripts stay in
+`local/` (not committed). This is a host check — the corrected kernel
+has not booted yet.
+
+**Scripted input, unattended (2026-10-31).** Boot-arg `touch_auto=SECONDS`
+starts a kernel thread that replays a fixed gesture set through the
+touch queue: ten slow home-screen drags (the content tracks the finger
+one to one, so a dropped frame is a long interval between moves in the
+log), two Control Center pulls (the blur reference), an App Library
+dwell. Finger 9, so the touch controller's own reports never collide
+with the script; coordinates span the panel as 0..65535 on both axes.
+Its first dry encoding pass also exposed an unsigned-wraparound bug — a
+leftward drag computed `(to-from)` in uint32 and teleported the finger
+to x=65535; interpolation is int64 now. The script covers the Run A
+frame decomposition; the end-to-end latency number still needs the
+finger-0 zigzag pairing `tools/latency.py` fits on plus a screen
+recording.
 
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
