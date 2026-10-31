@@ -1283,7 +1283,8 @@ void
 IOMobileFramebufferUserClient::vsync(void)
 {
 	OSAsyncReference64 ref;
-	io_user_reference_t args[6];
+	io_user_reference_t args[3];            /* three 64-bit numbers: this refresh,
+	                                           the same again, a counter */
 	uint64_t now;
 	bool send = false;
 
@@ -1297,12 +1298,12 @@ IOMobileFramebufferUserClient::vsync(void)
 	} else {
 		fVSyncCount++;
 		setAsyncReference64(ref, fPorts[kFBNotifyVSync], fCallbacks[kFBNotifyVSync], fRefcons[kFBNotifyVSync], fTask);
-		args[0] = (uint32_t) now;
-		args[1] = now >> 32;
-		args[2] = (uint32_t) now;
-		args[3] = now >> 32;
-		args[4] = (uint32_t) fVSyncCount;
-		args[5] = fVSyncCount >> 32;
+		/* args are io_user_reference_t, u64 each: the time split into u32 halves
+		 * here used to arrive as six arguments, and the reader of the first three
+		 * saw a half timestamp that wraps every 4.3 seconds */
+		args[0] = now;
+		args[1] = now;
+		args[2] = fVSyncCount;
 		if (fVSyncCount <= 3) {
 			IOLog("MiniIOMobileFramebuffer: vsync notification %u sent\n", fVSyncCount);
 		}
@@ -1311,7 +1312,7 @@ IOMobileFramebufferUserClient::vsync(void)
 	}
 	IOLockUnlock(fLock);
 	if (send) {
-		sendAsyncResult64WithOptions(ref, kIOReturnSuccess, args, 6, kIOUserNotifyOptionCanDrop);
+		sendAsyncResult64WithOptions(ref, kIOReturnSuccess, args, 3, kIOUserNotifyOptionCanDrop);
 	}
 }
 
