@@ -1709,6 +1709,41 @@ zigzag plus the exit. The next unattended round, end to end:
     python tools/frames.py logs/giulia/<run>.log
     python tools/latency.py logs/giulia/<run>.log logs/giulia/<...>-recording.raw --finger 9
 
+**Run A, measured (2026-10-31, GPU path, 8 CPUs, `mach.autotest` v4,
+log `20261031-133820-run.log` + recording `20261031-134504`).** The
+first end-to-end number of the port: **the home screen follows the
+finger 30.0 ms behind**, until its pixels are in the panel's memory
+(gain 0.99, misfit 2.1 rows — a clean 1:1 fit over 198 frames). The
+30 ms: kernel→window server 0.02, →event system 0.08, the application
+and the wait for the next frame 15.33, drawing 3.67, SwapEnd 0.48, GPU
+1.11, display beat 6.97, copy 2.34; then the panel's scan. Input
+dispatch and the GPU are exonerated; the beat is the unavoidable half
+frame at 60 Hz. During gestures the same log renders **55–58 fps** on
+the home drags and the lag zigzag (2–6 % of frame steps over 16.7 ms,
+1 % over 33), and 58.2 fps on the Control Center pull. The felt
+stutter lives in the transitions: the CC retract 39 fps (13 % over
+16.7 ms, 11 % over 33) and the App Library entry 40 fps (51 % over
+16.7). All gestures together: 9 % over 16.7 ms, 2 % over 33. The slow
+frames' time goes to **idle before draw, 37–38 ms** — the window server
+waiting for commits — while draw, GPU and copy stay small. The
+measurement names the transition pipeline (what feeds CA during the CC
+dismissal and the App Library snap), not input, not the driver.
+
+Three traps the round documented: the daily root opens Safari on the
+refresh-rate page (which is also a panel check: 60.0 Hz, 16.7 ms, on
+cadence), and a scripted round without a home swipe "renders nothing"
+— v4 starts every round with the home-indicator gesture. A panicked GPU
+run skips the cleanup, and the next GPU boot then reads CX
+active/HW-controlled and refuses ownership ("CX already active …
+refusing", ready=0, silent software rendering at 6 fps) — reboot to
+Android between a panicked run and the next GPU run; clean returns are
+safe back-to-back. The kernel log's `[seconds]` prefix is not wall time
+(one run printed 910 s in ≈270 s wall); the µs intervals of the `tl:`
+lines are self-consistent (the zigzag measures 3.40 s, Safari sees
+16.7 ms frames) — trust those. And the log ring evicted the early
+gestures of the long round (832 of ~1400 samples survive), so frames.py
+sees only the tail of the round.
+
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
 `local/root-daily-fw.apfs` is repacked from it.

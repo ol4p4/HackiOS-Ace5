@@ -219,6 +219,11 @@ auto_touch_thread(__unused void *arg, __unused wait_result_t wait)
 	auto_sleep(auto_touch_seconds * 1000);
 	printf("redwood-touch: scripted input starts (%us)\n", auto_touch_seconds);
 	for (round = 0;; round++) {
+		/* The daily root opens Safari on the refresh-rate page: a swipe up
+		 * from the home indicator leaves it for the home screen, where the
+		 * drags have pages to move. */
+		auto_gesture(32768, 64500, 32768, 56000, 20, 8);
+		auto_sleep(1500);
 		/* The home screen is where the stutter shows: ten slow drags, the
 		 * content tracking the finger one to one -- a dropped frame is
 		 * visible in the log as a long interval between moves. */
