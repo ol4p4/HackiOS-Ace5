@@ -1696,7 +1696,18 @@ recording` (new: `oem recording` stages what the kernel left,
 frames are the zigzag. Recording recipe: `rec_secs=1200 rec_ring=1
 rec_mb=256 rec_step=4` — 256 MB is the size that did not respring
 SpringBoard, and step 4 makes the ring hold ~8.7 s, enough for the 3 s
-zigzag plus the exit.
+zigzag plus the exit. The next unattended round, end to end:
+
+    ACE5_CPUS=8 ACE5_CMDLINE="touch_auto=45 touch_auto_exit=1 \
+        rec_secs=1200 rec_ring=1 rec_mb=256 rec_step=4" \
+      python tools/ace5/phone.py --serial b4cf8812 run --seconds 900 \
+        --bootcpu 1 --touch --gpu-probe 20 --gpu-direct --gpu-keep \
+        --frame-timing --render-trace \
+        --kernel out/giulia-kernel/mach.autotest \
+        --root-image local/root-daily-fw.apfs
+    python tools/ace5/phone.py --serial b4cf8812 recording   # after the return
+    python tools/frames.py logs/giulia/<run>.log
+    python tools/latency.py logs/giulia/<run>.log logs/giulia/<...>-recording.raw --finger 9
 
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
