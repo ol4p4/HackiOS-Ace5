@@ -1890,6 +1890,42 @@ default and re-measure Run A; A loses and clock reads track the stalls
 loses and 77 is never read → the timer phases from swap completions,
 try fb_queue≥3.
 
+**The arms run (2026-10-31 evening, logs 173351 and 174026): all three
+fail, and the mechanism is now pinned.** `fb_beat=0` changed nothing —
+the CC retract is 39.0 fps with the same exact **100.0 ms** lock (ten
+frames of 99.6–100.2), the App Library 53 % over 16.7 ms; `fb_queue=3`
+likewise (36.9 fps, 13 % over 33 ms); and the new stats line says
+**"0 clock reads" in every window of every run** — CoreAnimation never
+calls GetCurrentAbsoluteTime, so its timer reads no display clock from
+this driver. The unimplemented-selector audit is identical across runs
+with and without ca_vbl (57, 15, 22, 29, 33, 27, 17, 84 — none of them
+a registration), so no hidden callback selector exists either. What
+that leaves: the 100 ms cadence is CoreAnimation's **10 Hz fallback for
+a missing display link**, reached only by the animation path — the
+static screen's commits run at 60 fps without any link, the CC retract
+cannot, and the one thing that ever lifted the animations to 60 fps was
+the notification stream (ca_vbl). The driver's frame timings are
+exonerated: nothing it reports moves the fallback.
+
+The way forward is the one the crash itself pointed at. The receiver's
+completion block took its function pointer from the **message payload's
+first word** (our timestamp, sign-extended, became the pc), so the real
+protocol's payload is three 64-bit values **beginning with the client's
+callback and refcon** — which is why the real driver sends only when
+the notifications selector has set them. On A11 QuartzCore never
+registers a callback, but the callback does not have to be
+QuartzCore's: libredwood runs inside backboardd and can register **its
+own no-op function** through the notifications selector (72, scalars
+{callback, refcon, 5}), and the driver can send (callback, refcon,
+time) as the payload — then the dispatcher calls a valid pointer, no
+crash, and the display link exists: the 60 fps animations that ca_vbl
+already demonstrated, without the crash. Next session: inject.c
+registers the no-op (IOConnectCallScalarMethod on the IOMobileFramebuffer
+connection, once at startup, gated by ca_vbl=1), the driver's vsync
+sends (fCallbacks[5], fRefcons[5], now), one run, the usual thresholds.
+`fb_minint=1` (arm C) remains untested and is the fallback if this
+fails.
+
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
 `local/root-daily-fw.apfs` is repacked from it.
