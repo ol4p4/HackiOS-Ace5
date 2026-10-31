@@ -1396,6 +1396,9 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		fRefcons[in[2]] = in[1];
 		if (in[2] == kFBNotifyVSync && in[0] != 0 && !fVSyncRunning && !fClosed) {
 			fVSyncRunning = true;
+			/* (ca_vbl=1: CoreAnimation asked for the refresh notifications; without
+			 * this line it never asked, and its own timer is what paced the frames) */
+			IOLog("MiniIOMobileFramebuffer: vsync notifications armed at %u Hz\n", refreshHz());
 			armVSync();
 		}
 		IOLockUnlock(fLock);
