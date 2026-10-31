@@ -1778,6 +1778,29 @@ reasons: fb_queue=1 (measured worse here: 33 % over 16.7 ms against
 renderer-side throughput work (the CC pull already holds 58 fps with
 the blur on).
 
+**ca_vbl=1, run and settled (2026-10-31, runs 141636/142642/143416).**
+The boot-arg works: with CA_FORCE_TIMER=1 in backboardd, QuartzCore
+registered a notification port — through **IOConnectSetNotificationPort**
+("notification port for type 5" at the driver), never through the
+notifications selector. The driver's arming had two disconnects (the
+port registration dropped the refcon and armed nothing; the sender
+demanded a callback only the selector could have set), fixed in
+b55eaee — after which the notifications flow, three of them logged at
+16.9 ms apart. The result on screen: **worse, not better** — gestures
+24.8 fps with 97 % of frame steps over 16.7 ms, idle windows 7.7 fps,
+most swaps "a refresh late". The receiver is the unknown left: either
+the port queue starves (the sends use kIOUserNotifyOptionCanDrop, and a
+slowly drained port drops what the sender offers) or QuartzCore's VBL
+receiver parses a different message layout than the generic IOKit async
+result we send (callback 0, refcon 0, three 64-bit numbers as six
+32-bit halves). Both answers live in QuartzCore in the dyld shared
+cache — read its VBL handler before the next on-device attempt. Two
+build traps to remember: the boot-arg path is opt-in, so the default is
+exactly as before this experiment; and `local/wsl/build-auto.sh` now
+copies `MiniIOMobileFramebuffer.cpp` too — the 14:16 and 14:26 runs
+silently ran the old driver because the copy list missed it (the
+unchanged binary size was the tell).
+
 The phone is on Android 15 (`adb devices` shows `b4cf8812`); `local/root-daily`
 carries `bin/webserve` and `etc/rc.jobs` = `rc.jobs.safari`, and
 `local/root-daily-fw.apfs` is repacked from it.
