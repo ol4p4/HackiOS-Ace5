@@ -1947,3 +1947,88 @@ client's callback, not a timestamp. `vsync()` now sends
 payload, which is why arm A saw no change. The `+0xB0/+0xB8/+0xC0`
 semantics remain an inference until the notifications selector's write point
 is read.
+
+### Family survey 2026-11-01: K90's three repos, and what it changes here
+
+Surveyed by `gh api` only (read-only). iola1999 now keeps three repos
+(`hackios-xnu-kernel`, `hackios-xnu-userland`, `hackios-redmi-k90-annibale`,
+branch `k90-port`; the userland overlays through `.userland.git`, and the
+authoritative iOS-26 mesa patch set lives in the kernel tree
+`tools/mesa/rebase-26/`).
+
+**Their iOS 26 line reached a usable desktop.** Icons, wallpaper
+(MercuryPosterExtension), glass dock/search, lock-screen clock, apps all
+display; page-turn median 53.4-53.6 fps (slow lane "today view" about 50, ~410
+draws/frame). The wall that owned their 10-30 was **HFI 150 (GMU hang on draws
+whose fragment shader reads the framebuffer through bindless descriptors)**,
+root-caused to A830's `has_early_preamble` and fixed by
+`has_early_preamble = False` in `freedreno_devices.py`. Around it: 16-byte
+constant-buffer alignment, fwidth quad helpers, texture-buffer alignment,
+IOSurface stride via copy sampling, zero-fill of new render targets.
+
+**Their vsync findings - 26 line only, do not transfer.** "No independent
+hardware vsync": the beat is MiniIOMobileFramebuffer's software beat (83
+rounds, 258,042 intervals, median 16,640/16,641 us, 90.7 % within
+16,667+/-500 us). CA_HEARTBEAT_RATE defaults 1/60 on both 26 and 16.5, with no
+direct timer creation anywhere. The 3 s hole / 15 s period got large
+cross-round statistics but no declared root cause. Their `ca_vbl=1` control
+round silently no-oped because the inject lib never loaded. And their 26 line
+runs 50+ fps with **no vsync notification stream at all** - a different
+QuartzCore from our 16.5 line, where the 10 Hz fallback is real. Two things
+this adds to *our* work only: the payload's third word `now` wants a
+timebase/unit audit (they hit three `mach_absolute_time` conversion bugs in
+one day), and the injection-load check stays hard (their control failed
+exactly there).
+
+**Boot failures - their taxonomy, none matches ours.** Wrong build tool ->
+early panic; version string in `__TEXT,__cstring` makes builds never
+byte-identical (an 11-byte delta moved 159k segment differences; LC_UUID
+written post-link) - **a binary diff is not evidence**; unsigned binaries ->
+userspace panic; the loader image tail must be byte-exact ("an image with any
+other tail returns to LK about 7 s after the jump"); kernel+root must end
+below their 128 MB RESIDENT_RD_OFFSET. Our clean "PMRD: PowerOff at launchd"
+is in none of their classes; the control-kernel verdict stands as the main
+experiment.
+
+**Next ca_vbl run - additions on top of the standing criteria** (notification
+port for type 5 / no-op vsync callback lent / vsync notifications armed; no
+SIGSEGV; animations at 60 fps):
+
+- Main verdict unchanged: does the WSL control kernel
+  (`local/wsl/build-auto.sh` -> `out/giulia-kernel/mach.autotest`) still power
+  off? If it also dies, rebuild the images in WSL too (the standing plan).
+- Confirm the injection actually loaded before reading anything else.
+- Audit `vsync()`'s `now`: which clock, what unit, versus what the A11
+  dispatcher expects as the third word (still an inference).
+- CI-kernel provenance check (which tree/script `build-ace5.yml` runs); never
+  use a binary diff as evidence, per the version-string lesson above.
+
+**Turnip transplant list (port at the rendering step, not before).** Our gate
+passed steps 1-7 on 2026-10-30 ("Turnip Adreno (TM) 750" enumerated, empty
+submit fenced); what remains is WSI/swapchain and the CA bridge. When the
+first real draws go through Turnip, copy from their `rebase-26`: fd-bo import
+size (`freedreno_screen.c` - pass `whandle->size`, not 0, or every texture
+laid over an imported buffer fails the size check), linear import pitch
+tolerance (accept pitch divisible by `min_pitch_align`, set `pitchalign=6`),
+last-level padding `sysmem_only` for linear imports whose final-level rows are
+not x4, and submit merging (`should_defer` on `__APPLE__`; backboardd does ~24
+submissions/frame). Also check whether a750 wants `has_early_preamble = False`
+- A830 needed it, and ours is the a750 the GL path has only exercised through
+`eagl`/freedreno, not through Turnip's draw paths.
+
+**120 Hz: no change to our plan.** Their `fb_flip=1` probe read the panel
+already refreshing at ~125 Hz (CTL0 command mode drives INTF1,
+INTF_FRAME_COUNT +25 per 200 ms); the constraint remains compositor production
+(9.39 ms non-beat time exceeds one 8.33 ms slot) - the same conclusion this
+runbook reached on 10-30 with the Safari cadence page (60.0 Hz, on cadence).
+Their noted borrowable item, "display controller direct scanout of iOS frames"
+(~500 lines), stays far-future here.
+
+**Candidates, recorded not started:** (1) a loader watchdog - theirs (v11+) is
+fed by host commands, stops feeding after 180 s of host silence, and
+`oem hang` measures a 37 s reset; that is the known cure class for our "run
+ends, loader USB dead, physical recovery only" state. (2) In-boot
+respin/cycle (change environment variables and restart processes within one
+boot) to cut ca_vbl variable rounds. Also noted: they rewrote their top-level
+git history on 10-30 (session ids removed), so any reference to an old SHA of
+theirs is stale.
