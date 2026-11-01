@@ -2214,3 +2214,34 @@ any signal CA consumes. It stays a performance item. The one lever for the lock
 is a callback that participates in CA's display-link bookkeeping; the no-op
 already shrank the lock from 6x to 2x, which says CA still wants the callback
 to confirm/complete something. That internal tick remains the unknown.
+
+### The IDA pipeline for QuartzCore, and the timer class (2026-11-01 late)
+
+Built the decompilation path: `local/wsl/dsc-macho.py` extracts one image's
+__TEXT from the fixed cache and wraps it in a minimal Mach-O (QuartzCore:
+3,461,296 bytes, __TEXT at 0x18827b000, saved as
+`E:\emu-data\rea\work\quartzcore.text.bin`); `analyze_range.py` (REA_RANGE_*
+env) analyzed the full text into `quartzcore.bin.i64` (14,916 functions) and
+`rea function` decompiles work (~3 s/query, attached mode, IDA must be open;
+the "unpacked base" prompt wants Proceed with unpacked base).
+
+Findings:
+- `sub_1882D3930` (0xc8 bytes) is the period function, decompiled: it caches
+  at this+0xB18; CA_HEARTBEAT_RATE getenv (1/hz) → this+0xAF8
+  (displayRefreshStepMachTime) → this+0xB10 (displayMinRefreshInterval; the
+  2^-33/2^-32 constants 1.16415322e-10 / 2.32830644e-10 chosen by this+0x220
+  bit 4) → qword_188553B60 (1/60). This is the same chain K90 documented.
+- The function is **vtable-dispatched** (get_callers/get_xrefs are empty; no
+  direct references anywhere): its chained-fixup pointer lives at
+  **0x1d5b44808** in the 0x1d5b44xxx vtable region (same region as the
+  AppleCLCDDisplay vtable the 10-27 work found). The vtable spans at least
+  0x1d5b447c8-0x1d5b448e0; constructors referencing the region: 0x1883a6380 →
+  0x1d5b44530, 0x1883a64dc → 0x1d5b444e0, 0x1883ac034 → 0x1d5b44f30, …
+- The Itanium typeinfo walk (vtable[-1] → name) did not resolve — the cache's
+  RTTI is not laid out the usual way; the class must be identified through the
+  constructors above.
+
+Next (next session, all host-side): decompile the constructors at 0x1883a6380 /
+0x1883a64dc to name the class, then its timer methods around the vtable slot
+0x1d5b44808 — looking for the per-frame "completed/presented" bookkeeping the
+no-op callback fails to do (the 6x→2x evidence).
