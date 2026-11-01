@@ -2072,3 +2072,21 @@ read the completion dispatcher's post-callback use of the payload (REA).
 kernel + verified volumes + ca_vbl=1). Attribution still open between the CI
 kernel build, the payload commit and environment; the CI kernel remains
 untested against these volumes.
+
+### Arm C measured (2026-11-01 evening, fb_minint=1, log 20261101-192617)
+
+fb_minint was already implemented (TUNABLE gMinInterval; publishes
+displayMinRefreshInterval/displayMaxRefreshInterval at start) and the kernel
+carried it — no rebuild. Run: same gesture script + ca_vbl=1 + fb_minint=1.
+Health clean (0 PowerOff/panic/SIGSEGV; 235 arm lines). Gestures: drags
+56.1–58.2 fps (parity), the 89%,70% CC window still 28.8 fps (35 %/27 % — the
+2×refresh lock, unchanged), all gestures 9 %/2 %. **End-to-end lag: 23.5 ms
+behind the finger (baseline 30.0 ms)** — the app+frame-wait share fell
+15.33 → 9.78 ms, the signature of CA learning the refresh period from the
+published properties; this meets the runbook's target band (24–27 ms) and is
+the best measured yet. Recording fetched this time (20261101-192623-recording.raw).
+Conclusion: arm C is a real win on interaction latency and should become the
+daily default candidate; the transition lock (CC retract 28–29 fps, 2×refresh)
+survives correct period + armed notifications + no crash, so the remaining
+lever is the completion payload semantics — what the dispatcher consumes after
+calling the callback (REA task), or a consuming callback in place of the no-op.
