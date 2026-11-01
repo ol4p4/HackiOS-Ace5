@@ -2032,3 +2032,43 @@ respin/cycle (change environment variables and restart processes within one
 boot) to cut ca_vbl variable rounds. Also noted: they rewrote their top-level
 git history on 10-30 (session ids removed), so any reference to an old SHA of
 theirs is stale.
+
+### 2026-11-01 evening: the system-volume rebuild, its defect, and the ca_vbl device verdict
+
+**The rebuild defect (root-caused).** The 16:42 system volume was built from a
+tree extracted by 7z, which cannot read lzfse-compressed DMG bands: the dyld
+main cache and `.01` subcache came out as garbage ("CRC Failed" buried in
+extract-dyld.log) and the cryptex tree lost 979 items ("Unsupported Method").
+Boot signature: `initproc failed to start -- Library not loaded:
+/usr/lib/libSystem.B.dylib` (dyld cannot open the corrupt cache, falls back to
+on-disk libraries that do not exist in a cryptex-era rootfs). Fix: re-download
+the IPSW member from Apple's CDN (`ios165/fetch-from-ipsw.py 096-04666-078.dmg`
+→ exactly 2,726,297,600 bytes), extract with `apfs-work/apfs-tool cat` (the
+kernel apfs_lib handles lzfse; verify the main cache starts with `dyld_v1`),
+relink into the tree, repack with `/root/ios165/system.manifest`, and verify
+with `tools/apfs/check-image.sh` — apfsck clean and all 62,423 entries
+reconciled. New volume: 2,492,256,256 bytes, sha256 247ae7a9…. Also repacked
+root-daily.apfs WITH its regenerated manifest (the 16:09 build had no manifest:
+all modes 0777, audio symlink missing; now 135/135 reconciled, sha256
+ecf99f46…). Rule: every volume write must tee a log and print sha256 — the
+unlogged 16:42 build hid this defect for hours.
+
+**The run (log 20261101-191021, mach.autotest + fixed volume + ca_vbl=1).**
+Completed its gesture round: no PowerOff, no panic, no SIGSEGV, 2,960 GL
+frames, a 268 MB recording (the failure signature is 32 bytes). ca_vbl
+structure confirmed: "notification port for type 5" → selector 72 with
+scalars {callback=0x1f268c850, refcon, 5} → "vsync notifications armed at
+60 Hz" (231 lines, bursts at 0.10 s = CA's 10 Hz fallback cadence).
+**Pacing did NOT improve** — A/B against Run A (20261031-133820), same gesture
+script: 89%,70% (CC-retract window) 39.0 fps / 13 % / 11 % → 28.2 fps / 37 % /
+28 % (worse); drags 55–58 → 56.5–59.5 (parity); all gestures 9 % / 2 % both.
+mine-retract: a steady 33.3 ms (2×refresh) lock, beat 0.0, and "0 clock reads"
+persists. So the callback-first payload removes the crash but does not make
+CA's render clock follow the stream — the completion's timing is what the
+timer needs, and a no-op swallows it. Next: fb_minint=1 (still untested) or
+read the completion dispatcher's post-callback use of the payload (REA).
+
+**The morning's PMRD PowerOff did not reproduce** on tonight's config (WSL
+kernel + verified volumes + ca_vbl=1). Attribution still open between the CI
+kernel build, the payload commit and environment; the CI kernel remains
+untested against these volumes.
