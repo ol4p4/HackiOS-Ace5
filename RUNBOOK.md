@@ -2191,3 +2191,26 @@ stream, the no-op callback and the display config — the 2x-refresh transition
 lock survives them all. The one path left is a consuming callback that drives
 CA's display link itself, which needs the display-link tick in QuartzCore —
 more static work, not a device run.
+
+### The timer probe (2026-11-01 night): what CADisplayTimer consumes
+
+Read from QuartzCore (DSC, same tooling): the period function at 0x1882d3930
+computes the heartbeat period in the documented order — `CA_HEARTBEAT_RATE`
+getenv (0x188571eb0, 1/hz) → `[this+0xAF8]` displayRefreshStepMachTime →
+`[this+0xAF0]` displayMinRefreshInterval (Q32 seconds, a flag bit chooses
+2^-32 vs 2^-33) → the 1/60 constant at 0x188553000+2912 — identical to the
+chain K90 documented for iOS 26. fb_minint feeds the third step; that is the
+latency win's mechanism.
+
+The presentation path gives CA no timing at all: SwapEnd returns only
+kIOReturnSuccess, SwapWait only success, and selector 77 is never called
+(0 clock reads). The transition lock moved only with the notification stream
+(100 ms without it, 33.3 ms with it), so the timer's phase signal during
+transitions is the notification arrival, not the presented frames.
+
+**Consequence: fb_flip / display-controller direct scanout cannot fix the 2x
+lock** — it changes presentation performance (the 2.4 ms copy, K90 parity), not
+any signal CA consumes. It stays a performance item. The one lever for the lock
+is a callback that participates in CA's display-link bookkeeping; the no-op
+already shrank the lock from 6x to 2x, which says CA still wants the callback
+to confirm/complete something. That internal tick remains the unknown.
