@@ -2245,3 +2245,30 @@ Next (next session, all host-side): decompile the constructors at 0x1883a6380 /
 0x1883a64dc to name the class, then its timer methods around the vtable slot
 0x1d5b44808 — looking for the per-frame "completed/presented" bookkeeping the
 no-op callback fails to do (the 6x→2x evidence).
+
+### The CA env-knob table, and the CA_VSYNC_OFF experiment (2026-11-01 night)
+
+QuartzCore initializes 153 environment knobs into a global byte table
+(0x1E1F6B790; sub_188370A28 reads them). The relevant ones and their table
+indices: CA_VSYNC_OFF=111 (global 0x1E1F6B7FF), CA_ENABLE_ALL_FRAME_RATES=113,
+CA_ENABLE_FRAME_RATE_ARBITRATION=114,
+CA_ENABLE_REDUCED_SERVER_VSYNC_RENDER=116, CA_VELOCITY_FRAME_RATE_UNCONSTRAINED=124,
+plus CA_FORCE_120HZ, CA_FORCE_DOUBLE_BUFFERING, CA_USE_PRESENT_ON_FINISH,
+CA_DISABLE_MODE_SWITCHING, CA_ENABLE_HIGH_FRAME_RATE_RESTRICTION. These are
+Apple's own switches, settable through the job environment (the FD_MESA_DEBUG
+channel).
+
+The one reader of CA_VSYNC_OFF is sub_188523160 (0x1344 bytes) — CA's display
+render/swap loop ("display %u swap_end returned error %x", the skip-spinner and
+detached-src paths). `v9 = MEMORY[0x1E1F6B7FF]` feeds the branch that skips the
+source attach (v30 = (flags&4)|v9 → v55 → the detached-src skip).
+
+Experiment prepared (not yet run — the phone was not connected):
+- `CA_VSYNC_OFF=1` added to local/root-daily/LaunchDaemons/com.apple.backboardd.plist
+  EnvironmentVariables;
+- root-daily.apfs repacked WITH manifest, sha256 61d47ed9…, check-image 135/135 clean;
+- run recipe unchanged: enter → ramdisk system-metal.apfs → run mach.autotest +
+  root-daily.apfs + ACE5_CMDLINE="ca_vbl=1 fb_minint=1 touch_lat=1 touch_auto=45
+  touch_auto_exit=1 rec_secs=1200 rec_ring=1 rec_mb=256 rec_step=4";
+- judge: the 89%,70% window (arm C baseline 28.8 fps), clock reads, health. One
+  variable at a time: CA_VSYNC_OFF alone on top of arm C.
