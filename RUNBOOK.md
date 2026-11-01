@@ -2272,3 +2272,17 @@ Experiment prepared (not yet run — the phone was not connected):
   touch_auto_exit=1 rec_secs=1200 rec_ring=1 rec_mb=256 rec_step=4";
 - judge: the 89%,70% window (arm C baseline 28.8 fps), clock reads, health. One
   variable at a time: CA_VSYNC_OFF alone on top of arm C.
+
+### The CA knobs measured (2026-11-01 late): both inert
+
+CA_VSYNC_OFF=1 (run 20261101-222657) and CA_VELOCITY_FRAME_RATE_UNCONSTRAINED=1
+(run 20261101-223346), each on top of arm C via backboardd's plist
+EnvironmentVariables: both runs clean, the 89%,70% window 28.5 / 28.3 fps
+(arm C 28.8), latency 26.0 / 24.5 ms, all gestures 9-10 %/2 %. Neither knob
+touches the animation-timer backoff — consistent with the mechanism (the lock
+lives in the timer's own scheduling, not the frame-attach or velocity paths).
+Caveat, recorded honestly: the env channel itself is proven (FD_MESA_DEBUG,
+10-28) but CA does not print its env, so "the knob reached CA" has no direct
+evidence; a CA_PRINT_* run would witness it if a future experiment depends on
+these knobs. Root volume for the last run: sha256 9fe65f9d… (plist carries the
+velocity knob; revert to no CA_* key for the daily recipe).
