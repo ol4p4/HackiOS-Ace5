@@ -2150,3 +2150,29 @@ registration path (who would pass a function through selector 72), not by the
 delivery path. Alternative: keep the timer's phase input on the driver side
 (beat/swap timing) — the 100 ms (baseline) vs 33.3 ms (with stream) locks show
 the timer consumes different inputs either way.
+
+### B1 continued: the display-config path, and why selector 27/17 are not the differentiator
+
+The IOMFB client library (`/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework`,
+load 0x1af1bf000, text 0xd000) maps the 3084-byte display-config blob:
+- get: 0x1af1c58e4 — `malloc(3084)`, `IOConnectCallStructMethod(conn, 27, NULL, 0, buf, &3084)`,
+  cached at this+0x668, and the caller checks the returned size == 0xC0C;
+- set: 0x1af1c5838 — `IOConnectCallStructMethod(conn, 17, buf, 3084, NULL, NULL)`;
+- a 0xAA-filled template at 0x1af1c6628 (the blob a caller uses when the get failed).
+The runtime sequence (20261101-192617): `27 (3084 out) → 17 (3084 in)` at backboardd
+startup — get fails with kIOReturnUnsupported, CA proceeds with the template and ignores
+the set. Also `GetBlock(0x4d)` returns 1580 bytes zeroed (our driver answers any block with
+zeros unless it is 0x40).
+
+**But the family has the same gap**: `iola1999/hackios-xnu-kernel` (branch k90-port) carries
+the SAME `MiniIOMobileFramebuffer.cpp` with the same selector enum — no 27/17, no 0x4d — and
+its iOS 26 desktop runs at 50+ fps. So the display-config gap is not what separates 50 fps
+from our locked transitions, and implementing it is an experiment, not a known fix.
+
+Selector 77's shape in the library (0x1af1c6284) is scalar-out × 1 — exactly what our
+driver implements — so "0 clock reads" is CA's own gate on A11, not a shape mismatch.
+
+**Arm prepared (`fb_cfg27=1`, driver change in this commit):** answer selector 27 with a
+zero-filled 3084-byte blob (size exact) and accept selector 17, behind the boot-arg. The
+question it asks on device: does a SUCCESSFUL display-config read change the render clock
+(clock reads, transition lock) at all? The layout is unknown; zeros are the honest minimum.
