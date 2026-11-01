@@ -2118,3 +2118,35 @@ question narrows to what the completion dispatcher consumes after the callback.
 Daily-recipe decision deferred until that is read; the combined config is the
 experimental default in the meantime (the tradeoff disappears if the CC window
 is fixed).
+
+### B1 read (2026-11-01 night): the notification delivery chain, and where the time goes
+
+Static read of QuartzCore (DSC image load 0x18827b000, text 0x34d000; subcache
+.03) around the crash dispatcher:
+
+- **Dispatcher 0x1885024c4** is a trampoline: `ldp x20, x19, [x0]` → helper →
+  `mov x0, x19; blr x20; ret` — it calls `{payload[0]}(payload[1])` and returns
+  0. It reads nothing else.
+- Its only reference (adrp+add at 0x188502470) passes it as the **invoke
+  routine** to a wrapper at 0x1885023d4: `wrapper(fn, ctx, flags)` allocates a
+  16-byte block, stores `{fn, ctx}`, and dispatches it asynchronously through a
+  stub helper (stub island 0x188549e60 → external via [0x1daddc000+0x5a8]).
+- Four direct callers of the wrapper exist (0x18839e200, 0x1883c36a8,
+  0x1883c634c, 0x188467db4) — the message handler(s) that turn the 6-word
+  IOKit payload into `{fn, ctx}`.
+- **Conclusion (observed): the delivery chain consumes only payload[0] (the
+  callback) and payload[1] (the refcon). The third u64 — the time — is never
+  read.** CA's transition timer therefore cannot learn the frame time from the
+  notification; only the callback could, and on A11 the callback is ours (the
+  no-op). This also re-reads 10-31: the crashing run's "60 fps transitions"
+  were measured on the relaunch spinner (backboardd crash loop), and tonight's
+  clean A/B shows the stream's real effect: scheduling tightens (lag 31.5 →
+  23.5 ms) but transitions stay locked at 2×refresh.
+
+**Implication:** the "consuming callback" must bring its own time (e.g.
+mach_absolute_time) and drive CA's display link itself — i.e. the next REA
+target is the function the real (A12+) VBL callback would call: find it by the
+registration path (who would pass a function through selector 72), not by the
+delivery path. Alternative: keep the timer's phase input on the driver side
+(beat/swap timing) — the 100 ms (baseline) vs 33.3 ms (with stream) locks show
+the timer consumes different inputs either way.
