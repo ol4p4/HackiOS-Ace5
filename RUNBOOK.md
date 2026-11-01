@@ -2090,3 +2090,13 @@ daily default candidate; the transition lock (CC retract 28–29 fps, 2×refresh
 survives correct period + armed notifications + no crash, so the remaining
 lever is the completion payload semantics — what the dispatcher consumes after
 calling the callback (REA task), or a consuming callback in place of the no-op.
+
+### Build routing rule (2026-11-01, user decision)
+
+Estimate the local (WSL) build time first: **over 20 minutes → CI; under 20
+minutes → WSL.** Measured baselines: CI `build-ace5.yml` is 17m48s–19m10s
+(5 recent successes) plus 1–2 min artifact download, ~20 min a round; the WSL
+mesa/AIR loop is ~8 minutes; the WSL kernel (`local/wsl/build-auto.sh`) is
+~10 minutes. CI also carries friction (a push needs the 7897 proxy, or the Git
+Data API), so borderline cases go to WSL. This rule replaces the earlier
+qualitative "small changes local, big changes CI".
