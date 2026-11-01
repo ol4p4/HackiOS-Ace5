@@ -2100,3 +2100,17 @@ mesa/AIR loop is ~8 minutes; the WSL kernel (`local/wsl/build-auto.sh`) is
 ~10 minutes. CI also carries friction (a push needs the 7897 proxy, or the Git
 Data API), so borderline cases go to WSL. This rule replaces the earlier
 qualitative "small changes local, big changes CI".
+
+### A1 measured: fb_minint alone is baseline; the latency win needs the stream (log 20261101-194032)
+
+Same gestures, `fb_minint=1` WITHOUT ca_vbl: latency 31.5 ms (baseline 30.0),
+app+wait 16.29 ms, CC window 38.9 fps / 13 % / 11 % — i.e. fb_minint alone
+changes nothing measurable; the 23.5 ms in arm C needs the notification stream.
+Arm C vs A1 (the only difference is ca_vbl) isolates the stream's effect: app
+frame scheduling tightens (16.29 → 9.78 ms, lag 23.5 ms) but the transition
+locks at 2×refresh (38.9 → 28.8 fps, 11 % → 27 % over 33 ms). So the stream IS
+consumed (scheduling changes) yet the animation timer still locks — the REA
+question narrows to what the completion dispatcher consumes after the callback.
+Daily-recipe decision deferred until that is read; the combined config is the
+experimental default in the meantime (the tradeoff disappears if the CC window
+is fixed).
