@@ -2176,3 +2176,18 @@ driver implements — so "0 clock reads" is CA's own gate on A11, not a shape mi
 zero-filled 3084-byte blob (size exact) and accept selector 17, behind the boot-arg. The
 question it asks on device: does a SUCCESSFUL display-config read change the render clock
 (clock reads, transition lock) at all? The layout is unknown; zeros are the honest minimum.
+
+### fb_cfg27 arm measured (2026-11-01 night, log 20261101-205121): hypothesis closed
+
+With selector 27/17 answered (zero-filled 3084-byte blob, exact size) on top of
+arm C: run clean (no panic from the zero fields), the "selector 27 not
+implemented" line is gone, but **nothing else moved** — clock reads still 0,
+the 89%,70% window 29.8 fps / 35 % / 25 % (arm C: 28.8 / 35 / 27), latency
+26.5 ms (arm C 23.5, within noise). The display-config read is not the lever,
+consistent with K90 running 50+ fps on the same driver gaps. fb_cfg27 stays as
+an opt-in, documented dead end. With this, every low-cost arm in the decision
+matrix is measured: fb_beat=0, fb_queue>=3, fb_minint, the notification
+stream, the no-op callback and the display config — the 2x-refresh transition
+lock survives them all. The one path left is a consuming callback that drives
+CA's display link itself, which needs the display-link tick in QuartzCore —
+more static work, not a device run.
