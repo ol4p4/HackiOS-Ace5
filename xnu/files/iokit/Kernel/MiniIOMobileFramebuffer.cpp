@@ -51,8 +51,10 @@ enum {
 	kFBMethodGetID                  = 7,
 	kFBMethodGetDisplaySize         = 8,
 	kFBMethodRequestPowerChange     = 12,
+	kFBMethodSetDisplayConfig       = 17,
 	kFBMethodSwapSignal             = 20,
 	kFBMethodGetDigitalOutState     = 25,
+	kFBMethodGetDisplayConfig       = 27,
 	kFBMethodGetDotPitch            = 28,
 	kFBMethodGetDisplayArea         = 29,
 	kFBMethodSwapCancel             = 52,
@@ -164,6 +166,14 @@ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
  * driver has always published, and whether CoreAnimation's timer reads the one or the other is
  * an open question (the K90 port's 120 Hz work reads these properties). */
 static TUNABLE(uint32_t, gMinInterval, "fb_minint", 0);
+/*
+ * Boot-arg fb_cfg27=1: answer the display-config selectors (27 get, 17 set — the 3084-byte
+ * blob IOMobileFramebuffer.framework caches per connection and CoreAnimation reads at startup;
+ * unimplemented, the read fails with kIOReturnUnsupported and CA carries on with its own
+ * defaults). The blob is returned zero-filled: its layout is not known yet, and this arm exists
+ * to ask whether a SUCCESSFUL read changes the render clock at all.
+ */
+static TUNABLE(uint32_t, gCfg27, "fb_cfg27", 0);
 /*
  * Boot-arg fb_threads=N (1 to 8): so many processors scale a frame onto the panel together (see
  * drawRows()). Three by default: a frame is in the panel's memory 3 ms after its turn instead of 9
@@ -1417,6 +1427,24 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 	case kFBMethodSwapCancelAll:
 	case kFBMethodRequestPowerChange:
 	case kFBMethodChangeFrameInfo:
+		return kIOReturnSuccess;
+
+	case kFBMethodGetDisplayConfig:                 /* out: the 3084-byte display config blob */
+		if (!gCfg27) {
+			break;
+		}
+		if (args->structureOutput == NULL) {
+			return kIOReturnBadArgument;
+		}
+		/* the caller's size check wants exactly 3084 bytes back; fill what it
+		 * asked for and leave the size as given */
+		bzero(args->structureOutput, args->structureOutputSize);
+		return kIOReturnSuccess;
+
+	case kFBMethodSetDisplayConfig:                 /* in: the same 3084-byte blob */
+		if (!gCfg27) {
+			break;
+		}
 		return kIOReturnSuccess;
 
 	case kFBMethodNotifications:                    /* in: callback (0 = off), its argument, type, 0 */
