@@ -2094,12 +2094,16 @@ calling the callback (REA task), or a consuming callback in place of the no-op.
 ### Build routing rule (2026-11-01, user decision)
 
 Estimate the local (WSL) build time first: **over 20 minutes → CI; under 20
-minutes → WSL.** Measured baselines: CI `build-ace5.yml` is 17m48s–19m10s
-(5 recent successes) plus 1–2 min artifact download, ~20 min a round; the WSL
-mesa/AIR loop is ~8 minutes; the WSL kernel (`local/wsl/build-auto.sh`) is
-~10 minutes. CI also carries friction (a push needs the 7897 proxy, or the Git
-Data API), so borderline cases go to WSL. This rule replaces the earlier
-qualitative "small changes local, big changes CI".
+minutes → WSL.** Measured baselines: CI `build-ace5.yml` succeeds in
+17m48s–20m11s (8 successes across 20 runs, mean ~18.9 min) plus 1–2 min
+artifact download, ~19–22 min a round; the WSL mesa/AIR loop is ~8 minutes; the
+WSL kernel (`local/wsl/build-auto.sh`) is ~10 minutes. CI also carries friction
+(a push needs the 7897 proxy, or the Git Data API), so borderline cases go to
+WSL, and CI is kept for two jobs: canonical artifacts (for others / release)
+and an independent build when the WSL environment itself is suspect. A full
+stack rebuild (kernel + userland + images) is the only common >20 min case;
+incremental mesa is seconds, so most changes ride WSL. This rule replaces the
+earlier qualitative "small changes local, big changes CI".
 
 ### A1 measured: fb_minint alone is baseline; the latency win needs the stream (log 20261101-194032)
 
