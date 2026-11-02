@@ -156,6 +156,7 @@ redwood_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y)
 static uint64_t auto_touch_channel;             /* slept on, woken only by its deadline */
 static uint32_t auto_touch_seconds;
 static uint32_t auto_touch_exit;
+static uint32_t auto_apps;                      /* touch_apps=N: the app-switch script instead */
 
 static void
 auto_sleep(unsigned ms)
@@ -183,6 +184,15 @@ auto_gesture(uint32_t from_x, uint32_t from_y, uint32_t to_x, uint32_t to_y,
 		auto_sleep(ms);
 	}
 	redwood_touch_post(REDWOOD_TOUCH_UP, 9, to_x, to_y);
+}
+
+/* one touch as a finger makes it: down, a moment, up */
+static void
+auto_tap(uint32_t x, uint32_t y)
+{
+	redwood_touch_post(REDWOOD_TOUCH_DOWN, 9, x, y);
+	auto_sleep(60);
+	redwood_touch_post(REDWOOD_TOUCH_UP, 9, x, y);
 }
 
 /*
@@ -218,6 +228,40 @@ auto_touch_thread(__unused void *arg, __unused wait_result_t wait)
 
 	auto_sleep(auto_touch_seconds * 1000);
 	printf("redwood-touch: scripted input starts (%us)\n", auto_touch_seconds);
+	/*
+	 * touch_apps=N: the app-switch case the eye notices -- open an application
+	 * from the dock, go back to the home screen while it is still opening, open
+	 * the next one, N times. The dock's four icons are always in the same place
+	 * (Phone, Safari, Messages, Music); the first swipe leaves whatever the daily
+	 * root opened (Safari) for the home screen. Coordinates are the icons' centres
+	 * as the panel recording shows them, 0..65535 on both axes.
+	 */
+	if (auto_apps) {
+		static const uint32_t dock_x[4] = { 10486, 25627, 40818, 55969 };
+
+		auto_gesture(32768, 64500, 32768, 56000, 20, 8);        /* Safari -> home */
+		auto_sleep(1500);
+		for (round = 0; round < auto_apps; round++) {
+			auto_tap(dock_x[round % 4], 59000);
+			/* the launch zoom takes ~0.3 s; 0.12-0.18 s later the swipe lands
+			 * in the middle of it -- the interrupted animation is the case
+			 * the eye notices, and the return has to take over from a moving
+			 * window */
+			auto_sleep(round < 4 ? 180 : 120);
+			auto_gesture(32768, 64500, 32768, 56000, 20, 8);        /* back home */
+			auto_sleep(round < 4 ? 400 : 300);
+		}
+		printf("redwood-touch: %u applications opened and left\n", auto_apps);
+		if (auto_touch_exit) {
+			unsigned f;
+
+			for (f = 20; f < 20 + EXIT_FINGERS; f++) {
+				redwood_touch_post(REDWOOD_TOUCH_DOWN, f, 32768, 32768);
+			}
+			auto_sleep(3000);
+		}
+		return;
+	}
 	for (round = 0;; round++) {
 		/* The daily root opens Safari on the refresh-rate page: a swipe up
 		 * from the home indicator leaves it for the home screen, where the
@@ -345,6 +389,7 @@ redwood_input_init(void)
 	if (PE_parse_boot_argn("touch_auto", &auto_seconds, sizeof(auto_seconds)) && auto_seconds) {
 		auto_touch_seconds = auto_seconds;
 		PE_parse_boot_argn("touch_auto_exit", &auto_touch_exit, sizeof(auto_touch_exit));
+		PE_parse_boot_argn("touch_apps", &auto_apps, sizeof(auto_apps));
 		if (kernel_thread_start(auto_touch_thread, NULL, &auto_thread) == KERN_SUCCESS) {
 			thread_deallocate(auto_thread);
 		}

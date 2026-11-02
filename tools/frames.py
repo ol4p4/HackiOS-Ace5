@@ -20,6 +20,12 @@ to the next one or 2.5 s later -- is a segment; for each:
 
 The thresholds are as the coordinator asked for them; 18.0 rather than 16.7 because a frame of a steady
 60 comes 16.6 to 16.8 ms after the one before.
+
+--min-draws N: only frames that drew at least N things count (0: every frame). A window's average is
+otherwise dragged down by the frames of a still screen: SpringBoard's idle commits come every ~82 ms
+with 7 to 13 draws, under the 100 ms that would call them a pause, so a 0.4 s animation at 60 fps and
+1.5 s of idling after it average out to ~30 fps. The CC-retract window was read that way; with
+--min-draws 40 its animation is 16 ms a frame in every run since 10-31 (docs/DISPLAY-LINK.zh-CN.md).
 """
 import sys
 
@@ -43,10 +49,18 @@ def lines_of(paths):
 
 
 def main():
-    if len(sys.argv) < 2:
+    files, min_draws, i = [], 0, 1
+    while i < len(sys.argv):
+        if sys.argv[i] == '--min-draws' and i + 1 < len(sys.argv):
+            min_draws = int(sys.argv[i + 1])
+            i += 2
+        else:
+            files.append(sys.argv[i])
+            i += 1
+    if not files:
         sys.exit(__doc__)
     gestures, frames, swaps, shows, waits, loads = [], [], {}, {}, [], []
-    for line in lines_of(sys.argv[1:]):
+    for line in lines_of(files):
         w = line.split()
         try:
             if w[1] == 'p' and len(w) >= 8 and int(w[2]) in (1, 4):
@@ -76,8 +90,10 @@ def main():
             continue
         began, ended, draws = drawn[-1]
         ready, shown, done = shows[sid]
-        timeline.append(dict(began=began, ended=ended, swap=swap, ready=ready, shown=shown, done=done))
+        timeline.append(dict(began=began, ended=ended, swap=swap, ready=ready, shown=shown, done=done, draws=draws))
     timeline.sort(key=lambda f: f['done'])
+    if min_draws:
+        timeline = [f for f in timeline if f['draws'] >= min_draws]
     all_counts = [0, 0, 0]
     kinds, previous = {}, ''          # the same gesture done more than once: its frames together
     print(f'frames.py: {len(gestures)} gestures, {len(timeline)} frames on the panel, {len(waits)} waits for the GPU '
