@@ -2413,6 +2413,31 @@ out: (a) find whether the gate is a model string or a capability bit we can flip
 for the CA process only; (b) keep the no-op stream and instead attack the
 multiplier/scheduling side.
 
+### CA_ENABLE_FRAME_RATE_ARBITRATION=0 measured (2026-11-02): inert
+
+- Preparation: the velocity knob removed, CA_ENABLE_FRAME_RATE_ARBITRATION=0 added
+  to backboardd's EnvironmentVariables; root-daily.apfs rebuilt
+  (`mkroot-manifest.py` + `mkapfs.py -z --plain fw`), sha256 feb73630…,
+  check-image apfsck clean and 135/135 entries.
+- **ACE5_CPUS lesson**: phone.py defaults ACE5_CPUS to 1. The first run
+  (20261102-151720) went out as `cpus=1`: drags 23.8 fps, copy 36–53 ms, one
+  backboardd SIGSEGV (respawned). Not comparable to any arm-C number. Arm
+  comparisons must set `ACE5_CPUS=8` explicitly; the omission here was the
+  session's, not the tool's.
+- Valid run 20261102-151958 (cpus=8, ca_vbl=1 fb_minint=1, 900 s): health clean
+  (0 PowerOff/panic/SIGSEGV; vsync armed), **17 "0 clock reads" still**.
+  - CC window (89%,70%): 2 times, 60 frames at **28.9 fps / 32 % / 25 %**
+    (arm C 28.8 / 35 / 27).
+  - Drags: 55.9 / 57.9 / 59.2 / 57.7 fps — parity.
+  - All gestures: 1450 steps, 9 % / 2 % (arm C 1459, 9 / 2).
+  - End-to-end: **24.5 ms** (arm C 23.5) — parity. Recording
+    20261102-152018-recording.raw.
+- Verdict: **inert**, like CA_VSYNC_OFF and CA_VELOCITY_FRAME_RATE_UNCONSTRAINED.
+  The transition 2x lock survives arbitration off. Caveat unchanged: no direct
+  evidence the knob reached CA; a CA_PRINT_* run would witness it.
+- Consequence: the multiplier cluster is not driven by this knob (or not reached);
+  the display-link class that consumes slots 92/93 becomes the next static target.
+
 **Next device experiment (cheap, one variable)**
 
 The multiplier cluster is arbitration-adjacent and untested: the env-knob table
