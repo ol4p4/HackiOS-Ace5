@@ -2570,6 +2570,18 @@ The "release pin" reading above is wrong. Measured on the phone:
   display link outright. The server's vsync render path is load-bearing for the
   frame clock; which of the two does it, and what the freeze leaves running, is
   the next one-knob-per-run question.
+- **Isolation (2026-11-02, one knob per run, backboardd only, working config otherwise)**:
+  - CA_ENABLE_REDUCED_SERVER_VSYNC_RENDER=1: **no freeze** — 235 armings,
+    1,724 frames, health clean, gestures 1,449 steps 9 % / 3 % (run 20261102-165834).
+  - CA_ENABLE_ALL_FRAME_RATES=1: **freeze** — 1 arming, 2 frames
+    (run 20261102-170049). So the freeze is ALL_FRAME_RATES=1 in the window
+    server alone; REDUCED_SERVER_VSYNC_RENDER is harmless alone, and the
+    SpringBoard side was not needed for the freeze.
+  - Reading: the frame-rate selection machinery (CADisplayTimingsControl /
+    CAFrameRateClient) is load-bearing — allowed to pick freely, CA stops the
+    display link altogether on this port (no frames), rather than picking a
+    different rate. The 2x transition lock is a *constrained* choice of that
+    same machinery; the unconstrained one is worse (zero).
 
 **Next device experiment (cheap, one variable)**
 
