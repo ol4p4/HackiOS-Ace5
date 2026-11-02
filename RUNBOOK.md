@@ -2438,6 +2438,60 @@ multiplier/scheduling side.
 - Consequence: the multiplier cluster is not driven by this knob (or not reached);
   the display-link class that consumes slots 92/93 becomes the next static target.
 
+### The display-link interval chain, and why the multiplier cancels (2026-11-02, continued)
+
+Static read of the CADisplayTimer/display-link code (QuartzCore, same DB).
+
+**Confirmed facts**
+
+- **Interval chain** `sub_1883C6390` (display-link state update): it locks
+  display+952, reads the link state at display+960 → {+40 phase, +56 timestamp,
+  +4 atomic interval}, calls CADisplayTimerAlignPhase, then computes
+  `interval = display->period() × display->multiplier()` (vtable+728 = slot 91,
+  vtable+736 = slot 92) and stores it at link+520 (deadline at link+504,
+  timestamp at link+512); a signpost (835321856) traces the value.
+- **CADisplayTimer is a dispatch_source timer** (source at this+120).
+  `sub_1882AB034` = CADisplayTimerAlignPhase: heartbeat=this+232, last=this+240,
+  duration=this+208, deadline=this+224; it computes the phase index
+  `((ts-last)/heartbeat) % 240` vs the incoming `*a2 % 240`, re-bases when the
+  phase mismatches (or first run): `heartbeat = interval`,
+  `last = ts - phase*interval`, `duration = interval*(duration/interval)`;
+  logs "CADisplayTimerAlignPhase: unexpected state (interval:%llx, heartbeat:%llx)"
+  when duration/interval == 0; re-arms with dispatch_source_set_timer.
+  Callers: the timer fire (0x1882f682c), 0x1883315b4, 0x1883480a4, the timer
+  creation (0x18837cf30), and the state update (0x1883c6390).
+- **The multiplier's gate**: slot 92 returns 2/4 only when (+544 bit 4) AND
+  (+560 bit 63); otherwise slot 93 returns max(1, MEMORY[0x1E1F6B720]) (the
+  global is 0 in the shipped cache). **+544 bit 4 = MobileGestalt
+  "SupportsPerseus"** (obfuscated key GdXjx1ixZYvN9Gg8iSf68A, iOS 10.3+;
+  writer sub_1884C1F48 = the "System UI Framebuffer Compression Enabled"
+  initializer; `CA_DISABLE_APT` clears it when sub_188549344() is true).
+  The ctor seeds +544 and +2168 with the NaN pair 0x7FC000007FC00000
+  (0x7FC00000 at +544 and +2168; bit 4 clear; +2168 truthy).
+- **+560 is never written by the AppleDisplay ctor** — only the mode switch
+  (slots 83/84) writes it, from the IOMFB display-config path (the same
+  selector 27/17 that fb_cfg27 answered with zeros).
+- **The multiplier cancels**: the period function halves its result when
+  (+544 bit 4) && (+560 bit 63) (`return result * 0.5`), and the multiplier is
+  then 2 — net interval = (period/2) × 2 = period. With bit 63 clear the net is
+  period × 1 = period. **So the multiplier cluster does not change the effective
+  frame interval**; it is bookkeeping for "2x" display modes (ProMotion/VRR), not
+  the source of our 2x lock.
+
+**Inference — where the 2x lock is NOT, and where it must be**
+
+- Not in the display timer's period: it is 1/60 in both multiplier cases.
+- Not in the display-config read: fb_cfg27 (zeros) left the window at 29.8 fps.
+- The 33.3 ms cadence with "idle before draw 35.9 ms" (frames.py, the valid run)
+  means the compositor waits ~2 beats for a commit — the app-side CADisplayLink
+  (SpringBoard's render loop) commits every other beat. The next target is the
+  client-side display link: where it gets its vsync phase from the server and
+  how CADisplayTimerAlignPhase re-bases on our stream.
+
+**Next static targets**: the timer fire (0x1882f682c) and the link creation
+(0x18837cf30) — the fire path is where the per-frame bookkeeping lives; the
+client display link (SpringBoard) is the cadence that actually locks.
+
 **Next device experiment (cheap, one variable)**
 
 The multiplier cluster is arbitration-adjacent and untested: the env-knob table
