@@ -2492,6 +2492,59 @@ Static read of the CADisplayTimer/display-link code (QuartzCore, same DB).
 (0x18837cf30) — the fire path is where the per-frame bookkeeping lives; the
 client display link (SpringBoard) is the cadence that actually locks.
 
+### The frame-rate knobs are pinned on release builds; CADisplayTimingsControl (2026-11-02, continued)
+
+**Confirmed facts**
+
+- The three frame-rate getters all have the same shape:
+  - CA_ENABLE_ALL_FRAME_RATES (env index 113, byte 0x1E1F6B801):
+    `sub_1882CE9E0 = (MEMORY[0x1E1F6A1E8] != 0) | (byte & 1)`;
+  - CA_ENABLE_FRAME_RATE_ARBITRATION (114, 0x1E1F6B802): `sub_18839345C`, same;
+  - CA_ENABLE_REDUCED_SERVER_VSYNC_RENDER (116, 0x1E1F6B804): same shape
+    (reader near 0x18832a244).
+- **The global 0x1E1F6A1E8 = 1 on a release build**: `sub_188340DCC` writes
+  `os_variant_has_internal_content("com.apple.coreanimation") ^ 1`. So the three
+  getters return true whatever the env byte says — **these knobs are dead on our
+  IPSW**. This is why CA_ENABLE_FRAME_RATE_ARBITRATION=0 was inert.
+- The arbitration getter has 34 call sites. Two matter: AppleDisplay slot 90
+  (the multiplier cluster, which cancels) and the **CADisplayTimingsControl**
+  machinery: `sub_18832778C` (add_reason, list at this+160..176, max 8,
+  "CADisplayTimingsControl too many reasons.") and `sub_1883AC178` (register a
+  **CAFrameIntervalRange** request, sorted list at this+112..120, max 16,
+  "CAFrameIntervalRange.minimum = 0 should not be registered.",
+  "CADisplayTimingsControl too many requests.").
+  Strings: overrideDisplayTimings:, copyDisplayTimingsFromDisplay:,
+  setDigitalModes:withTimings:, copy_display_timings: unexpected state,
+  timingsControl, "CADisplayTimingsControl too many reasons/requests".
+- **CAFrameRateClient** feeds it: sub_1883421EC registers
+  ("CAFrameRateClient: register %u %u %u") and sub_188306088 updates
+  ("CAFrameRateClient: update %u %u %u to %u %u %u") a client's
+  {min, max, preferred} range (client+44/+48/+52) with the timings control at
+  display+408. This is the ProMotion panel-rate request system; a fixed-60 Hz
+  panel has nothing to switch.
+- The display-link interval chain is unaffected: period × multiplier cancels
+  (previous section).
+
+**Inference**
+
+- The transition 2x is not in the period/multiplier and not in the env knobs as
+  shipped. The frame-rate request system (CAFrameIntervalRange) is the plausible
+  place a 30 Hz interval could be requested, but the static read shows no
+  registration from our port; this needs runtime evidence.
+- Unlocking the knobs would need `os_variant_has_internal_content` to return
+  true for the CA domain: an interpose in backboardd (userland/src/inject.c) and
+  SpringBoard (userland/src/inject_sb.c), both of which already carry a dyld
+  `__DATA,__interpose` table.
+
+**Device-needed (the static thread has reached its end)**
+
+- (a) Interpose os_variant_has_internal_content (domain-scoped) → re-test
+  CA_ENABLE_FRAME_RATE_ARBITRATION=0 / ALL_FRAME_RATES / REDUCED_SERVER_VSYNC_RENDER,
+  each alone on arm C.
+- (b) Or trace the real cadence: the timer signposts (835321856, 835322052) via
+  kdebug, or instrument the driver to timestamp the server's tick.
+Both need the phone; no further static step can separate them.
+
 **Next device experiment (cheap, one variable)**
 
 The multiplier cluster is arbitration-adjacent and untested: the env-knob table
