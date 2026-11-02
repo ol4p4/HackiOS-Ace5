@@ -2731,22 +2731,39 @@ Ported into `userland/src/inject_sb.c` with attribution (new block after
 Built with the new `local/wsl/build-sb.sh` (only this dylib; the compile line is
 `userland/build.sh:293`'s): `obj/libredwood-sb.dylib` 90,904 bytes. `local/root-daily.apfs`
 repacked with the manifest (135 entries), sha256 `07d2f747…`, check-image apfsck clean
-and 135/135 read back. **Not yet run on the phone** (it was not connected).
+and 135/135 read back.
 
-The prepared run is one variable on top of the 17:26 baseline (the backboardd plist's
-inert `CA_ENABLE_FRAME_RATE_ARBITRATION=0` stays, for comparability):
+**Run (2026-11-02 18:32, log 20261102-183210).** The mechanism is confirmed verbatim:
+`display links: made ok, fps ok, range ok; UIViewInProcessAnimationManager's at the
+panel's rate (dl_max=1)`, links made for `-[UIViewInProcessAnimationManager
+_displayLinkFire:]` by `UIKitCore+0x42fe34`, then `asked for 20..30, 0 a second
+(dropped) by UIKitCore+0x415d78`; the clock's 10..120 and the 60s keep their rates.
+**But the frame rate did not move.** Control run `dl_max=0` (log 20261102-183813),
+same image: CC window 50.4 fps / 15 % / 6 % against 46.1 / 21 % / 9 % with the drop;
+the pre-patch baseline 20261102-172655 was 51.9 / 9 % / 5 %. All within the day's
+run-to-run spread (40.6–52.5 fps). Both runs clean (0 PowerOff/panic, vsync 233/214).
 
-```
-ACE5_CPUS=8 python3 tools/ace5/phone.py --serial b4cf8812 run ... \
-  --kernel out/giulia-kernel/mach.autotest --root-image local/root-daily.apfs \
-  ACE5_CMDLINE="ca_vbl=1 fb_minint=1 touch_lat=1 touch_auto=45 touch_auto_exit=1 \
-                rec_secs=1200 rec_ring=1 rec_mb=256 rec_step=4"
-```
+**Why the window never showed it — the metric.** `tools/frames.py` counts every
+frame gap under 100 ms as movement. SpringBoard's idle commits after an animation are
+~82 ms apart with 7–13 draws, so a 0.4 s animation at 60 fps plus 1.5 s of idling
+averages to ~30 fps. With frames filtered to those that drew ≥40 things (`frames.py
+--min-draws 40`, added this session): the CC animation is 16.0–16.7 ms in every run
+since 11-01 (arm C 16.2, A1 with no ca_vbl 16.0, the 172655 baseline 16.7, both new
+runs 16.2/16.4). `local/mine-retract.py` on the 10-31 "stall" window agrees (16 ms, one
+32.7 ms hiccup). The only genuine 33.4 ms animation is 20261031-143416 — the run
+before the injection callback fix. **So the 2x transition lock, as measured since
+11-01, was the tool; the animation has been 60 fps.** What is left is the occasional
+30–50 ms hiccup inside an animation (4–25 % of frames, run-dependent), not a rate
+lock; AlignPhase is not needed for it.
 
-Judge: the three log lines (`display links: made ok, fps ok, range ok`;
-`display link ... made for -[UIViewInProcessAnimationManager ...]`;
-`asked for 20..30 ... (dropped)`), then `tools/frames.py` — the 89%,70% window at
-**≥55 fps with under 3 % over 16.7 ms** (baseline 28.9–30.4 fps / 32–33 %), drags
-55–59, health clean. If a different class asks for 30, the log names it with
-`image+offset`; extend the mark rather than guess.
+**The interrupt case (user's report).** `redwood_input.c` gained boot-arg
+`touch_apps=N` (this session): from the home screen, tap the four dock icons and
+swipe home 120–180 ms later (mid-animation) or 400–500 ms later, N times, then the
+five-finger exit. Log 20261102-190938 (120–180 ms): tap to first screen change 5–14 ms
+(first cycle 166 ms, cold), launch segments 57–61 fps with 0 % over 33 ms, home swipes
+59–61 fps with 0 % over 33 ms. The only slow one is the first cold launch (9 frames at
+38.3 fps). At 120 ms the app window has not appeared yet (recording: icon grows, home
+returns); at 400 ms it has (Messages' "Shared with You" ~320 ms after the tap).
+**Music crashed with SIGSEGV on all three launches** (`UIKitApplication:com.apple.Music
+… exited due to SIGSEGV`) — an app fault, not display.
 

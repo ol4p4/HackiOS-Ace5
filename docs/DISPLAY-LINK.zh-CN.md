@@ -1,6 +1,13 @@
 # 显示链路与帧率：transition 的 2x 锁、生态调查与上游解法
 
-> 2026-11-02，分支 `turnip-glslang`。状态：补丁已移植、已构建、镜像已校验；**上机验证尚未进行**（手机未连接）。
+> 2026-11-02，分支 `turnip-glslang`。状态：补丁已移植、已构建、**已上机两轮**（`dl_max=1` / `dl_max=0`）。
+>
+> **更正（同日，实测之后）**：89%,70% 窗口的 28–30 fps 是 `tools/frames.py` 的度量假象——它把
+> SpringBoard 动画结束后的 ~82 ms 空闲帧（每帧只有 7–13 个 draw）也算进"移动"，0.4 s 的 60 fps 动画
+> 被 1.5 s 的空闲平均成 ~30 fps。按 draw 数过滤后，CC 动画自 10-31 起就是 ~16 ms/帧（§5.2）。
+> §3 的"30 fps 请求"在设备上确实存在并被丢弃（日志为证），但它不是 CC 动画的节拍源。
+> 真正遗留的是动画中偶发的 30–50 ms 掉拍，不是 2x 锁。§1 的旧结论以此为准。
+>
 > 相关：`RUNBOOK.md` 的 "State of play (2026-11-02, end of session)" 与 `docs/REA.zh-CN.md` 的 worked example。
 
 ## 1. 问题
@@ -27,7 +34,9 @@ Control Center 收起（89%,70% 窗口）稳定在 33.3 ms 一帧，即 30 fps�
 - **机制限制**：dyld interpose 到不了共享缓存内部的调用（os_variant interpose 从未触发）；
   vtable 补丁与 ObjC method replacement 是这里唯一有效的机制。
 
-结论：33.3 ms 不是"周期算错"，而是 CA 在按某个客户端请求的 30 fps 出帧。
+结论（**经 §5.2 更正**）：33.3 ms 不是"周期算错"；设备上确实存在一个 20..30 的客户端请求（§3），
+但 89%,70% 窗口的 28–30 fps 主要来自度量把空闲帧算进了平均——CC 动画本身是 ~16 ms/帧。
+这个窗口的旧数字不能再用作"2x 锁"的证据。
 
 ## 2. 生态调查（2026-11-02）
 
@@ -117,35 +126,81 @@ strings: "hakios: display links" / "UIViewInProcessAnimationManager" 均在
 sha256 `07d2f747fa2703a5c98ffb82496edd7ce890b4cd07ed4c9c0aafff8be61f22f3`，
 `check-image`：apfsck clean，apfs-tool 读回 135/135。
 
-## 5. 上机验证计划（待执行）
+## 5. 上机结果（2026-11-02 晚）
 
-手机接上后：
+两轮，同一镜像（`root-daily.apfs` sha256 `07d2f747…`，`mach.autotest`），只差一个 boot-arg：
 
-```bash
-ACE5_CPUS=8 python3 tools/ace5/phone.py --serial b4cf8812 run ... \
-  --kernel out/giulia-kernel/mach.autotest --root-image local/root-daily.apfs \
-  ACE5_CMDLINE="ca_vbl=1 fb_minint=1 touch_lat=1 touch_auto=45 touch_auto_exit=1 \
-                rec_secs=1200 rec_ring=1 rec_mb=256 rec_step=4"
+| run | boot args | 89%,70% 窗口（`--min-draws 40`） | all gestures |
+|---|---|---|---|
+| 20261102-183210 | `ca_vbl=1 fb_minint=1`（`dl_max=1`） | 46.1 fps / 21% / 9% | 1,064 步，>16.7 ms 2% |
+| 20261102-183813 | `ca_vbl=1 fb_minint=1 dl_max=0` | 50.4 fps / 15% / 6% | 1,276 步，>16.7 ms 8% |
+| 20261102-172655（补丁前基线） | 同上，旧 dylib | 51.9 fps / 9% / 5% | 1,146 步，>16.7 ms 2% |
+
+两轮都干净（0 PowerOff/panic，vsync armed 233/214）。
+
+### 5.1 机制确认：请求确实存在，也确实被丢弃
+
+`20261102-183210` 的日志（`grep hakios`）：
+
+```
+hakios: display links: made ok, fps ok, range ok; UIViewInProcessAnimationManager's at the panel's rate (dl_max=1)
+hakios: display link 0x280c51980 made for -[UIViewInProcessAnimationManager _displayLinkFire:] by UIKitCore+0x42fe34
+hakios: display link 0x280c51980 asked for 20..30, 0 a second (dropped) by UIKitCore+0x415d78
+hakios: display link 0x280c51910 made for -[SBHClockApplicationIconImageView _timerFired:] by SpringBoardHome+0x1d3bc
+hakios: display link 0x280c51910 asked for 10..120, 10 a second
 ```
 
-（`enter --stage kernel` → `ramdisk --image local/system-metal.apfs` 照常。backboardd 的 plist 里仍留着
-`CA_ENABLE_FRAME_RATE_ARBITRATION=0`——已测惰性，保留是为了与 17:26 基线单变量可比。）
+上游描述的 20..30 请求在设备上逐字出现，类名、调用者、丢弃都成立；时钟、UIEventFetcher 的 60、
+动效的 30 保持原样。**但帧率没有变化**：50.4 vs 46.1 fps 在 run 间噪声范围内（11-02 同日其他 run
+40.6–52.5）。（`dl_max=1` 甚至略低，一轮不足以定论；默认仍按上游保持 1。）
 
-判据：
+### 5.2 度量假象：89%,70% 窗口的 30 fps 不是动画的帧率
 
-1. 日志：`hakios: display links: made ok, fps ok, range ok`；至少一条
-   `display link ... made for -[UIViewInProcessAnimationManager ...]`；对应 `asked for 20..30 ... (dropped)`。
-2. `python tools/frames.py logs/giulia/<run>.log`：89%,70% 窗口 **≥55 fps、>16.7 ms <3%**。
-3. 无回归：拖拽 55–59 fps；无 PowerOff/panic/SIGSEGV；`vsync notifications armed` 仍在。
-4. 若 30 fps 请求来自别的类：按日志的 class + `image+offset` 扩展标记，再跑一轮。
+`tools/frames.py` 把相邻面板帧间隔 <100 ms 都算作"移动"。SpringBoard 动画结束后的空转提交
+每 ~82 ms 一帧、每帧只有 7–13 个 draw，落在 100 ms 阈值内，于是 0.4 s 的 60 fps 动画被 1.5 s 的空转
+平均成 ~30 fps。把 draw ≥40 的帧单独取出来（`--min-draws 40`，本次提交加入）：
 
-## 6. 成功之后的顺序
+| run | 动画帧中位间隔 | 结论 |
+|---|---|---|
+| 20261031-143416（注入回调修复前） | **33.4 ms**（94% >18 ms） | 唯一一次真正的 2x 锁 |
+| 20261101-191021（arm C） | 16.2 ms（17% >18 ms） | 已经是 60 fps |
+| 20261101-194032（A1，无 ca_vbl） | 16.0 ms（6% >18 ms） | 无通知流也是 60 fps |
+| 20261102-172655（基线） | 16.7 ms（4% >18 ms） | 60 fps |
+| 20261102-183210 / 183813 | 16.2 / 16.4 ms | 60 fps |
 
-1. **A/B `ca_vbl=0` + `dl_max=1`**：确认 no-op 通知流是否还需要。若不需要，可以去掉 ca_vbl 的注入面。
-2. **120 Hz 链路**：上游 10-31 的三件套（`publishModes` 的 2^-32 属性、`CADisableMinimumFrameDurationOnPhone`、
-   `fb_ca_hz`）。Ace 5 面板支持 120 Hz；这是独立的性能项，不与本轮混跑。
-3. **AlignPhase（`sub_1882AB034`）**：只在日志证明锁与 link 请求无关时再回到内联补丁。
-4. **Turnip WSI/CA bridge 与 Wi-Fi**：两个更大的方向；Wi-Fi 可照 K90 的 cnss2→ath12k→QRTR 链路。
+`local/mine-retract.py` 重放 10-31 `133820` 的"stall 窗口"也显示 16 ms 一帧、只有一个 32.7 ms 的掉拍。
+所以自 11-01 注入修复之后，"transition 2x 锁"在 89%,70% 窗口里不存在；这几天追的是度量。
+真正的 33.4 ms 只出现在 10-31 14:34 那一次（注入库已加载但回调 payload 还是旧版）。
+
+**遗留的是掉拍**：动画中偶发 30–50 ms 的帧（每轮 4–25%，run 间方差大），以及首次冷启动的
+38 fps 段（§5.3）。不是 2x 锁。
+
+### 5.3 用户报的"开一个软件马上回桌面开下一个"
+
+`redwood_input.c` 新增 boot-arg `touch_apps=N`（本次提交）：从 home 开始，点 dock 的四个图标
+（Phone/Safari/Messages/Music），隔 120–180 ms（打断动画中段）或 400–500 ms（动画完成后）上滑回桌面，
+共 N 轮。`touch_auto=45 touch_apps=12 touch_auto_exit=1` 一次 run 跑完并回 loader。
+
+结果（`20261102-190938`，120–180 ms 打断）：
+
+- 每次点击到画面第一处变化 **5–14 ms**（第一轮 166 ms，冷启动）。
+- 点击后的启动段 57–61 fps，>33 ms **0%**；回桌面的上滑 59–61 fps，>33 ms **0%**。
+- 唯一慢的是第一轮冷启动：9 帧 38.3 fps / 22% >16.7 ms。
+- 120 ms 打断时应用窗口还没出现（录屏：图标放大 → 回桌面）；400 ms 时应用已经出现
+  （Messages 的 "Shared with You" 在点击后约 320 ms 出现）。
+- **Music 三次 SIGSEGV**（`UIKitApplication:com.apple.Music … exited due to SIGSEGV`），
+  每次点 Music 都崩；这是应用自身的问题，不是帧率。
+
+## 6. 结论与下一步
+
+1. **2x transition 锁关闭（作为度量问题）**：`frames.py` 的窗口数字不再作为判据；
+   用 `--min-draws` 看动画本身。RUNBOOK 里 11-01/11-02 的"2x 锁 survives"结论按此更正。
+2. **display-link 补丁保留但默认不改行为**：它逐字验证了上游机制；是否默认 `dl_max=1` 需要
+   多轮 A/B（当前一轮 46 vs 50 fps，噪声内）。`dl_max=0` 可作对照。
+3. **真正的遗留**：动画中偶发掉拍 + 冷启动慢。下一步应在 `touch_lat=1` 的日志里找掉拍帧的
+   `idle before` 属于谁（SpringBoard 主线程还是窗口服务器），而不是继续找倍率。
+4. **Music 崩溃**单独记一笔：三次 SIGSEGV，和显示无关。
+5. 更大方向不变：Turnip WSI/CA bridge、Wi-Fi（K90 链路）、120 Hz（上游三件套）。
 
 ## 7. 参考
 
