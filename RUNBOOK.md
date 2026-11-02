@@ -2604,6 +2604,19 @@ The "release pin" reading above is wrong. Measured on the phone:
   callers (vtable/function pointer).
 - Next: name the source display (a2) and find where display+824 is set — the two
   operands of the ratio are the whole story of the 2x.
+- **The +824 period is never initialized by the ctor chain**: the AppleDisplay
+  ctor writes +808 (a dword) but nothing at +824, and the base ctor
+  `sub_188413AFC` (vtable 0x1D5B38230) does not either. So it is 0 (fresh pages)
+  or set by a later update path we have not decompiled. With +824 = 0 the
+  first-time block of copy_display_timings is skipped and the interval depends
+  on the source's interval and the ratio path — runtime values decide.
+- The class owning copy_display_timings: **vtable 0x1D5B37000** (26 slots,
+  header [0,0]; slot 4 = 0x1883c5adc; slots 0/18 are nulls; the methods are the
+  contiguous 0x1883c5ab0-0x1883c60fc region). No constructor in the text stores
+  that vptr (ADRP+ADD scan and 8-byte literal scan both empty) — the object is
+  built by a path we have not named (another image, or a template copy).
+- Static reading is done for this chain; the next evidence must be runtime: the
+  two intervals (this +824 and the source's state+4) on a live run.
 
 **Next device experiment (cheap, one variable)**
 
