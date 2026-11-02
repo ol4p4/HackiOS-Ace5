@@ -2362,3 +2362,63 @@ was found not-closed; IDA 9.3 attached via rea works again.
 - The global 0x1E1F6B720 (cap?) and +2168 (0x878) bool semantics.
 - The device side of the immutable check: a CA_PRINT_* style run, or an os_log
   capture, would tell whether the log fires on giulia at all.
+
+### The vtable mapped; the multiplier cluster; the A11 identity gate (2026-11-02, continued)
+
+All 119 slots of the AppleDisplay vtable were decompiled and the region decoded
+from the dylddata subcache.
+
+**Confirmed facts**
+
+- The vtable at 0x1D5B44530 is one class and runs to ~0x1D5B44CE0 (≈246 function
+  slots; slot N = 0x1d5b44530 + 8N). The header at vptr-16 is [0, 0] (RTTI
+  stripped), so the boundary is the long TEXT run, not a typeinfo walk.
+- Slot map (function pointers decoded from the cache, `raw & 0xFFFFFFFFF`):
+  - 31 / 33 / 35 / 45 (0x774 each): windowserver-iomfb-display.cpp,
+    `set_dmrr_enabled`, `CADeviceDMRRCapable()` — the base-class DMRR path.
+  - 49 = sub_188523160 (0x1344): the display swap loop that reads CA_VSYNC_OFF
+    (the RUNBOOK's earlier find) — a virtual method of this class.
+  - 83 / 84 = sub_188526E1C / sub_1885270C8 (0x788 each): display mode switch
+    ("Cannot switch display modes while powered off."); line 330 of both writes
+    `*(_QWORD *)(display + 560) = mode_word` — **+560 is the display mode/refresh
+    word**, written here.
+  - 89–94: the refresh multiplier cluster (slot 89 = 0x1882b5518, 90 =
+    0x1885275a4, 91 = 0x1882d3930 period, 92 = 0x1882b3ae0, 93 = 0x1883a3d7c,
+    94 = 0x18836dbe0). Slots 92/93 return max(n, MEMORY[0x1E1F6B720]) with
+    n = 1/2/4: n = 2 when +560 bit63 is set (or +2168 = 0), gated by +544 bit 4
+    (the same flag the period function uses to pick 2^-33 vs 2^-32). The global
+    0x1E1F6B720 is 0 in the shipped cache (all zeros 0x1e1f6b700-0x1e1f6b740).
+  - 98 = sub_18838DE64 references the notification name
+    com.apple.CoreAnimation.CAWindowServer.DisplayPower.
+- **No vtable slot writes +620 (the immutable bit 0x400)** — the setter is not a
+  virtual method of AppleDisplay; it is elsewhere (update/snapshot path).
+- `now` audit (source, MiniIOMobileFramebuffer.cpp:1256-1343): selector 72 =
+  kFBMethodNotifications stores fCallbacks/fRefcons; vsync() sends six 32-bit
+  halves = (callback, refcon, now) with now = fVSyncTime in mach_absolute_time
+  units (armVSync: mach_absolute_time + nanoseconds_to_absolutetime). The
+  completion dispatcher reads the first word as the function pointer; the third
+  word (time) is never consumed (B1), so the callback must call
+  mach_absolute_time itself — the "which clock/unit" question is answered for the
+  payload: mach_absolute_time, and it does not reach CA.
+
+**Inference — the A11 identity gate (important for the callback plan)**
+
+The driver comment (vsync(), 1313-1318) records that on the iPhone X identity
+QuartzCore registers the notification port and never the callback: Apple never
+ran its VBL callback path on A11. Our kernel is a real iPhone10,3 16.5 kernel, so
+CA's capability checks take the A11 branch. **The "real A12+ VBL callback"
+(RUNBOOK 2147-2150) may be unreachable under our device identity even if named** —
+the registration call site would only run on a newer-model capability. Two ways
+out: (a) find whether the gate is a model string or a capability bit we can flip
+for the CA process only; (b) keep the no-op stream and instead attack the
+multiplier/scheduling side.
+
+**Next device experiment (cheap, one variable)**
+
+The multiplier cluster is arbitration-adjacent and untested: the env-knob table
+already maps CA_ENABLE_ALL_FRAME_RATES=113 and CA_ENABLE_FRAME_RATE_ARBITRATION=114
+(RUNBOOK 2249-2259). On top of arm C, run `CA_ENABLE_FRAME_RATE_ARBITRATION=0`
+alone (judge: the 89%,70% window vs arm C 28.8 fps, the 33.3 ms lock, clock
+reads). If the lock is arbitration, this is the cheapest remaining lever; if
+inert like the other two, the multiplier path is closed and the display-link
+class (the timer that consumes slots 92/93) becomes the next static target.
