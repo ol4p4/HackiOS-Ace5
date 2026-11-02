@@ -1052,6 +1052,130 @@ control_center_fades(const char *arguments)
 }
 
 /*
+ * The frame rates SpringBoard's display links ask for.
+ *
+ * After a page of the home screen settles -- and after Control Center retracts -- something of
+ * SpringBoard's goes on drawing at exactly 30 a second for most of a second (its run loop and the
+ * window server's frames 33.3 ms apart, tl: a and tl: g). It is UIKit's: the display link of
+ * UIViewInProcessAnimationManager, which runs the animations done in the application's own process,
+ * asks CADisplayLink for 20..30. On an iPhone with ProMotion the lower rate saves power; here the
+ * panel refreshes at 60 whatever is drawn, so with dl_max=1 (the default) the rates asked of that
+ * one are dropped and it runs at the panel's rate. The other display links keep what they ask (the
+ * clock's 10 and 60, the motion effects' 32). touch_lat=1 says every display link made and every
+ * rate asked of one ("hakios: display link ..."), with the image and offset of the caller.
+ *
+ * Ported from oosexgang/hackios-xnu-kernel 7caa457 (2026-11-01): on the same iOS 16.5 line it took
+ * a home-screen swipe from 78 to 115 frames a second and the frames over 16.7 ms from 17% to 1%.
+ */
+typedef struct {
+	float minimum, maximum, preferred;
+} frame_rate_range;
+
+static id (*original_display_link_with)(id self, SEL selector, id target, SEL action);
+static void (*original_set_fps)(id self, SEL selector, long fps);
+static void (*original_set_range)(id self, SEL selector, frame_rate_range range);
+static bool dl_say, dl_max = true;
+static unsigned dl_said;
+
+#define DL_SAY_MAX 300
+#define DL_FULL_FOR "UIViewInProcessAnimationManager"
+static char dl_full;                    /* the key of the mark a display link made for DL_FULL_FOR carries */
+
+static const char *
+caller(const void *address, char *buffer, size_t size)
+{
+	Dl_info info;
+	const char *image;
+
+	if (dladdr(address, &info) == 0 || info.dli_fname == NULL) {
+		snprintf(buffer, size, "%p", address);
+		return buffer;
+	}
+	image = strrchr(info.dli_fname, '/') ? strrchr(info.dli_fname, '/') + 1 : info.dli_fname;
+	snprintf(buffer, size, "%s+%#lx", image, (unsigned long)((uintptr_t)address - (uintptr_t)info.dli_fbase));
+	return buffer;
+}
+
+/* a mark on the link itself: UIKit makes one of these for every animation, and a list of them filled up at once */
+static bool
+full_rate(id link)
+{
+	return dl_max && objc_getAssociatedObject(link, &dl_full) != NULL;
+}
+
+static id
+display_link_with(id self, SEL selector, id target, SEL action)
+{
+	id link = original_display_link_with(self, selector, target, action);
+	char who[256];
+
+	if (link != NULL && target != NULL && strcmp(object_getClassName(target), DL_FULL_FOR) == 0) {
+		objc_setAssociatedObject(link, &dl_full, (id)kCFBooleanTrue, OBJC_ASSOCIATION_ASSIGN);
+	}
+	if (dl_say && dl_said++ < DL_SAY_MAX) {
+		say("hakios: display link %p made for -[%s %s] by %s\n", (void *)link, target ? object_getClassName(target) : "nil",
+		    action ? sel_getName(action) : "", caller(__builtin_return_address(0), who, sizeof(who)));
+	}
+	return link;
+}
+
+static void
+set_fps(id self, SEL selector, long fps)
+{
+	char who[256];
+
+	if (dl_say && dl_said++ < DL_SAY_MAX) {
+		say("hakios: display link %p asked for %ld a second%s by %s\n", (void *)self, fps,
+		    full_rate(self) ? " (dropped)" : "", caller(__builtin_return_address(0), who, sizeof(who)));
+	}
+	original_set_fps(self, selector, full_rate(self) ? 0 : fps);
+}
+
+static void
+set_range(id self, SEL selector, frame_rate_range range)
+{
+	char who[256];
+
+	if (dl_say && dl_said++ < DL_SAY_MAX) {
+		say("hakios: display link %p asked for %.0f..%.0f, %.0f a second%s by %s\n", (void *)self, range.minimum,
+		    range.maximum, range.preferred, full_rate(self) ? " (dropped)" : "",
+		    caller(__builtin_return_address(0), who, sizeof(who)));
+	}
+	if (full_rate(self)) {
+		range = (frame_rate_range){ 0, 0, 0 };
+	}
+	original_set_range(self, selector, range);
+}
+
+static void
+display_link_rates(void)
+{
+	Class link = objc_getClass("CADisplayLink");
+	Method made, fps, range;
+
+	dl_say = boot_arg_is_set("touch_lat=1");
+	dl_max = !boot_arg_is_set("dl_max=0");
+	if (link == NULL) {
+		say("redwood: display links: CADisplayLink is not here\n");
+		return;
+	}
+	if (!dl_say && !dl_max) {
+		return;
+	}
+	if ((made = class_getClassMethod(link, sel_registerName("displayLinkWithTarget:selector:"))) != NULL) {
+		original_display_link_with = (id (*)(id, SEL, id, SEL))method_setImplementation(made, (IMP)display_link_with);
+	}
+	if ((fps = class_getInstanceMethod(link, sel_registerName("setPreferredFramesPerSecond:"))) != NULL) {
+		original_set_fps = (void (*)(id, SEL, long))method_setImplementation(fps, (IMP)set_fps);
+	}
+	if ((range = class_getInstanceMethod(link, sel_registerName("setPreferredFrameRateRange:"))) != NULL) {
+		original_set_range = (void (*)(id, SEL, frame_rate_range))method_setImplementation(range, (IMP)set_range);
+	}
+	say("hakios: display links: made %s, fps %s, range %s%s\n", made ? "ok" : "NO", fps ? "ok" : "NO", range ? "ok" : "NO",
+	    dl_max ? "; " DL_FULL_FOR "'s at the panel's rate (dl_max=1)" : "");
+}
+
+/*
  * Open the tweak loader of the package manager's prefix, when there is one. Nothing here depends on
  * it: without a prefix (or without ElleKit in it) the file is not there and this does nothing.
  */
@@ -1278,6 +1402,7 @@ redwood_springboard_init(void)
 	 * would go with it, holding exactly the sentence we wanted.
 	 */
 	setvbuf(stdout, NULL, _IONBF, 0);
+	display_link_rates();           /* before anything of SpringBoard's makes a display link */
 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
 	orig_display_period_sb = (double (*)(void *))replace_virtual_sb("SpringBoard display_period",
 	    VSLOT_SB(VT_APPLE_DISPLAY_SB, 0x2d8), 0x1882d3930UL, (void *) my_display_period_sb);
