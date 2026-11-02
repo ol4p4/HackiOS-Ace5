@@ -2545,6 +2545,32 @@ client display link (SpringBoard) is the cadence that actually locks.
   kdebug, or instrument the driver to timestamp the server's tick.
 Both need the phone; no further static step can separate them.
 
+### Correction (2026-11-02, measured): the frame-rate knobs are NOT pinned — they are live
+
+The "release pin" reading above is wrong. Measured on the phone:
+
+- `sub_188340DCC` (the writer of the global 0x1E1F6A1E8) has **no direct callers**
+  (xrefs 0), and the global stays 0, so the three getters return the environment
+  bytes. The interpose of os_variant_has_internal_content in
+  inject.c/inject_sb.c never fires (os_variant is never called); it stays in the
+  libraries, inert, and the constructor prints `REDWOOD_CA_UNLOCK=...` (the
+  plist environment channel is proven this way).
+- **Evidence**: adding CA_ENABLE_ALL_FRAME_RATES=1 and
+  CA_ENABLE_REDUCED_SERVER_VSYNC_RENDER=1 (backboardd + SpringBoard) **froze the
+  compositor** in two consecutive runs — one vsync arming, 2 GL frames, the
+  Apple logo left on the screen (not a panic: 0 real PowerOff/panic/SIGSEGV).
+  The same libraries with those two knobs removed render normally: 232 armings,
+  1,739 frames, CC window 30.4 fps / 33 % / 27 %, all gestures 1,467 steps 9 % / 2 %
+  (run 20261102-164733 — the working baseline with the new libraries).
+- Consequence: the earlier inert results (CA_VSYNC_OFF, velocity,
+  CA_ENABLE_FRAME_RATE_ARBITRATION=0) are real — those knobs reached CA and did
+  nothing. The knobs default to 0 (unset) and that is what every working run has
+  used.
+- **New clue**: REDUCED_SERVER_VSYNC_RENDER / ALL_FRAME_RATES = 1 stop the
+  display link outright. The server's vsync render path is load-bearing for the
+  frame clock; which of the two does it, and what the freeze leaves running, is
+  the next one-knob-per-run question.
+
 **Next device experiment (cheap, one variable)**
 
 The multiplier cluster is arbitration-adjacent and untested: the env-knob table
