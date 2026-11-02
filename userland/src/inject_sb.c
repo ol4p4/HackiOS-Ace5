@@ -1180,6 +1180,46 @@ my_display_multiplier_sb(void *display)
 	return multiplier;
 }
 
+#define VT_DISPLAY_TIMINGS_SB   0x1d5b36ff0UL   /* the 26-slot class whose slot 4 is copy_display_timings */
+
+static void *orig_copy_display_timings_sb;
+
+/*
+ * copy_display_timings, SpringBoard's copy: the link's heartbeat is
+ * round(this interval / source interval) * source interval (RUNBOOK.md), and a
+ * 2x mismatch is the 2x transition lock. Log the three values, and force the
+ * ratio to 1 — the heartbeat becomes the source's interval. If the app side is
+ * the 2x, this is the fix; if the values are equal, nothing changes.
+ */
+static void *
+my_copy_display_timings_sb(void *self, void *source)
+{
+	void *result = ((void *(*)(void *, void *))orig_copy_display_timings_sb)(self, source);
+	void *display = self != NULL ? *(void **)((char *)self + 96) : NULL;
+	void *src_display = source != NULL ? *(void **)((char *)source + 96) : NULL;
+	void *state = display != NULL ? *(void **)((char *)display + 960) : NULL;
+	void *src_state = src_display != NULL ? *(void **)((char *)src_display + 960) : NULL;
+	double period = display != NULL ? *(double *)((char *)display + 824) : 0.0;
+	unsigned int interval = state != NULL ? *(unsigned int *)((char *)state + 4) : 0;
+	unsigned int src_interval = src_state != NULL ? *(unsigned int *)((char *)src_state + 4) : 0;
+	static double said_period = -1.0;
+	static unsigned int said_interval, said_src_interval;
+
+	if (period != said_period || interval != said_interval || src_interval != said_src_interval) {
+		said_period = period;
+		said_interval = interval;
+		said_src_interval = src_interval;
+		say("redwood: SpringBoard copy_display_timings: this period %.9f s, this interval %u, source interval %u\n",
+		    period, interval, src_interval);
+	}
+	if (state != NULL && src_interval != 0 && interval != src_interval) {
+		*(unsigned int *)((char *)state + 4) = src_interval;
+		say("redwood: SpringBoard copy_display_timings: interval forced %u -> %u (the source's)\n",
+		    interval, src_interval);
+	}
+	return result;
+}
+
 __attribute__((constructor))
 static void
 redwood_springboard_init(void)
@@ -1243,6 +1283,8 @@ redwood_springboard_init(void)
 	    VSLOT_SB(VT_APPLE_DISPLAY_SB, 0x2d8), 0x1882d3930UL, (void *) my_display_period_sb);
 	orig_display_multiplier_sb = (unsigned int (*)(void *))replace_virtual_sb("SpringBoard display_multiplier",
 	    VSLOT_SB(VT_APPLE_DISPLAY_SB, 0x2e0), 0x1882b3ae0UL, (void *) my_display_multiplier_sb);
+	orig_copy_display_timings_sb = replace_virtual_sb("SpringBoard copy_display_timings",
+	    VSLOT_SB(VT_DISPLAY_TIMINGS_SB, 0x20), 0x1883c5adcUL, (void *) my_copy_display_timings_sb);
 	activation = replace_method("SBLockdownManager", "_setupActivationState", 0x1c4bc8dfcUL, (IMP)setup_activation_state);
 	_dyld_register_func_for_add_image(image_added);         /* Siri's orb, whose framework comes late */
 	original_set_setup_required_reason = (void (*)(id, SEL, long))replace_method("SBSetupManager",

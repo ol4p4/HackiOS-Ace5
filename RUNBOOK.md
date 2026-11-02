@@ -2640,6 +2640,22 @@ The "release pin" reading above is wrong. Measured on the phone:
   branches straight into the other) — that is why the os_variant interpose never
   fired. Vtable patches and ObjC method replacement are the working mechanisms.
 
+### The SpringBoard timings path is not used either (2026-11-02, measured)
+
+- copy_display_timings patched in SpringBoard (inject_sb.c, slot 4 of
+  0x1D5B37000) with a wrapper that logs the three values and forces the interval
+  to the source's (ratio 1): the wrapper fired **zero** times in a healthy run
+  (1,735 frames). The app never calls it.
+- So the app's display-link cadence does not come from copy_display_timings
+  either. With the server-side measurement (period 0.016666667 s, multiplier 1),
+  the interval chain is exonerated on both sides.
+- The forced-ratio fix is therefore inert (kept in the libraries, documented; it
+  would act if the path ever runs).
+- Remaining candidates for the transition cadence: the AlignPhase scheduling
+  (sub_1882AB034 — direct calls, no vtable slot; needs inline code patching) and
+  the app's actual display-link class (not AppleDisplay, not the 0x1D5B37000
+  class).
+
 **Next device experiment (cheap, one variable)**
 
 The multiplier cluster is arbitration-adjacent and untested: the env-knob table
