@@ -16,6 +16,7 @@
 | [构建与启动教程](docs/BUILD.zh-CN.md) | 依赖、XNU、Mesa/Metal、系统镜像、RAM 启动 |
 | [UEFI 项目与完整教程](docs/UEFI.zh-CN.md) | Mu-Silicium 链接、固定版本、giulia 编译与打包、诊断/内核模式 |
 | [功能与验证记录](docs/STATUS.zh-CN.md) | 真机结果、测试边界、帧率数据与已知问题 |
+| [显示链路与帧率](docs/DISPLAY-LINK.zh-CN.md) | transition 2x 锁的调查、生态调查与上游 display-link 解法 |
 | [操作与恢复](docs/RECOVERY.zh-CN.md) | 备份、日志、退出 iOS、USB 丢失、CrashDump |
 | [架构与开发](docs/DEVELOPMENT.zh-CN.md) | 源码分层、测试入口、提交规范 |
 | [发布范围与清理记录](docs/RELEASE.zh-CN.md) | 基线版本、排除内容、发布检查 |

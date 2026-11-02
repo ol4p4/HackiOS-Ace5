@@ -2703,3 +2703,50 @@ The "release pin" reading above is wrong. Measured on the phone:
 
 **Phone**: back in Android; loader workflow unchanged (enter → ramdisk → run;
 `oem stop` returns the kernel early; the resident system disk survives runs).
+
+### The transition lock: the app asks for 30 a second (2026-11-02 evening)
+
+The ecosystem survey (full write-up: [docs/DISPLAY-LINK.zh-CN.md](docs/DISPLAY-LINK.zh-CN.md))
+found the answer upstream, on the same iOS 16.5 line: `oosexgang/hackios-xnu-kernel`
+`7caa457` (2026-11-01 06:05Z) traced the 0.7 s of 33.3 ms frames after a home-screen
+swipe to **UIKit's `UIViewInProcessAnimationManager` display link asking CADisplayLink
+for 20..30**; dropping the rates asked of that one link took the swipe from 78 to 115
+fps and the frames over 16.7 ms from 17% to 1% (+126 lines, `userland/src/inject_sb.c`
+only). Our 33.3 ms retract window is the same signature: 30 fps × the 60 Hz panel is
+the multiplier-2 the AppleDisplay vtable cluster returns.
+
+Ported into `userland/src/inject_sb.c` with attribution (new block after
+`control_center_fades()`, called from `redwood_springboard_init()` right after
+`setvbuf()`):
+
+- `+[CADisplayLink displayLinkWithTarget:selector:]` marks links whose target is
+  `UIViewInProcessAnimationManager`; `-setPreferredFramesPerSecond:` and
+  `-setPreferredFrameRateRange:` pass 0 / {0,0,0} for a marked link and the original
+  value for every other (the clock's 10 and 60, the motion effects' 32).
+- `touch_lat=1` prints every link made and every rate asked, with the caller as
+  `image+offset` (300 lines max). `dl_max=0` is the control; the default drops.
+- `anim_max` (upstream `3639b98`) is NOT ported: its commit says OpenGL ES is
+  unaffected, and it would contend with `cc_fade` for `addAnimation:forKey:`.
+
+Built with the new `local/wsl/build-sb.sh` (only this dylib; the compile line is
+`userland/build.sh:293`'s): `obj/libredwood-sb.dylib` 90,904 bytes. `local/root-daily.apfs`
+repacked with the manifest (135 entries), sha256 `07d2f747…`, check-image apfsck clean
+and 135/135 read back. **Not yet run on the phone** (it was not connected).
+
+The prepared run is one variable on top of the 17:26 baseline (the backboardd plist's
+inert `CA_ENABLE_FRAME_RATE_ARBITRATION=0` stays, for comparability):
+
+```
+ACE5_CPUS=8 python3 tools/ace5/phone.py --serial b4cf8812 run ... \
+  --kernel out/giulia-kernel/mach.autotest --root-image local/root-daily.apfs \
+  ACE5_CMDLINE="ca_vbl=1 fb_minint=1 touch_lat=1 touch_auto=45 touch_auto_exit=1 \
+                rec_secs=1200 rec_ring=1 rec_mb=256 rec_step=4"
+```
+
+Judge: the three log lines (`display links: made ok, fps ok, range ok`;
+`display link ... made for -[UIViewInProcessAnimationManager ...]`;
+`asked for 20..30 ... (dropped)`), then `tools/frames.py` — the 89%,70% window at
+**≥55 fps with under 3 % over 16.7 ms** (baseline 28.9–30.4 fps / 32–33 %), drags
+55–59, health clean. If a different class asks for 30, the log names it with
+`image+offset`; extend the mark rather than guess.
+
