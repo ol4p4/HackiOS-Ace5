@@ -37,6 +37,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <notify.h>
 #include <objc/message.h>
@@ -1071,6 +1072,114 @@ load_tweaks(void)
 	}
 }
 
+/*
+ * SpringBoard's half of the CoreAnimation frame-rate unlock (inject.c has the
+ * whole story): the release build pins CA_ENABLE_ALL_FRAME_RATES,
+ * CA_ENABLE_FRAME_RATE_ARBITRATION and CA_ENABLE_REDUCED_SERVER_VSYNC_RENDER on
+ * through !os_variant_has_internal_content("com.apple.coreanimation"), so the
+ * environment never reaches them. REDWOOD_CA_UNLOCK=1 answers that one domain
+ * "internal" and the knobs work. Domain-scoped; everything else passes through.
+ */
+extern bool os_variant_has_internal_content(const char *domain);
+
+static bool (*orig_os_variant_has_internal_content_sb)(const char *domain);
+
+static bool
+my_os_variant_has_internal_content_sb(const char *domain)
+{
+	static int unlocked = -1;
+
+	if (unlocked < 0) {
+		unlocked = getenv("REDWOOD_CA_UNLOCK") != NULL;
+	}
+	if (unlocked && domain != NULL && strcmp(domain, "com.apple.coreanimation") == 0) {
+		static int said;
+
+		if (!said) {
+			said = 1;
+			say("redwood: CA unlock: os_variant_has_internal_content(com.apple.coreanimation) is answered internal\n");
+		}
+		return true;
+	}
+	if (orig_os_variant_has_internal_content_sb == NULL) {
+		orig_os_variant_has_internal_content_sb =
+		    (bool (*)(const char *))dlsym(RTLD_NEXT, "os_variant_has_internal_content");
+	}
+	return orig_os_variant_has_internal_content_sb != NULL &&
+	    orig_os_variant_has_internal_content_sb(domain);
+}
+
+static const struct {
+	const void *replacement;
+	const void *replacee;
+} ca_unlock_interpose_sb[]
+__attribute__((used, section("__DATA,__interpose"))) = {
+	{ (const void *) my_os_variant_has_internal_content_sb,
+	  (const void *) os_variant_has_internal_content },
+};
+
+/* Replace one entry of a virtual table (unslid `slot`) that must now hold `expected` (inject.c's helper). */
+static void *
+replace_virtual_sb(const char *what, uintptr_t slot, uintptr_t expected, void *replacement)
+{
+	uintptr_t *entry = (uintptr_t *)(slot + slide);
+	vm_address_t page = (vm_address_t)entry & ~(vm_address_t)(vm_page_size - 1);
+	kern_return_t kr;
+	void *original;
+
+	if (*entry != expected + slide) {
+		say("redwood: %s: found %#lx, expected %#lx; left alone\n", what, *entry - slide, expected);
+		return NULL;
+	}
+	kr = vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+	if (kr != KERN_SUCCESS) {
+		say("redwood: %s: cannot make the table writable (%d)\n", what, kr);
+		return NULL;
+	}
+	original = (void *)*entry;
+	*entry = (uintptr_t)replacement;
+	vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ);
+	return original;
+}
+
+#define VT_APPLE_DISPLAY_SB     0x1d5b44520UL   /* the display vtable inject.c also patches */
+#define VSLOT_SB(vtable, offset) ((vtable) + 0x10 + (offset))
+
+static double (*orig_display_period_sb)(void *display);
+static unsigned int (*orig_display_multiplier_sb)(void *display);
+
+/*
+ * SpringBoard's half of the interval probe: the display link's interval is
+ * period (slot 0x2d8) x multiplier (slot 0x2e0). The window server's own values
+ * measured 0.016666667 s x 1; this says whether the app process agrees.
+ */
+static double
+my_display_period_sb(void *display)
+{
+	double period = orig_display_period_sb(display);
+	static double said = -1.0;
+
+	if (period != said) {
+		said = period;
+		say("redwood: SpringBoard display period %.9f s (%s%.3f Hz)\n", period,
+		    period > 0.0 ? "" : "?", period > 0.0 ? 1.0 / period : 0.0);
+	}
+	return period;
+}
+
+static unsigned int
+my_display_multiplier_sb(void *display)
+{
+	unsigned int multiplier = orig_display_multiplier_sb(display);
+	static unsigned int said = 0xFFFFFFFFU;
+
+	if (multiplier != said) {
+		said = multiplier;
+		say("redwood: SpringBoard display multiplier %u\n", multiplier);
+	}
+	return multiplier;
+}
+
 __attribute__((constructor))
 static void
 redwood_springboard_init(void)
@@ -1082,6 +1191,11 @@ redwood_springboard_init(void)
 
 	if (name == NULL) {
 		return;
+	}
+	{
+		const char *unlock = getenv("REDWOOD_CA_UNLOCK");
+
+		say("redwood: CA unlock: REDWOOD_CA_UNLOCK=%s\n", unlock != NULL ? unlock : "(unset)");
 	}
 	if (strcmp(name, "SpringBoard") != 0) {
 		static char who[64];
@@ -1125,6 +1239,10 @@ redwood_springboard_init(void)
 	 */
 	setvbuf(stdout, NULL, _IONBF, 0);
 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
+	orig_display_period_sb = (double (*)(void *))replace_virtual_sb("SpringBoard display_period",
+	    VSLOT_SB(VT_APPLE_DISPLAY_SB, 0x2d8), 0x1882d3930UL, (void *) my_display_period_sb);
+	orig_display_multiplier_sb = (unsigned int (*)(void *))replace_virtual_sb("SpringBoard display_multiplier",
+	    VSLOT_SB(VT_APPLE_DISPLAY_SB, 0x2e0), 0x1882b3ae0UL, (void *) my_display_multiplier_sb);
 	activation = replace_method("SBLockdownManager", "_setupActivationState", 0x1c4bc8dfcUL, (IMP)setup_activation_state);
 	_dyld_register_func_for_add_image(image_added);         /* Siri's orb, whose framework comes late */
 	original_set_setup_required_reason = (void (*)(id, SEL, long))replace_method("SBSetupManager",

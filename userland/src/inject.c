@@ -38,6 +38,7 @@
 #include <objc/runtime.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,6 +103,7 @@ replace_virtual(const char *what, uintptr_t slot, uintptr_t expected, void *repl
 
 #define VT_APPLE_CLCD_DISPLAY   0x1d5b44520UL   /* vtable for CA::WindowServer::AppleCLCDDisplay */
 #define VT_EAGL_SERVER          0x1d5b45c58UL   /* vtable for CA::WindowServer::EAGLServer */
+#define VT_DISPLAY_TIMINGS      0x1d5b36ff0UL   /* the 26-slot class whose slot 4 is copy_display_timings */
 #define VSLOT(vtable, offset)   ((vtable) + 0x10 + (offset))
 
 #define DISPLAY_FLAGS(display)  (*(uint64_t *)((char *)(display) + 0x9f2))
@@ -626,6 +628,74 @@ window_server_keeps_opengl_es(void)
 	method_setImplementation(method, (IMP)my_detect_displays);
 }
 
+static void *orig_copy_display_timings;
+
+/*
+ * copy_display_timings (slot 4 of VT_DISPLAY_TIMINGS): the display link's
+ * heartbeat is round(this interval / source interval) * source interval, so a
+ * 2x period mismatch between two displays is the 2x lock (RUNBOOK.md). Log the
+ * operands once per change — this display's period at +824, its link interval
+ * (state+4) and the source's — then let the original do its work.
+ */
+static void *
+my_copy_display_timings(void *self, void *source)
+{
+	void *result = ((void *(*)(void *, void *))orig_copy_display_timings)(self, source);
+	void *display = self != NULL ? *(void **)((char *)self + 96) : NULL;
+	void *src_display = source != NULL ? *(void **)((char *)source + 96) : NULL;
+	void *state = display != NULL ? *(void **)((char *)display + 960) : NULL;
+	void *src_state = src_display != NULL ? *(void **)((char *)src_display + 960) : NULL;
+	double period = display != NULL ? *(double *)((char *)display + 824) : 0.0;
+	unsigned int interval = state != NULL ? *(unsigned int *)((char *)state + 4) : 0;
+	unsigned int src_interval = src_state != NULL ? *(unsigned int *)((char *)src_state + 4) : 0;
+	static double said_period = -1.0;
+	static unsigned int said_interval, said_src_interval;
+
+	if (period != said_period || interval != said_interval || src_interval != said_src_interval) {
+		said_period = period;
+		said_interval = interval;
+		said_src_interval = src_interval;
+		say("redwood: copy_display_timings: this period %.9f s, this interval %u, source interval %u\n",
+		    period, interval, src_interval);
+	}
+	return result;
+}
+
+static double (*orig_display_period)(void *display);
+static unsigned int (*orig_display_multiplier)(void *display);
+
+/*
+ * The two factors of the display link's interval (slot 91 period x slot 92
+ * multiplier; the multiplier cancels the period halving statically, RUNBOOK.md).
+ * Log each once per change — this is the 2x arithmetic live.
+ */
+static double
+my_display_period(void *display)
+{
+	double period = orig_display_period(display);
+	static double said = -1.0;
+
+	if (period != said) {
+		said = period;
+		say("redwood: display period %.9f s (%s%.3f Hz)\n", period,
+		    period > 0.0 ? "" : "?", period > 0.0 ? 1.0 / period : 0.0);
+	}
+	return period;
+}
+
+static unsigned int
+my_display_multiplier(void *display)
+{
+	unsigned int multiplier = orig_display_multiplier(display);
+	static unsigned int said = 0xFFFFFFFFU;
+
+	if (multiplier != said) {
+		said = multiplier;
+		say("redwood: display multiplier %u\n", multiplier);
+	}
+	return multiplier;
+}
+
 static void
 window_server_fixes(void)
 {
@@ -637,6 +707,12 @@ window_server_fixes(void)
 	    my_begin_update);
 	orig_finish_update = replace_virtual("finish_update", VSLOT(VT_APPLE_CLCD_DISPLAY, 0x178), 0x1882c8568UL,
 	    my_finish_update);
+	orig_copy_display_timings = replace_virtual("copy_display_timings", VSLOT(VT_DISPLAY_TIMINGS, 0x20),
+	    0x1883c5adcUL, (void *) my_copy_display_timings);
+	orig_display_period = (double (*)(void *))replace_virtual("display_period",
+	    VSLOT(VT_APPLE_CLCD_DISPLAY, 0x2d8), 0x1882d3930UL, (void *) my_display_period);
+	orig_display_multiplier = (unsigned int (*)(void *))replace_virtual("display_multiplier",
+	    VSLOT(VT_APPLE_CLCD_DISPLAY, 0x2e0), 0x1882b3ae0UL, (void *) my_display_multiplier);
 	orig_renderer = replace_virtual("renderer", VSLOT(VT_EAGL_SERVER, 0x1a0), 0x1882e2548UL, my_renderer);
 	orig_render_update = replace_virtual("render_update", VSLOT(VT_EAGL_SERVER, 0x178), 0x18835770cUL,
 	    my_render_update);
@@ -1260,6 +1336,54 @@ __attribute__((used, section("__DATA,__interpose"))) = {
 	  (const void *) IOConnectSetNotificationPort },
 };
 
+/*
+ * The release build pins CoreAnimation's frame-rate switches on: sub_188340DCC
+ * stores !os_variant_has_internal_content("com.apple.coreanimation") into the
+ * global that the CA_ENABLE_ALL_FRAME_RATES / CA_ENABLE_FRAME_RATE_ARBITRATION /
+ * CA_ENABLE_REDUCED_SERVER_VSYNC_RENDER getters OR in, so on a release IPSW the
+ * environment bytes never matter (see RUNBOOK.md, "the frame-rate knobs are
+ * pinned on release builds"). REDWOOD_CA_UNLOCK=1 answers that one domain
+ * "internal": the global becomes 0 and the knobs are the switches they were
+ * meant to be. Domain-scoped, everything else passes through.
+ */
+extern bool os_variant_has_internal_content(const char *domain);
+
+static bool (*orig_os_variant_has_internal_content)(const char *domain);
+
+static bool
+my_os_variant_has_internal_content(const char *domain)
+{
+	static int unlocked = -1;
+
+	if (unlocked < 0) {
+		unlocked = getenv("REDWOOD_CA_UNLOCK") != NULL;
+	}
+	if (unlocked && domain != NULL && strcmp(domain, "com.apple.coreanimation") == 0) {
+		static int said;
+
+		if (!said) {
+			said = 1;
+			say("redwood: CA unlock: os_variant_has_internal_content(com.apple.coreanimation) is answered internal\n");
+		}
+		return true;
+	}
+	if (orig_os_variant_has_internal_content == NULL) {
+		orig_os_variant_has_internal_content =
+		    (bool (*)(const char *))dlsym(RTLD_NEXT, "os_variant_has_internal_content");
+	}
+	return orig_os_variant_has_internal_content != NULL &&
+	    orig_os_variant_has_internal_content(domain);
+}
+
+static const struct {
+	const void *replacement;
+	const void *replacee;
+} ca_unlock_interpose[]
+__attribute__((used, section("__DATA,__interpose"))) = {
+	{ (const void *) my_os_variant_has_internal_content,
+	  (const void *) os_variant_has_internal_content },
+};
+
 __attribute__((constructor))
 static void
 redwood_init(void)
@@ -1270,6 +1394,11 @@ redwood_init(void)
 
 	if (name == NULL || cache == NULL) {
 		return;
+	}
+	{
+		const char *unlock = getenv("REDWOOD_CA_UNLOCK");
+
+		say("redwood: CA unlock: REDWOOD_CA_UNLOCK=%s\n", unlock != NULL ? unlock : "(unset)");
 	}
 	slide = (uintptr_t)cache - CACHE_BASE;
 	if (strcmp(name, "backboardd") == 0) {

@@ -2618,6 +2618,28 @@ The "release pin" reading above is wrong. Measured on the phone:
 - Static reading is done for this chain; the next evidence must be runtime: the
   two intervals (this +824 and the source's state+4) on a live run.
 
+### The interval arithmetic measured live (2026-11-02): 60 Hz x 1, not 2x
+
+- vtable probes in inject.c (backboardd): AppleDisplay slot 0x2d8 (period) and
+  slot 0x2e0 (multiplier), logging once per change. On the working config:
+  **`display period 0.016666667 s (60.000 Hz)`, `display multiplier 1`** — the
+  display link's interval is 16.66 ms. The 2x is NOT in the period/multiplier
+  arithmetic.
+- The same probe in inject_sb.c (SpringBoard) fired **zero** times (and the
+  patch reported no mismatch): the app process never calls those AppleDisplay
+  slots — its display proxy is a different class, so the app-side cadence does
+  not come from this vtable.
+- The copy_display_timings probe (slot 4 of vtable 0x1D5B37000) also fired zero
+  times in a healthy run — that function is not on our boot path either.
+- Consequence: the 2x lock is downstream of the display interval — the app-side
+  commit cadence (SpringBoard's render loop / its display proxy) or the
+  AlignPhase scheduling, not the display period, multiplier, or the
+  copy_display_timings ratio.
+- Mechanism note (inject_sb.c's own comment, now confirmed twice): dyld
+  interposing does not reach calls made inside the shared cache (one library
+  branches straight into the other) — that is why the os_variant interpose never
+  fired. Vtable patches and ObjC method replacement are the working mechanisms.
+
 **Next device experiment (cheap, one variable)**
 
 The multiplier cluster is arbitration-adjacent and untested: the env-knob table
