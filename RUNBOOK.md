@@ -2583,6 +2583,28 @@ The "release pin" reading above is wrong. Measured on the phone:
     different rate. The 2x transition lock is a *constrained* choice of that
     same machinery; the unconstrained one is worse (zero).
 
+### copy_display_timings: the link interval is an integer ratio between displays (2026-11-02, static)
+
+- `sub_1883C5ADC` ("copy_display_timings: unexpected state (source: %x, this: %x)")
+  builds and updates the display link's 64-byte timing state at display+960:
+  - First time: `state+4 (interval) = sub_1882AAFC0(*(double *)(display+824))` —
+    the display's period (seconds) converted to timer units; display+956 marks it
+    initialized.
+  - Then it compares with a **source display** (a2+96): `v12 = source interval`,
+    `v13 = this interval`; if they are nearly an integer multiple
+    (`max % min` within `min>>5`), it sets `v16 = round(v13/v12)` (or
+    `1/round(v12/v13)`), stores it at display+972, and
+    `state+4 = (u32)(v16 * v12)`.
+  - **So the link's heartbeat is an integer multiple of the source's interval: a
+    2x period mismatch between the two displays produces exactly the 2x lock.**
+    The AlignPhase (previous section) consumes this state+4 interval.
+- The writer of display+824 is not the AppleDisplay ctor and not among the 15
+  direct stores at offset 824 in the scanned text (none in the ctor or the link
+  code); likely a struct copy or another image. `sub_1883C5ADC` has no direct
+  callers (vtable/function pointer).
+- Next: name the source display (a2) and find where display+824 is set — the two
+  operands of the ratio are the whole story of the 2x.
+
 **Next device experiment (cheap, one variable)**
 
 The multiplier cluster is arbitration-adjacent and untested: the env-knob table
