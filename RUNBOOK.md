@@ -2286,3 +2286,79 @@ Caveat, recorded honestly: the env channel itself is proven (FD_MESA_DEBUG,
 evidence; a CA_PRINT_* run would witness it if a future experiment depends on
 these knobs. Root volume for the last run: sha256 9fe65f9d… (plist carries the
 velocity knob; revert to no CA_* key for the daily recipe).
+
+### The AppleDisplay class named; the refresh-multiplier cluster; the immutable-display check (2026-11-02)
+
+The QuartzCore database was rebuilt cleanly (`run-quartzcore-full.cmd`, idat -A,
+input `quartzcore.text.bin`, 14,916 functions, imagebase 0) after the old .i64
+was found not-closed; IDA 9.3 attached via rea works again.
+
+**Confirmed facts (addresses, code, bytes)**
+
+- **Vtable 0x1D5B44530 = CA::WindowServer::AppleDisplay.** The factory
+  `sub_1883A618C` (0x1883a618c; the old 0x1883a6380 is inside its tail) walks
+  IOKit display services (`IOServiceMatching`/`GetMatchingServices`/`IteratorNext`
+  thunks at 0x18DBB81E4/0x18DBB62D0/0x18DBB62F4), matches the transport type via
+  "external" (type 1) / "wireless" (type 2), allocates 2848 bytes
+  (`MEMORY[0x18DBB90E4]`), calls the constructor `sub_1883A3EB0`, stores
+  `*result = 0x1D5B44530`, and zeroes `result[355]` = **+0xB18** — the exact cache
+  the period function reads. The constructor references
+  "windowserver-apple-display.cpp", the kIOMFB* keys
+  (kIOMFBSourceSurfaceWidth/HeightLimitKey, kIOMFBSourceRectangleLimit*,
+  kIOMFBMaxCompressedSizeInBytes, kIOMFBSourceLimitsKey), CA_RESIZE_YUV_SCALE and
+  CA_MAIN_DISPLAY_ORIENTATION. The second constructor `sub_1883A6468` (0x1883a6468;
+  old 0x1883a64dc inside it) asserts "index <= count ()" at
+  windowserver-apple-display.cpp:2622, dispatch_once-installs vtable **0x1D5B444E0**,
+  and calls the same factory with type 2 — a sibling AppleDisplay variant.
+- **Vtable decode.** Slots in the dylddata subcache (dyld_shared_cache_arm64.27)
+  are chained fixups: raw slot & 0x1FFFFFFFF = target address (each raw is
+  `0x2_00000000 | addr`; e.g. 0x1d5b44808 → 0x201882d3930 → sub_1882D3930, which
+  confirms the RUNBOOK's period-function claim). Slot N = 0x1d5b44530 + 8N.
+- **Neighbour slots around the period function are the refresh-rate multiplier
+  cluster** (all decompiled, all vtable-dispatched):
+  - slot 88 = 0x188527514, slot 89 = 0x1882b5518, slot 90 = 0x1885275a4,
+    slot 91 = 0x1882d3930 (period), slot 92 = 0x1882b3ae0,
+    slot 93 = 0x1883a3d7c, slot 94 = 0x18836dbe0.
+  - slot 89: `if (byte[556]==1 && qword[560]==-1) return period() * slot92();`
+    else slot88() — a derived period.
+  - slot 90: `if (dword[544]&0x10 && sub_18839345C()) { if (!slot15()) slot94();
+    period(); } else slot89();`
+  - slot 92: `if (dword[544]&0x10 && qword[560] bit63) n = dword[2168] ? 4 : 2;
+    return max(n, MEMORY[0x1E1F6B720]);` else slot93().
+  - slot 93: `n = 1; if (dword[544]&0x10) n = (qword[560] >= 0) ? 1 : 2;
+    return max(n, MEMORY[0x1E1F6B720]);`
+  - Inference: this is CA's frame-rate / refresh multiplier (1x/2x/4x) capped by
+    the global word 0x1E1F6B720; +544 bit 0x10 is the same flag the period
+    function uses to pick the 2^-33 vs 2^-32 constant. The "2x" language matches
+    our 33.3 ms lock — the lock may be arbitration, not a missing stream.
+- **The immutable-display check in the CADisplayLink creation path**
+  (`sub_18829E6D0`, 0x18829e6d0):
+  `if ( (*(_WORD *)(*(_QWORD *)(v53 + 8) + 620LL) & 0x400) != 0 )` logs
+  "CADisplayLink is created from an immutable display (display_id = %u) and will
+  not receive vsync timings." (two channels, 0x188572b4c / 0x18859a206).
+  Related strings: "cannot change properties on an immutable CADisplay",
+  "cannot update immutable CADisplay", "immutableCopy",
+  "CADisplayLink: reload_item, item does not exist",
+  "CADisplayLink: new link for external display id %u",
+  "AGX vsync hints will track display %u with %u Hz refresh rate".
+  Callers: `sub_188351F10` (refcount wrapper — releases the link when the result's
+  byte+12 != 1, i.e. immutable links are dropped) and `sub_188363D1C` (display
+  enumeration). Inference: a display flagged at +0x26C bit 0x400 yields a display
+  link with no vsync timings — the shape of our fallback. Whether our AppleDisplay
+  gets the bit is unknown; the device logs do not contain the string (userspace
+  os_log is probably not captured by our runs).
+
+**Unknown / next**
+
+- Who sets +0x26C bit 0x400: not in the AppleDisplay constructor (no write to
+  620 found in 1581 decompiled lines); likely an update/snapshot path or the ObjC
+  CADisplay immutable copy. The ObjC method-name strings have no code xrefs
+  (metadata only), so the setter needs the display-update functions.
+- The per-frame "completed/presented" bookkeeping is NOT in the AppleDisplay
+  vtable neighbours — it must live in the display-link class whose timer locks.
+  Next targets: the two link-creation callers (0x188351f18 done — a refcount
+  wrapper; 0x188363fa8 = sub_188363D1C, 0x2dc, display enumeration) and the
+  timer object they attach.
+- The global 0x1E1F6B720 (cap?) and +2168 (0x878) bool semantics.
+- The device side of the immutable check: a CA_PRINT_* style run, or an os_log
+  capture, would tell whether the log fires on giulia at all.
