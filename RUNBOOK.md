@@ -2656,12 +2656,50 @@ The "release pin" reading above is wrong. Measured on the phone:
   the app's actual display-link class (not AppleDisplay, not the 0x1D5B37000
   class).
 
-**Next device experiment (cheap, one variable)**
+## State of play (2026-11-02, end of session)
 
-The multiplier cluster is arbitration-adjacent and untested: the env-knob table
-already maps CA_ENABLE_ALL_FRAME_RATES=113 and CA_ENABLE_FRAME_RATE_ARBITRATION=114
-(RUNBOOK 2249-2259). On top of arm C, run `CA_ENABLE_FRAME_RATE_ARBITRATION=0`
-alone (judge: the 89%,70% window vs arm C 28.8 fps, the 33.3 ms lock, clock
-reads). If the lock is arbitration, this is the cheapest remaining lever; if
-inert like the other two, the multiplier path is closed and the display-link
-class (the timer that consumes slots 92/93) becomes the next static target.
+**Goal**: the transition 2x lock (Control Center retract ~30 fps; drags 60).
+
+**Measured and ruled out today**
+
+- **The interval chain, both sides**: the window server's display period is
+  0.016666667 s (60.000 Hz) and the multiplier 1 (vtable probes in inject.c;
+  run 20261102-172655) — the link interval is 16.66 ms. SpringBoard does not use
+  the AppleDisplay period/multiplier slots at all (same probes; zero calls), and
+  neither process calls copy_display_timings (probes; runs 20261102-172403 and
+  20261102-174014). The integer-ratio scaling path is therefore not the 2x.
+- **The frame-rate env knobs are live, not pinned**: the writer of the global
+  0x1E1F6A1E8 has no callers; the plist environment reaches the processes
+  (constructor log). CA_ENABLE_ALL_FRAME_RATES=1 in the window server alone
+  freezes the display link (1 arming, 2 GL frames; run 20261102-170049);
+  CA_ENABLE_REDUCED_SERVER_VSYNC_RENDER=1 is harmless (run 20261102-165834);
+  CA_ENABLE_FRAME_RATE_ARBITRATION=0 is inert (run 20261102-151958). The
+  working baseline with the new libraries is run 20261102-164733 (232 armings,
+  1,739 frames, CC window 30.4 fps / 33 % / 27 %).
+- **Mechanism notes**: dyld interposing does not reach calls made inside the
+  shared cache — the os_variant interpose never fired and is inert; vtable
+  patches and ObjC method replacement are the working mechanisms. phone.py's
+  ACE5_CPUS defaults to 1 — arm comparisons must set `ACE5_CPUS=8`.
+
+**Probes now in the tree (all log once per change, silent otherwise)**
+
+- inject.c: AppleDisplay slots 0x2d8 (period) and 0x2e0 (multiplier), and slot
+  0x20 of vtable 0x1D5B37000 (copy_display_timings).
+- inject_sb.c: the same three for SpringBoard; the copy_display_timings wrapper
+  also forces the interval to the source's (ratio 1) — inert while that path is
+  not run.
+- The CA-unlock interpose (os_variant_has_internal_content) stays in both
+  libraries, inert (see above), with a constructor log of REDWOOD_CA_UNLOCK.
+
+**What remains**
+
+1. The app-side display-link class (not AppleDisplay, not the 0x1D5B37000
+   class) — find what paces SpringBoard's commits.
+2. The AlignPhase scheduling (sub_1882AB034 — direct calls, no vtable slot;
+   needs inline code patching).
+
+**Session commits**: 43b64cf, b64dfa4, 9e892ee, ec1b2dd, 9257e72, 4bd8413,
+03fd573, 8e92854, 3ae4ea2, ea950a0, 4f7e1e2.
+
+**Phone**: back in Android; loader workflow unchanged (enter → ramdisk → run;
+`oem stop` returns the kernel early; the resident system disk survives runs).
