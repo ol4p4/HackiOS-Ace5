@@ -21,10 +21,14 @@
  *   7. an empty command buffer submitted; the fence reaches signalled
  *   8. a triangle drawn into that image, copied back through a host-visible
  *      buffer, and the pixels compared with the draw's own colour
+ *   9. the same pixels in an IOSurface, in the BGRA order the rest of the
+ *      system reads: the surface half of a swapchain
  *
  * Step 8 is the stage the gate stops short of: it answers whether Turnip's
  * pipeline and draw paths (ir3 compilation, the render pass, the CP's own draw
- * packets) run on this Adreno, not just its command submission.
+ * packets) run on this Adreno, not just its command submission. Step 9 answers
+ * whether what Turnip drew can leave the driver's own BOs and become a surface
+ * the window server, the 2D engine and CoreAnimation can take.
  */
 #include <dlfcn.h>
 #include <stdint.h>
@@ -32,6 +36,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOSurface/IOSurfaceRef.h>
 #include <vulkan/vulkan.h>
 
 #include "triangle_spirv.h"
@@ -152,6 +158,8 @@ main(void)
 	VkShaderModule vertShader = VK_NULL_HANDLE, fragShader = VK_NULL_HANDLE;
 	VkBuffer buffer = VK_NULL_HANDLE;
 	VkDeviceMemory bufferMemory = VK_NULL_HANDLE;
+	IOSurfaceRef surface = NULL;
+	uint8_t *rendered = NULL;
 	void *library = NULL, *mapped = NULL;
 	int result = 1;
 
@@ -718,13 +726,104 @@ main(void)
 				pDestroyFence(device, drawFence, NULL);
 			goto out;
 		}
+		rendered = malloc(bufferSize);
+		if (rendered == NULL)
+			FAIL(8, "malloc(rendered)", VK_ERROR_OUT_OF_HOST_MEMORY);
+		memcpy(rendered, mapped, bufferSize);
 		pUnmapMemory(device, bufferMemory);
 		if (drawFence != VK_NULL_HANDLE)
 			pDestroyFence(device, drawFence, NULL);
 	}
 	printf("turnip_test: step 8: the triangle reached the image and read back\n");
 
-	printf("turnip_test: TURNIP GATE: PASS (steps 1-8)\n");
+	STEP(9, "the same pixels in an IOSurface (BGRA), read back from it");
+	/* A swapchain image has to be something the rest of the system can take: an
+	 * IOSurface is what the window server's layers, the 2D engine and
+	 * CoreAnimation all read. Turnip's BOs are not IOSurfaces, so the first WSI
+	 * step is the honest one: draw as before, then put the pixels into a surface
+	 * in the byte order everything else expects (BGRA, alpha last). A zero-copy
+	 * import of a surface's memory as a BO is the later, faster step. */
+	{
+		CFMutableDictionaryRef props = CFDictionaryCreateMutable(NULL, 0,
+		    &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+		CFNumberRef value;
+		int number = 256;
+
+		if (props == NULL)
+			FAIL(9, "CFDictionaryCreateMutable", VK_ERROR_OUT_OF_HOST_MEMORY);
+		value = CFNumberCreate(NULL, kCFNumberIntType, &number);
+		CFDictionarySetValue(props, kIOSurfaceWidth, value);
+		CFDictionarySetValue(props, kIOSurfaceHeight, value);
+		CFRelease(value);
+		number = 4;
+		value = CFNumberCreate(NULL, kCFNumberIntType, &number);
+		CFDictionarySetValue(props, kIOSurfaceBytesPerElement, value);
+		CFRelease(value);
+		number = 256 * 4;
+		value = CFNumberCreate(NULL, kCFNumberIntType, &number);
+		CFDictionarySetValue(props, kIOSurfaceBytesPerRow, value);
+		CFRelease(value);
+		number = 0x42475241;                    /* 'BGRA' */
+		value = CFNumberCreate(NULL, kCFNumberIntType, &number);
+		CFDictionarySetValue(props, kIOSurfacePixelFormat, value);
+		CFRelease(value);
+		surface = IOSurfaceCreate(props);
+		CFRelease(props);
+		if (surface == NULL)
+			FAIL(9, "IOSurfaceCreate(256x256 BGRA)", VK_ERROR_OUT_OF_HOST_MEMORY);
+
+		uint32_t width = (uint32_t)IOSurfaceGetWidth(surface);
+		uint32_t height = (uint32_t)IOSurfaceGetHeight(surface);
+		size_t stride = IOSurfaceGetBytesPerRow(surface);
+		uint8_t *bytes;
+
+		printf("turnip_test:   surface %ux%u, stride %zu, id %u\n", width, height, stride, IOSurfaceGetID(surface));
+		fflush(stdout);
+		if (IOSurfaceLock(surface, 0, NULL) != 0)
+			FAIL(9, "IOSurfaceLock(write)", VK_ERROR_MEMORY_MAP_FAILED);
+		bytes = IOSurfaceGetBaseAddress(surface);
+		for (uint32_t y = 0; y < height && y < 256; y++) {
+			const uint8_t *src = rendered + (size_t)y * 256 * 4;
+			uint8_t *dst = bytes + (size_t)y * stride;
+
+			for (uint32_t x = 0; x < width && x < 256; x++) {
+				dst[x * 4 + 0] = src[x * 4 + 2];         /* B */
+				dst[x * 4 + 1] = src[x * 4 + 1];         /* G */
+				dst[x * 4 + 2] = src[x * 4 + 0];         /* R */
+				dst[x * 4 + 3] = src[x * 4 + 3];         /* A */
+			}
+		}
+		IOSurfaceUnlock(surface, 0, NULL);
+
+		/* and back out of the surface: what a consumer would read */
+		if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != 0)
+			FAIL(9, "IOSurfaceLock(read)", VK_ERROR_MEMORY_MAP_FAILED);
+		bytes = IOSurfaceGetBaseAddress(surface);
+		{
+			const uint8_t *middle = bytes + (size_t)128 * stride + 128 * 4;
+			const uint8_t *corner = bytes;
+
+			printf("turnip_test:   surface corner (%u %u %u %u), middle (%u %u %u %u)\n",
+			    corner[0], corner[1], corner[2], corner[3], middle[0], middle[1], middle[2], middle[3]);
+			fflush(stdout);
+			if (!(middle[0] < 40 && middle[1] < 40 && middle[2] > 200)) {
+				IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+				printf("turnip_test: FAILED at step 9: the surface's middle is not the draw's colour\n");
+				failed_at = 9;
+				goto out;
+			}
+			if (corner[0] > 40 || corner[1] > 40 || corner[2] > 40) {
+				IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+				printf("turnip_test: FAILED at step 9: the surface's corner is not the clear colour\n");
+				failed_at = 9;
+				goto out;
+			}
+		}
+		IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+	}
+	printf("turnip_test: step 9: the triangle is in an IOSurface, BGRA, read back\n");
+
+	printf("turnip_test: TURNIP GATE: PASS (steps 1-9)\n");
 	result = 0;
 out:
 	if (device != VK_NULL_HANDLE) {
@@ -760,6 +859,9 @@ out:
 			pFreeMemory(device, memory, NULL);
 		pDestroyDevice(device, NULL);
 	}
+	free(rendered);
+	if (surface != NULL)
+		CFRelease(surface);
 	free(devices);
 	if (instance != VK_NULL_HANDLE && pDestroyInstance != NULL)
 		pDestroyInstance(instance, NULL);

@@ -1525,6 +1525,17 @@ so ir3 compiled both shaders, the CP ran the draw, and the tiled image round-tri
 was an empty submit). Next: WSI/swapchain (an IOSurface-backed present for a Vulkan
 client), then the CoreAnimation bridge.
 
+**Step 9 prepared (2026-11-02, built and imaged, NOT yet run): the surface half of a
+swapchain.** The same triangle is copied into a 256×256 IOSurface in BGRA order (what the
+window server, the 2D engine and CoreAnimation read), then the surface is locked for read
+and compared (corner black, middle red). Turnip's BOs are not IOSurfaces, so this is the
+honest first step: a CPU copy, with a zero-copy surface-as-BO import left for later.
+`local/wsl/build-turnip-test.sh` builds only this program; `local/root-turnip.apfs`
+repacked (119 entries, apfsck clean, 135/135 read back). The run recipe is the step 8
+one: `enter --stage kernel` → `ramdisk --image local/system-metal.apfs` → `run
+--gpu-probe 20 --gpu-direct --gpu-keep --root-image local/root-turnip.apfs`. Judge:
+`turnip_test: step 9: ...` and `PASS (steps 1-9)`.
+
 
 **Measured 2026-10-30 14:17: Safari works on loopback, and the device says 60.0 Hz.**
 The refresh-rate page (`userland/share/web/refresh.html`) is now opened for real
