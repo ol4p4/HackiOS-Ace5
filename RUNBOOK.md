@@ -1505,6 +1505,26 @@ place of the hand-written Metal frontend — is therefore not a plan any more bu
 a working stack: what remains for a Vulkan-composited desktop is WSI, swapchain
 and the CoreAnimation bridge, the same list UniXNU worked through.
 
+**Measured 2026-11-02 19:29: steps 1–8, a triangle drawn through Turnip.** The gate's
+own next stage (`tools/vulkan/turnip_test.c`, step 8): two embedded SPIR-V shaders
+(`tools/vulkan/triangle.vert|frag`, compiled by glslang to `triangle_spirv.h`), a render
+pass clearing to black, a graphics pipeline with no vertex input (`gl_VertexIndex`), a
+3-vertex draw into the 256×256 image, a copy back through a host-visible buffer, and a
+pixel compare. Run `logs/giulia/20261102-192910-run.log` (`root-turnip.apfs`, `--gpu-probe
+20 --gpu-direct --gpu-keep`):
+
+```
+turnip_test:   corner (0 0 0 255), middle (255 0 0 255)
+turnip_test: step 8: the triangle reached the image and read back
+turnip_test: TURNIP GATE: PASS (steps 1-8)
+```
+
+`corner` is the render pass's clear (opaque black), `middle` the fragment shader's red —
+so ir3 compiled both shaders, the CP ran the draw, and the tiled image round-tripped.
+0 PowerOff/panic/SIGSEGV. This is the first real draw through Turnip on this port (step 7
+was an empty submit). Next: WSI/swapchain (an IOSurface-backed present for a Vulkan
+client), then the CoreAnimation bridge.
+
 
 **Measured 2026-10-30 14:17: Safari works on loopback, and the device says 60.0 Hz.**
 The refresh-rate page (`userland/share/web/refresh.html`) is now opened for real
