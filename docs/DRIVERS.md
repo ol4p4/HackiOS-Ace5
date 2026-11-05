@@ -41,7 +41,7 @@ XNU 没有 Linux 的驱动模型：没有 `platform_driver`/`probe`/设备树绑
 
 第 1 条线已按"单启动通过"收口（2026-10-30）：控制中心 0.3% 黑来自一次启动的一组截图；本表 GL 行要求的两轮稳定、以及下面的 `app-smoke` 都还没做（见 `docs/GPU.md` 第 5 节）。
 
-紧接着的桌面任务（不动手机、不占手机线）：**loader 收尾对照**——K90 的 loader v17 失败语义与 dsu_store 对照我们的 `xnuloader/loader.c` / `userland/src/var_store.c`，见 `docs/UPSTREAM-SYNC.md` 的 K90 节；只读产出 take/skip 清单后，再决定是否排实现。
+紧接着的桌面任务（不动手机、不占手机线）：**loader 收尾对照**——K90 的 loader v17 失败语义与 dsu_store 对照我们的 `xnuloader/loader.c` / `userland/src/var_store.c`，见 `docs/UPSTREAM-SYNC.md` 的 K90 节。对照已完成（2026-11-05）：只有 **PSCI SYSTEM_RESET 取代 EFI ResetSystem** 一项候选（annibale 实测 5 min 26 s → 34 s），其余 skip；候选自己的门是 giulia 上机计时，数字出来前不动代码。
 
 ## 16.5 的出门闸门
 

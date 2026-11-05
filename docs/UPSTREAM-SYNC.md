@@ -82,6 +82,20 @@ decode) and diffs with the commits API. Desk comparison — no phone run.
 Exit: the take/skip list recorded in this file; only then an implementation plan
 for the take items (host selftest + CI kernel build + one phone run).
 
+### Result (2026-11-05, read-only)
+
+| # | Verdict | Evidence |
+| --- | --- | --- |
+| 1 | **take (candidate — measure on giulia first)** | Their v17 replaces `gRT->ResetSystem` with a PSCI `SYSTEM_RESET` via `ArmMonitorCall`. Measured on annibale: the firmware path brought the phone back after **5 min 26 s**, PSCI after **34 s**. All four of our reset sites use EFI ResetSystem: `uefi/files/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/XnuLoader.c:303` (payload returned/missing), `xnuloader/loader.c:589` (`reboot()`), `:2492` (UEFI exception), `:3882` (`reboot`/`oem reboot`). Our loader already has `psci_call` with HVC/SMC per platform, so the loader side is a small change; the UEFI side needs `ArmMonitorLib` + `ArmPkg/ArmPkg.dec` in `BootManagerLib.inf` (their `mu-silicium.patch`). Gate: on giulia, time payload-return → Android screen with both paths; take only if PSCI is not slower and still cold-boots. |
+| 2 | skip | dsu_store is the tail of a 16 GiB DSU file in `userdata`; extents exist because that file fragments. We own a contiguous GPT partition (`darwin`), fixed by construction. The 64→1024 extent cap is theirs alone. |
+| 3 | skip | Atomicity is already equivalent: header last over a zeroed one, double read, two slots, claim (`var_store.c`). Their extra guard (each header block is zeros or `RDWVAR\0`) protects a stale DSU whose extents became Android data; our equivalent is the GPT identity check plus the fixed layout. |
+| 4 | skip | The `redwood_ufs.c` + block-watch diff is the darwin→dsu_store migration itself (bounds, name/GUID checks, extent I/O). Our write → flush → read-back → CRC path is the same shape (`xnuloader/loader.c:2154`); nothing generic to take. |
+| 5 | skip (pattern noted) | Their host test checks DSU listing predicates; our `host-selftest.sh` already checks GPT → constants → apply → carve preflight. Revisit the pattern only if we ever add a store. |
+
+Only #1 goes forward. Its own gate is a device measurement (one UEFI build, one
+loader build, two timed runs), not a code review; nothing is picked until the
+giulia numbers exist.
+
 ## Procedure
 
 ```sh
