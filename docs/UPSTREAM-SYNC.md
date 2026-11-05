@@ -2,7 +2,9 @@
 
 Our tree is forked from the `YiKongk/HackiOS-Ace5` snapshot of 2026-10-23
 (`ab2acff`). Upstream `oosexgang/hackios-xnu-kernel` has moved a long way since
-(HEAD `88513176`, 2026-10-26). A wholesale rebase is not worth it yet: the
+— the repository is now named `hakios-xnu-kernel` (old URLs redirect), HEAD
+`87bf4851`, 2026-11-04, and Metal-on-Vulkan landed on it on 11-03. A wholesale
+rebase is not worth it yet: the
 device layer upstream only holds UEFI, prebuilt images, firmware scripts and
 `soc.args`, while the drivers stay in the flat `xnu/files/` tree and carry POCO
 X5 Pro constants. This file is the take/do-not-take list for pulling the generic
@@ -43,6 +45,42 @@ stage 20.
 | `redwood` → `hakios` rename | Churn; see ground rule 2 |
 | `devices/poco-x5-pro/uefi/` binaries, `prebuilt/` | Redwood-specific FD, BootShim and DTB |
 | Mesa a6xx (`fd6_draw.cc`) fixes | Our GPU is Adreno 750 (a7xx); the freedreno path comes from UniXNU `Adreno740`, not from here |
+
+## K90 line (`iola1999`): loader v17 and dsu_store — comparison, 2026-11-05
+
+Why this line: our worst loader failure class is "a run ends, USB is dead,
+recovery is physical" (see the `loader-usb-dead-after-run` memory and RUNBOOK),
+and our `/private/var` persistence (`userland/src/var_store.c`) solves the same
+problem as their `dsu_store`, from the kernel side. Their tree is a sibling of
+the same oosexgang base, but their loader is split into `xnuloader/loader_*.inc`
+fragments while ours is one `loader.c` (4090 lines), so this is a comparison and
+a re-expression, not a cherry-pick.
+
+Source commits (`iola1999/hackios-xnu-kernel`, branch `k90-port`):
+
+| Commit | Date (UTC) | What |
+| --- | --- | --- |
+| `cced4247` | 11-05 02:50 | loader v17: UEFI failure → PSCI reset; no bootable payload → cold restart; BO rejects size 0; host tests updated |
+| `ba6f0d08` | 11-05 05:16 | dsu_store: loader exposes the DSU slot's last 4 GiB; the kernel reads/writes the `/private/var` archive through it (`xnuloader/loader_dsu.inc` +165, `tools/test-loader-dsu-store.py` +166) |
+| `45d97a8b` | 11-05 05:39 | DSU file extent cap 64 → 1024, with a reason when exceeded |
+| `779c08d2` | 11-05 05:44 | `dsu.py`: keep the old image when shared storage is not unlocked |
+
+Compare points (each must end in take / skip / unknown, with a local anchor):
+
+| # | Their side | Our side | Question |
+| --- | --- | --- | --- |
+| 1 | loader v17 failure paths: PSCI reset, cold restart, size-0 rejection | `xnuloader/loader.c` failure paths: `oem stop`, run end, USB command timeout, UEFI chain return | Does our loader ever sit in a state where USB is dead and nothing resets? Which of their three guards closes it? |
+| 2 | store medium: last 4 GiB of the DSU slot, extents | `darwin` partition, two fixed 2 GiB slots (`userland/src/var_store.c:52`) | Do we gain anything from extents? We own the partition; our cap is fixed. |
+| 3 | archive atomicity: header last over a zeroed one, checksum, newest good slot | same idea already in `var_store.c` (header last, double read, two slots, claim) | Anything they do that we do not (locked storage, partial write, reason logging)? |
+| 4 | UFS write path: `redwood_ufs.c` +41/−68, `loader_03_ufs_block_watch.inc` +32/−72 | our `redwood_ufs.c` / `redwood_ufshc.c` | Are their write-path/claim changes generic, or DSU-specific? |
+| 5 | host test `tools/test-loader-dsu-store.py` (+166) | `tools/ace5/host-selftest.sh` | Is there a loader-store test we can run on the host before a phone run? |
+
+Read method: `git fetch` to github.com times out from this host; read files with
+`gh api repos/iola1999/hackios-xnu-kernel/contents/<path>?ref=<sha>` (base64
+decode) and diffs with the commits API. Desk comparison — no phone run.
+
+Exit: the take/skip list recorded in this file; only then an implementation plan
+for the take items (host selftest + CI kernel build + one phone run).
 
 ## Procedure
 

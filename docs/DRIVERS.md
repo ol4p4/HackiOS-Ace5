@@ -16,7 +16,7 @@ XNU 没有 Linux 的驱动模型：没有 `platform_driver`/`probe`/设备树绑
 | UFS + 分区 | 上游 UFS 框架 + 我们的 `redwood_ufs.c`/`var_store` | 可用 | ✅ | — | 两次启动 `var_store` 双槽往返 |
 | 显示（帧缓冲 + 缩放） | 我们写的 `RedwoodGPUDisplay`（RM6_BLIT2DSCALE，1 次 2D blit 1125×2436→1264×2780） | 自研 | ✅ 4.6 ms/帧 | 面板由固件初始化，我们只写像素 | 主屏像素对齐 |
 | GPU（GMU/ZAP/SMMU/CP） | **同机** OnePlus SM8650 KGSL（`giulia_gpu_regs.h`，GPL-2.0）+ Linux a7xx + UniXNU NativeAdreno 的队列/fence 顺序 | **完全匹配** | ✅ | — | GPU 探针 stage 1–20、`display_test` 9/9 |
-| Vulkan（Turnip） | Mesa Turnip + `tools/mesa/turnip-darwin.patch` + libdrm shim | 自研适配 | ✅ 空提交 + fence（gate 1–7） | 三角形/WSI/呈现（未做） | `turnip_test` PASS |
+| Vulkan（Turnip） | Mesa Turnip + `tools/mesa/turnip-darwin.patch` + libdrm shim | 自研适配 | ✅ gate 1–8 实测（空提交+fence、三角形读回）；step 9（IOSurface BGRA）已构建、未上机 | step 9 上机；WSI/swapchain + VkImage→CA 桥 | `turnip_test` PASS |
 | GL 合成（CoreAnimation） | `userland/src/eagl.c` + Mesa freedreno/OSMesa | 自研适配 | ✅ 单启动正确（2026-10-30，控制中心 0.3% 黑）；跨启动两轮稳定未做 | 见 `docs/GPU.md` 第 5 节证据边界 | 同配置两轮黑/饱和分布稳定（第二轮未做） |
 | 触摸 | 我们写的 `giulia_s3910.c`（S3910，轮询 SPI） | 匹配 | ✅ | 多点/长时精度 | `s3910: ready` + 报告计数 |
 | 音量键 | `gpio_keys/vol_up` → TLMM **GPIO 6**，`linux,code 114` | 需新写（hackios 的 `redwood_buttons.c` 是 POCO PMIC 通道） | ❌ | 只需 GPIO 中断 + HID 上报 | 按下→音量变化（`buttons` 测试工具） |
@@ -40,6 +40,8 @@ XNU 没有 Linux 的驱动模型：没有 `platform_driver`/`probe`/设备树绑
 5. **相机**（月级）
 
 第 1 条线已按"单启动通过"收口（2026-10-30）：控制中心 0.3% 黑来自一次启动的一组截图；本表 GL 行要求的两轮稳定、以及下面的 `app-smoke` 都还没做（见 `docs/GPU.md` 第 5 节）。
+
+紧接着的桌面任务（不动手机、不占手机线）：**loader 收尾对照**——K90 的 loader v17 失败语义与 dsu_store 对照我们的 `xnuloader/loader.c` / `userland/src/var_store.c`，见 `docs/UPSTREAM-SYNC.md` 的 K90 节；只读产出 take/skip 清单后，再决定是否排实现。
 
 ## 16.5 的出门闸门
 
