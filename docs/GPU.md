@@ -13,10 +13,10 @@
 
 | # | 缺什么 | 证据 | 影响 | 验收方式 |
 |---|---|---|---|---|
-| 1 | **GPU 调频/调压（DVFS）** | stage 15 只投 "stock minimum clock vote"（`xnu/files/bsd/dev/giulia_gmu_hfi.h:280`）；驱动已上传 13 点 DCVS 表，231–903 MHz（同文件 `:178-187`），但没有投票策略/消费者，也没有 GPU rail 的电压表 | 全程最低档；重负载靠 CPU 等 fence 顶；功耗非最优 | 重负载下帧时间下降、`redwood-gl` 的 fence 等待变小 |
+| 1 | **GPU 调频/调压（DVFS）** | stage 15 只投一档（默认 stock minimum 231 MHz；2026-11-05 起 `ace5_gpu_speed`/`ace5_gpu_bw` 可选 231–903 MHz，见 §3.1）；驱动已上传 13 点 DCVS 表，231–903 MHz（`giulia_gmu_hfi.h:173-200`），但没有投票策略/消费者，也没有 GPU rail 的电压表 | 全程最低档；重负载靠 CPU 等 fence 顶；功耗非最优 | 重负载下帧时间下降、`redwood-gl` 的 fence 等待变小 |
 | 2 | **运行时掉电/空闲省电** | RSC slumber 只在 probe 收尾用过；无 idle collapse；无屏幕关/开（DPMS）。DPMS 要 DSI 命令（§4 明确不碰），且 GPU 掉电后 scanout 归谁还没分析 | 待机功耗高；锁屏/熄屏路径未走通 | 空闲 N 秒后 GPU 掉电、触摸后 100 ms 内恢复出帧 |
 | 3 | **UBWC / 表面压缩** | `RedwoodGPU.cpp` 无 UBWC/macroTile 代码，表面全线性 | 1125×2436×4@60 读写带宽翻倍，模糊/大图层吃带宽 | `MSM_PARAM` 报 UBWC 后画面不变、带宽计数下降（依赖第 8 项） |
-| 4 | **每帧纹理开销** | 帧统计：`4120 us a frame`，其中 `792 us` 花在"为 IOSurface 建纹理"；1200 帧里 1441 个 IOSurface 当纹理、仅 32 次真拷贝 | 每帧 ~0.8 ms 纯开销（16.7 ms 预算的 5%） | 缓存命中后 `making textures` 时间趋零、帧时间下降 |
+| 4 | **每帧纹理开销** | 帧统计：`4120 us a frame`，其中 `792 us` 花在"为 IOSurface 建纹理"；1200 帧里 1441 个 IOSurface 当纹理、仅 32 次真拷贝。**这 792 us 尚未归因**；2026-11-05 起 `eagl.c` 把整面哈希、镜像纹理、上传分开计时（见 §3.1） | 每帧 ~0.8 ms 纯开销（16.7 ms 预算的 5%） | 缓存命中后 `making textures` 时间趋零、帧时间下降 |
 | 5 | **每客户端页表 / 每表面 fence** | 方法面只有 GEM/submit/fence（`RedwoodGPU.cpp:1257`）；所有客户端共用一个地址空间 | 一个客户端的坏命令影响全局；恢复只能整核复位 | 两个客户端各自故障互不影响 |
 | 6 | **Metal 路径（RedwoodMetal）** | 最近运行未启用；2026-10-28 用 `metal_profile=1` 打印过 first draw（SpringBoard 5 次 draw，`RUNBOOK.md:426-436`）；`metal_props on` 无 `metal=1` 仍会失败（`kIOReturnUnsupported`）。同族 2026-10-30 已有 Metal→metal2vulkan→Turnip 跑在 Adreno 830 上（`superboyyy/hakios-arm64e-dada`，见 RUNBOOK 的 family update） | 现在全靠 GL/Mesa；系统 App 不强制 Metal 所以未暴雷，第三方 App/新系统组件要 Metal 就空 | 任意 Metal 小程序画出第一帧并打出探针行（探针已打印过，缺的是任意程序与完整 MPS/platter） |
 | 7 | **Vulkan 呈现（WSI/swapchain + CA 桥）** | Turnip gate 1–8 实测（设备/队列/内存/镜像/空提交+fence/三角形读回），step 9（三角形进 IOSurface BGRA）已构建、未上机；无 swapchain、无 VkImage→CoreAnimation 的桥。同族参考：dada 的 `gpu2/`、`UniXNU/AdrenoMetal`、`steelbrain/metal2vulkan` | 只有改走"Vulkan 合成桌面"才需要；当前不是瓶颈 | 一个清屏的 Vulkan 帧出现在屏幕上（目前只到读回） |
@@ -28,6 +28,13 @@
 2. **IOSurface 纹理缓存**（第 4 项）。只改 `userland/src/eagl.c`，每帧省 ~0.8 ms，风险低。
 
 其余（UBWC、每客户端页表、Metal、WSI）是"要更好"而非"要能用"，等 16.5 四组系统应用全绿之后再说。
+
+### 3.1 两个旋钮与一次归因（2026-11-05）
+
+- `ace5_gpu_speed=N`：stage 15 的 DCVS 点，1..12（1=231 MHz，6=578，12=903）；默认 1。
+- `ace5_gpu_bw=N`：带宽点，1..10；不写则跟随 speed（钳到 10）。默认 1/1，与旧行为一致。
+- 梯子：1（基线）→ 6 → 12，每档跑同一手势脚本，`tools/frames.py` 判 89%/70% 窗口；高频率可能挂死，giulia 没有 GPU 恢复，只能物理重启。
+- 归因：`eagl.c` 的 summary 和每 20 帧行现在分别打印 `hashing`（整面哈希）、`mirroring`（镜像纹理）、`uploading`（glTexImage2D）。先跑基线，再按数字决定改哪一个。
 
 如果重开 Metal 线，起点不是 `RedwoodMetal` 的运行时，而是同族已经跑通的那条：`superboyyy/hakios-arm64e-dada` 的 `gpu2/`（metal2vulkan + NativeMetal + Turnip 补丁）与 `UniXNU/AdrenoMetal`；我们的 Turnip gate 1–8（step 9 已备）正好是这条路的底座，缺的 WSI/CA 桥在那边有实现可对照。
 
