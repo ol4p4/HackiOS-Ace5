@@ -44,6 +44,10 @@ static int a750_log(const char *format, ...)
 static uint32_t probe_pause;
 static uint32_t a750_gpu_direct;
 static uint32_t a750_gpu_keep;
+/* The one DCVS point the bring-up asks for (a750_freq_khz index) and the bandwidth
+ * index that goes with it. 1/1 is the stock minimum this port has always voted. */
+static uint32_t a750_gpu_speed = 1;
+static uint32_t a750_gpu_bw;             /* 0: follow the speed point */
 static bool a750_runtime_active;
 static uint32_t a750_rd(vm_offset_t base, uint32_t off) { return *(volatile uint32_t *)(base+off); }
 /* Keep the store source in an ordinary argument register: some Qualcomm
@@ -162,6 +166,12 @@ static bool a750_probe(void)
     uint32_t stage=0, legacy=0, gpu=0;
     PE_parse_boot_argn("ace5_gpu_probe",&stage,sizeof(stage));
     PE_parse_boot_argn("ace5_gpu_direct",&a750_gpu_direct,sizeof(a750_gpu_direct));
+    PE_parse_boot_argn("ace5_gpu_speed",&a750_gpu_speed,sizeof(a750_gpu_speed));
+    PE_parse_boot_argn("ace5_gpu_bw",&a750_gpu_bw,sizeof(a750_gpu_bw));
+    if (a750_gpu_speed<1) a750_gpu_speed=1;
+    if (a750_gpu_speed>12) a750_gpu_speed=12;
+    if (!a750_gpu_bw) a750_gpu_bw=a750_gpu_speed>10?10:a750_gpu_speed;
+    if (a750_gpu_bw>10) a750_gpu_bw=10;
     PE_parse_boot_argn("adreno",&legacy,sizeof(legacy));
     PE_parse_boot_argn("gpu",&gpu,sizeof(gpu));
     if (legacy || gpu) a750_log("ace5-gpu: A642L driver blocked on giulia; acceleration is not implemented\n");

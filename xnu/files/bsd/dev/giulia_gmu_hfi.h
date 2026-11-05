@@ -170,18 +170,21 @@ static uint32_t a750_bcm_vote(uint32_t bandwidth, uint32_t width, uint32_t buswi
     if (vote>0x3fff) vote=0x3fff;
     return 0x40000000|(vote?0x20000000:0)|((uint32_t)vote<<14)|(uint32_t)vote;
 }
+/* The 13 DCVS points of PKG110 bin 4 / SKU 3, in kHz (index 0 reserved). */
+static const uint32_t a750_freq_khz[]={0,231000,310000,366000,422000,500000,578000,
+    629000,680000,720000,770000,834000,903000};
+#define A750_POINTS (sizeof(a750_freq_khz)/sizeof(a750_freq_khz[0]))
+
 static bool a750_hfi_tables(struct a750_hfi *s)
 {
     if (a750_rd(s->gmu,0xcff0)!=0x20060001) {
         a750_log("ace5-gpu: unexpected HFI firmware version; tables refused\n"); return false;
     }
-    const uint32_t freq[]={0,231000,310000,366000,422000,500000,578000,
-        629000,680000,720000,770000,834000,903000};
     const uint16_t gfx[]={0,0x34,0x38,0x3c,0x40,0x50,0x80,0x90,0xc0,0xe0,0x100,0x140,0x180};
     uint32_t perf[52]={0,0,1,13,3};
     unsigned n=5;
-    for (unsigned i=0;i<13;i++) {
-        perf[n++]=a750_arc_vote(gfx[i],i); perf[n++]=0xffffffff; perf[n++]=freq[i];
+    for (unsigned i=0;i<A750_POINTS;i++) {
+        perf[n++]=a750_arc_vote(gfx[i],i); perf[n++]=0xffffffff; perf[n++]=a750_freq_khz[i];
     }
     perf[n++]=3; perf[n++]=2;
     perf[n++]=0; perf[n++]=0;
@@ -256,8 +259,8 @@ static bool a750_hfi_query(struct a750_hfi *s, struct a750_memory *m, vm_offset_
     }
     if (good && stage>=16) good=a750_gx_prepare(s);
     if (good && stage>=15) {
-        /* Lowest stock operating point, 231 MHz / bandwidth index 1. */
-        uint32_t vote[]={0,1,1,1};
+        /* The stock minimum (231 MHz) unless ace5_gpu_speed/ace5_gpu_bw say otherwise. */
+        uint32_t vote[]={0,1,a750_gpu_speed,a750_gpu_bw};
         good=a750_hfi_send(s,30,vote,4,false,NULL);
         bool requested=false;
         if (good) {
@@ -277,7 +280,8 @@ static bool a750_hfi_query(struct a750_hfi *s, struct a750_memory *m, vm_offset_
                 }
             }
         }
-        a750_log("ace5-gpu: stage 15 %s; stock minimum clock vote and GX power/access\n",good?"complete":"FAILED");
+        a750_log("ace5-gpu: stage 15 %s; DCVS point %u (%u kHz), bandwidth point %u, and GX power/access\n",
+            good?"complete":"FAILED",a750_gpu_speed,a750_freq_khz[a750_gpu_speed],a750_gpu_bw);
         if (good && stage>=17) good=a750_gx_start(s);
         if (requested) a750_wr(gmu,0x16650,1u<<31);
         /* Stop scheduling and let RSC release the voltage/bandwidth votes. */

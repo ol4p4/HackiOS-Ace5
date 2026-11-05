@@ -304,10 +304,11 @@ struct eagl {
 	} line;
 	/* a frame's worth */
 	unsigned calls, draws, triangles, uploads, clears, last_draws;
-	uint64_t upload_bytes, began, attaching, flushing;
+	uint64_t upload_bytes, began, attaching, flushing, hashing, mirroring, uploading;
 	/* everything so far */
 	unsigned frames, shaders, programs, errors, shared, refused;
 	uint64_t all_calls, all_draws, all_triangles, readback_us, wait_us, attach_us, flush_us, frame_us;
+	uint64_t hash_us, mirror_us, upload_us;
 	unsigned most_calls, most_triangles;
 	const char *sources[256];       /* the text of the shaders being made, by name (modulo this) */
 	bool fragment[256];             /* ... and which of the two kinds each is */
@@ -494,11 +495,13 @@ summary(struct eagl *e)
 
 	say("redwood-gl: after %u frames: %llu calls, %llu draws and %llu triangles a frame on average; the most in one: "
 	    "%u calls, %u triangles; %llu us a frame, of which %llu handing the commands on, %llu waiting for the picture "
-	    "to be drawn and %llu copying it out, and before each %llu making textures of IOSurfaces; %u IOSurfaces were "
+	    "to be drawn and %llu copying it out, and before each %llu making textures of IOSurfaces (%llu hashing the "
+	    "surfaces, %llu making mirror textures, %llu uploading); %u IOSurfaces were "
 	    "the textures' memory, %u had to be copied; %u shaders, %u programs; biggest texture %u x %u; %u errors\n",
 	    e->frames, e->all_calls / frames, e->all_draws / frames, e->all_triangles / frames, e->most_calls,
 	    e->most_triangles, e->frame_us / frames, e->flush_us / frames, e->wait_us / frames, e->readback_us / frames,
-	    e->attach_us / frames, e->shared, e->refused, e->shaders, e->programs, widest_texture, tallest_texture, e->errors);
+	    e->attach_us / frames, e->hash_us / frames, e->mirror_us / frames, e->upload_us / frames,
+	    e->shared, e->refused, e->shaders, e->programs, widest_texture, tallest_texture, e->errors);
 	for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]) && formats[i].count; i++) {
 		say("redwood-gl:   textures: %s %#x/%#x/%#x: %u times, up to %u x %u\n", formats[i].how, formats[i].internal,
 		    formats[i].format, formats[i].type, formats[i].count, formats[i].widest, formats[i].tallest);
@@ -603,6 +606,7 @@ surface_mirrored(struct eagl *e, struct image *image)
 	    (size_t)image->width != IOSurfaceGetWidth(surface) || (size_t)image->height != IOSurfaceGetHeight(surface)) {
 		return false;
 	}
+	uint64_t started = now_us();
 	glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
 	glGenTextures(1, &image->mirror);
 	glBindTexture(GL_TEXTURE_2D, image->mirror);
@@ -610,9 +614,11 @@ surface_mirrored(struct eagl *e, struct image *image)
 		glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
 		glDeleteTextures(1, &image->mirror);
 		image->mirror = 0;
+		e->mirroring += now_us() - started;
 		return false;
 	}
 	glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
+	e->mirroring += now_us() - started;
 	e->shared++;
 	return true;
 }
@@ -659,11 +665,13 @@ surface_changed(struct eagl *e, struct image *image)
 		return false;
 	}
 	image->looked = e->frames + 1;
+	uint64_t started = now_us();
 	for (size_t at = 0; at + 8 <= size; at += 8) {
 		memcpy(&word, base + at, 8);
 		sum = (sum ^ word) * 0x9e3779b97f4a7c15ull;
 		sum ^= sum >> 29;
 	}
+	e->hashing += now_us() - started;
 	if (sum == image->sum) {
 		return false;
 	}
@@ -715,8 +723,10 @@ surface_to_texture(struct eagl *e, struct image *image)
 	glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
 	glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(row / pixel));
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	uint64_t upload_started = now_us();
 	glTexImage2D(image->to, 0, (GLint)internal_format(image->internal, image->format), image->width, image->height, 0,
 	    image->format, image->type, base);
+	e->uploading += now_us() - upload_started;
 	glPixelStorei(GL_UNPACK_ROW_LENGTH, row_length);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
 	if (trace_placing) {
@@ -1154,6 +1164,9 @@ frame_end(struct eagl *e, bool finished)
 	e->wait_us += waited - before;
 	e->readback_us += after - waited;
 	e->attach_us += e->attaching;
+	e->hash_us += e->hashing;
+	e->mirror_us += e->mirroring;
+	e->upload_us += e->uploading;
 	e->flush_us += e->flushing;
 	e->frame_us += after - e->began;
 	if (e->calls > e->most_calls) {
@@ -1165,9 +1178,10 @@ frame_end(struct eagl *e, bool finished)
 	if (e->frames <= 40 || e->frames % 20 == 0) {
 		say("redwood-gl: frame %u: %u GL calls, %u draws, %u triangles, %u clears; %u textures refilled from IOSurfaces "
 		    "(%llu KB); %u picture%s copied out, %u drawn in place; %llu us (%llu handing on, %llu waiting, %llu copying "
-		    "out), %llu before it for the IOSurfaces\n", e->frames, e->calls, e->draws, e->triangles, e->clears, e->uploads,
-		    e->upload_bytes >> 10, copied, copied == 1 ? "" : "s", in_place, after - e->began, e->flushing, waited - before,
-		    after - waited, e->attaching);
+		    "out), %llu before it for the IOSurfaces, %llu hashing, %llu mirroring, %llu uploading\n", e->frames, e->calls,
+		    e->draws, e->triangles, e->clears, e->uploads, e->upload_bytes >> 10, copied, copied == 1 ? "" : "s", in_place,
+		    after - e->began, e->flushing, waited - before, after - waited, e->attaching, e->hashing, e->mirroring,
+		    e->uploading);
 	}
 	if (e->frames == 30 || e->frames % 200 == 0) {
 		summary(e);
@@ -1179,6 +1193,7 @@ frame_end(struct eagl *e, bool finished)
 	e->last_draws = e->draws;
 	e->calls = e->draws = e->triangles = e->uploads = e->clears = 0;
 	e->upload_bytes = e->attaching = e->flushing = 0;
+	e->hashing = e->mirroring = e->uploading = 0;
 }
 
 #ifndef GL_BLEND
