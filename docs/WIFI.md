@@ -42,7 +42,7 @@ WCN6750 与 WCN7850 的差别只在**总线与固件协议**：6750 走 WPSS（A
 
 | # | 内容 | 验收（日志/现象） | 风险 |
 |---|---|---|---|
-| M1 | PCIe0 控制器复位、时钟、PHY 上电与 LTSSM 训练 | `link up, speed gen2/gen3, width x1/x2`；`pcie0: link training done` | 时钟树与 PHY 组合序列最杂；**代码已就位**：`giulia_pcie.c` 的 `pcie_step=1`（只读勘察）/`2`（上电+链路），PHY 序列来自 DTB |
+| M1 | PCIe0 控制器复位、时钟、PHY 上电与 LTSSM 训练 | `link up, speed gen2/gen3, width x1/x2`；`pcie0: link training done` | 时钟树与 PHY 组合序列最杂；**代码已就位**：`giulia_pcie.c` 的 `pcie_step=1`（只读勘察）/`2`（上电+链路），PHY 序列来自 DTB。**2026-11-06 上机暂停，见下方注记** |
 | M2 | 配置空间访问 + 枚举 + **PARF RID→SID 读回** | 读到 vendor `0x17cb`（期望 device id `0x1107`）与 BAR0 大小；`cnss_pci0` 出现；RID `0x100` → SID `0x1401` 可读回 | ECAM 窗口/ATu 配置；K90 实测 PARF bypass=1、RID 链出现环、SID 未验证（`local/refs/k90-wcn7850-plan.md:73,135-137`） |
 | M3 | BAR0 映射、MHI 寄存器可读、MSI 落点、**QMP open** | `MHI_READY`/`MHIVER` 读出，写 MSI 后收到一次中断；QMP 握手返回 | MSI 控制器 0x17110040 的编程；QMP 邮箱 99 |
 | M3.5 | **apps SMMU/QTB context、IOVA 窗、端点 DMA 映射** | 一次 host→device 的 DMA 往返（host 写一块 buffer，模块读回同一个值） | SID `0x1401` 的路由与 context；与 DisplayDxe/保留区撞窗（K90 放弃准则第 4 条） |
@@ -51,6 +51,12 @@ WCN6750 与 WCN7850 的差别只在**总线与固件协议**：6750 走 WPSS（A
 | M6 | mac80211/扫描/加入 | 设置里扫到 AP、加入、Safari 打开 `https://example.com` | 走既有 `wifi/lx` 的 802.11/wpa 层 |
 
 M1–M3.5 是"移植 + 板级差异"：annibale 给出同 SoC 的寄存器与流程，thyme 给出 MHI 的接口面，本板要改的是基址、GPIO、RPMh 轨和 SMMU 映射。M4 的 `mhi_*` 接口正好是 ath12k 要的那一小把（`mhi_alloc_controller/mhi_register_controller/mhi_prepare_for_power_up/mhi_sync_power_up/mhi_prepare_for_transfer/mhi_queue_*`），FreeBSD LinuxKPI 没有 MHI 框架，这一层要由我们提供。M5–M6 是"接上 ath12k"，理论上是 `mk-ath11k.sh` 的兄弟脚本加 `DRIVER` 列表。
+
+> **2026-11-06：M1 上机暂停。** `pcie_step=1` 在启动路径里跑了 4 次，每次 loader USB
+> 都在 ~20 s 内消失、手机落 Qualcomm diag 900E（需物理重启）；同一 recipe 去掉
+> `pcie_step` 则 6 次全部正常。唯一返回的一次内核日志（1.44 MB）里**没有任何 `pcie:`
+> 行**。下一步改为运行时触发（设备 ioctl 或 UEFI 里的勘察），不再从启动路径盲跑。
+> 详见 `RUNBOOK.md` 同日条目。
 
 **容量预算（2026-10-30 实测）**：小根镜像上限 32 MiB = 33,554,432 字节（`tools/ace5/phone.py:272-273`）。WCN7850 三件实测：`amss.bin` 6,090,816 + `m3.bin` 299,660 + `board-2.bin` 2,431,968 = **8,822,444 字节（8.41 MiB）**；`regdb.bin` 不在 linux-firmware 的 WCN7850 目录里（ath12k 先取 `board-2.bin` 里的 REGDB IE，最后才退回 `regdb.bin`）。把三件放进 `local/root-daily` 的 `fw/` 重打（`mkapfs.py -z --plain fw`）：镜像从 10,743,808 涨到 **19,873,792 字节（18.95 MiB）**，**余量 13,680,640 字节（13.05 MiB）**。结论：**装得下**，不需要分区读取或第二个 ramdisk；但 `fw/` 按 `--plain` 不压缩，后面 ADSP 那几十 MB 固件不能再走这条路。固件查找也已放宽：`redwood_wifi_driver_file()` 对未知名字回落到 `fw/<basename>`（原来只认 WCN6750 的 `board.bin`/`regdb.bin`），否则 ath12k 的 `amss.bin`/`m3.bin`/`board-2.bin` 根本读不到。
 

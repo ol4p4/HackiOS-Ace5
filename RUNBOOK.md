@@ -2839,3 +2839,24 @@ clear, both from always-on GCC). Without the flag step 1 reads only GCC/TLMM and
 says so. Next run: the validated recipe WITH `--touch --gpu-probe 20 --gpu-direct
 --gpu-keep`.
 
+### PCIe M1, 2026-11-06: `pcie_step` in the boot path kills the loader's USB (paused)
+
+Four runs carried `pcie_step=1`; every one lost the loader's USB inside ~20 s and
+ended in Qualcomm diag 900E (physical power cycle each time):
+
+| run | config | outcome |
+| --- | --- | --- |
+| ~21:40 | `--seconds 180`, no GPU flags | USB gone; no log |
+| ~21:55 | `--seconds 240`, GPU recipe | USB gone; logdump later showed the kernel returned, 1.44 MB log, **no `pcie:` line at all** |
+| ~22:0x | `--seconds 300`, map-gated (GCC/TLMM only) | same: kernel returned, log complete, **no `pcie:` line** (this build had no init prints) |
+| ~22:5x | `--seconds 120`, init-print build | USB gone; logdump stayed on the previous run (stale), no evidence |
+
+The same recipe **without** `pcie_step` runs and returns normally (six runs the
+same evening). So the boot-path PCIe probe is the variable, and the one kernel log
+we have shows the pcie thread printed nothing — either `giulia_pcie_init` never
+starts it or the boot-arg parse fails; a run that dies cannot decide which.
+
+**M1 is paused.** The next design must not run PCIe MMIO from the boot path:
+trigger the survey at runtime (a device ioctl from userland) or from the
+loader/UEFI, so a hang leaves the boot log readable. No more blind pcie runs.
+

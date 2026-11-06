@@ -277,12 +277,17 @@ giulia_pcie_init(void)
 	uint32_t step = 0;
 	thread_t thread;
 
+	printf("pcie: init entered\n");
 	if (!PE_parse_boot_argn("pcie_step", &step, sizeof(step)) || step == 0) {
+		printf("pcie: no pcie_step\n");
 		return;
 	}
+	printf("pcie: init step=%u\n", step);
 	pcie_step = (int)step;
 	PE_parse_boot_argn("pcie_windows", &pcie_windows, sizeof(pcie_windows));
 	if (kernel_thread_start(pcie_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
+	} else {
+		printf("pcie: thread start FAILED\n");
 	}
 }

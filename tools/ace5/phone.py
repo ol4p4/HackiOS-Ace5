@@ -307,19 +307,19 @@ try:
         # whether it drifted — the distinction that "4 % vs 51 % black" needed.
         shot_count = 0
         next_shot = time.monotonic() + args.shots if args.shots > 0 else None
-		while True:
-			# A single slow answer is not a dead run: the loader can be busy with the
-			# kernel's console for a few seconds. Retry before giving up on the run.
-			for attempt in range(3):
-				try:
-					result = fb('getvar', 'result')
-					break
-				except subprocess.TimeoutExpired:
-					if attempt == 2:
-						raise
-					time.sleep(2)
-			if 'result: running' not in result:
-				break
+        while True:
+            # A single slow answer is not a dead run: the loader can be busy with the
+            # kernel's console for a few seconds. Retry before giving up on the run.
+            for attempt in range(3):
+                try:
+                    result = fb('getvar', 'result')
+                    break
+                except subprocess.TimeoutExpired:
+                    if attempt == 2:
+                        raise
+                    time.sleep(2)
+            if 'result: running' not in result:
+                break
             if time.monotonic() >= deadline:
                 raise RuntimeError('Kernel did not return; preserve the screen and inspect the live log')
             if args.command=='run' and args.live_log and time.monotonic()>=next_live:
