@@ -26,6 +26,7 @@ extern kern_return_t thread_terminate(thread_t);
 
 static uintptr_t parf, phy, dbi, iatu, conf, sm, gcc, tlmm;
 static int pcie_step;
+static int pcie_windows;        /* boot-arg pcie_windows=1: allow the guarded reads */
 
 static uint32_t
 rd(uintptr_t base, uint32_t offset)
@@ -111,6 +112,21 @@ reset_pulse(uint32_t offset)
 	wr(gcc, offset, 0u);
 }
 
+/*
+ * Whether the PCIe register windows (PARF/PHY/DBI/SM) can be read at all. They sit
+ * behind the PCIe core's clock and power domain; a read of a window whose clocks are
+ * halted can hang the AHB instead of returning. Both registers read here are in the
+ * always-on GCC block.
+ */
+static bool
+windows_clocked(void)
+{
+	uint32_t gdsc = rd(gcc, GIULIA_GCC_PCIE0_GDSCR);
+	uint32_t halt = rd(gcc, GIULIA_GCC_PCIE0_SLV_HALT);
+
+	return (gdsc & 0x80000000u) != 0 && (halt & 0x80000000u) == 0;
+}
+
 static void
 survey(void)
 {
@@ -124,11 +140,6 @@ survey(void)
 	    rd(gcc, GIULIA_GCC_PCIE0_Q2A_HALT), rd(gcc, GIULIA_GCC_PCIE0_PIPE_HALT));
 	printf("pcie: gcc bcr core=%#x phy=%#x\n",
 	    rd(gcc, GIULIA_GCC_PCIE0_CORE_BCR), rd(gcc, GIULIA_GCC_PCIE0_PHY_BCR));
-	printf("pcie: parf %#x %#x %#x %#x\n", rd(parf, 0), rd(parf, 0x40),
-	    rd(parf, 0x1000), rd(parf, 0x2c00));
-	printf("pcie: phy status=%#x\n", rd(phy, GIULIA_PCIE_PHY_STATUS));
-	printf("pcie: dbi id=%#x class=%#x link=%#x cap=%#x ctrl=%#x\n",
-	    rd(dbi, 0), rd(dbi, 8), rd(dbi, 0x80), rd(dbi, 0xa0), rd(dbi, 0x78));
 	printf("pcie: gpio perst=%#x/%#x clkreq=%#x/%#x wake=%#x/%#x\n",
 	    rd(tlmm, GIULIA_PCIE_PERST_GPIO * 0x1000), rd(tlmm, GIULIA_PCIE_PERST_GPIO * 0x1000 + 4),
 	    rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000), rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000 + 4),
@@ -136,6 +147,22 @@ survey(void)
 	printf("pcie: cnss wlan_en=%#x/%#x sw_ctrl=%#x/%#x\n",
 	    rd(tlmm, GIULIA_CNSS_WLAN_EN_GPIO * 0x1000), rd(tlmm, GIULIA_CNSS_WLAN_EN_GPIO * 0x1000 + 4),
 	    rd(tlmm, GIULIA_CNSS_SW_CTRL_GPIO * 0x1000), rd(tlmm, GIULIA_CNSS_SW_CTRL_GPIO * 0x1000 + 4));
+	if (!pcie_windows) {
+		printf("pcie: window reads are off (pcie_windows=1 turns them on); gcc/tlmm only\n");
+		printf("pcie: step 1 done\n");
+		return;
+	}
+	if (!windows_clocked()) {
+		printf("pcie: windows not clocked (gdsc=%#x slv_halt=%#x): PARF/PHY/DBI/SM left unread\n",
+		    rd(gcc, GIULIA_GCC_PCIE0_GDSCR), rd(gcc, GIULIA_GCC_PCIE0_SLV_HALT));
+		printf("pcie: step 1 done (gcc/tlmm only; step 2 powers the windows)\n");
+		return;
+	}
+	printf("pcie: parf %#x %#x %#x %#x\n", rd(parf, 0), rd(parf, 0x40),
+	    rd(parf, 0x1000), rd(parf, 0x2c00));
+	printf("pcie: phy status=%#x\n", rd(phy, GIULIA_PCIE_PHY_STATUS));
+	printf("pcie: dbi id=%#x class=%#x link=%#x cap=%#x ctrl=%#x\n",
+	    rd(dbi, 0), rd(dbi, 8), rd(dbi, 0x80), rd(dbi, 0xa0), rd(dbi, 0x78));
 	printf("pcie: sm %#x %#x %#x %#x\n", rd(sm, 0), rd(sm, 4), rd(sm, 8), rd(sm, 0xc));
 	printf("pcie: step 1 done\n");
 }
@@ -242,6 +269,7 @@ giulia_pcie_init(void)
 		return;
 	}
 	pcie_step = (int)step;
+	PE_parse_boot_argn("pcie_windows", &pcie_windows, sizeof(pcie_windows));
 	if (kernel_thread_start(pcie_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}

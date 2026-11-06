@@ -2822,3 +2822,20 @@ it to 162 µs; frame time −121 µs, no stale textures, the same copy counts
 (50 copied / 4 shared). End screenshot 20261106-211230-screen.png: home screen
 correct.
 
+### PCIe M1 step 1, first run: the loader's USB went away (2026-11-06 evening)
+
+`run --seconds 180 --bootcpu 1 --pcie 1 --kernel out/giulia-kernel/mach.autotest
+--root-image local/root-daily.apfs` (no `--touch`, no GPU flags — a deviation from
+the 10-30 recipe). The payload uploaded; `fastboot getvar result` timed out 20 s
+later and the loader's USB disappeared. The phone then enumerated as "Qualcomm
+HS-USB Diagnostics 900E (COM11)"; neither adb nor fastboot sees it. **Physical
+power cycle needed**; no run log exists to read back.
+
+Hypothesis (unverified): step 1 read the PARF/PHY/DBI/`pcie_sm` windows while the
+PCIe core's clocks/GDSC may have been off, and a read of an unclocked window can
+hang the AHB. Window reads are now **opt-in** (`pcie_windows=1`) and, when asked
+for, guarded by `windows_clocked()` (core GDSC bit 31 set and `SLV_HALT` bit 31
+clear, both from always-on GCC). Without the flag step 1 reads only GCC/TLMM and
+says so. Next run: the validated recipe WITH `--touch --gpu-probe 20 --gpu-direct
+--gpu-keep`.
+
