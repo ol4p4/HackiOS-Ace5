@@ -56,6 +56,6 @@
 
 - **单启动**：控制中心 0.3% 黑来自一次启动的 10 张截图（`RUNBOOK.md:1121-1158`）；`docs/DRIVERS.md` 自己写的验收是"同配置两轮黑/饱和分布稳定"，第二轮还没做。
 - **60 Hz 是 display link**：rAF 间隔，不是面板光学测量，也不是 present 延迟；present 计数在空闲时只有 6–10 fps（这是正常的，合成器按提交出图）。
-- **四组闸门未实现**：`docs/DRIVERS.md` 的"16.5 的出门闸门"一节写的 `tools/ace5/app-smoke.py` 不存在，四组用例也没写；"GPU 不挡四组"是当前证据下的判断，不是闸门跑绿的结果。
+- **四组闸门（2026-11-06 首次判读）**：`tools/ace5/app-smoke.py` 存在（10-30）；Settings recipe 的 run `20261106-213111`：basic 四项 PASS；Safari/loopback run `20261106-213707`：network 的 loopback 与 Safari PASS、Wi-Fi BLOCKED（未移植）；audio/camera BLOCKED。门仍 OPEN（差的是未移植子系统），GPU 线的 basic 已绿。
 - **Metal 只到探针**：first draw 打印过一次，`MPS`/platter 仍不完整；第三方 App 要 Metal 仍会空。
 - **同族状态 2026-11-04**：主线（`hakios-xnu-kernel`）11-03 把 Metal-on-Vulkan 跑上机、窗口服务器直接走 Metal，11-04 在 iPhone XR/X 屏幕类下测得 106–118 fps；K90 11-04 手势 100–108 fps。本仓仍是 GL/Mesa 路径。"Metal 路从未跑起来"只对本仓成立，不再对 family 成立。

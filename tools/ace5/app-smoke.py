@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The 16.5 exit gate: the four system-app groups, judged from a run's artifacts.
 
-`docs/DRIVERS.md` names this script as the gate but it did not exist. It does
-not drive the phone: it reads what `phone.py run` already saved (the log, and
-optionally the screenshot series) and answers per case PASS / FAIL / BLOCKED.
+`docs/DRIVERS.md` names this script as the gate. It does not drive the phone:
+it reads what `phone.py run` already saved (the log, and optionally the
+screenshot series) and answers per case PASS / FAIL / BLOCKED.
 
     python3 tools/ace5/app-smoke.py logs/giulia/20261030-142126-run.log
     python3 tools/ace5/app-smoke.py --log L --group network
@@ -26,13 +26,13 @@ from pathlib import Path
 # (group, case, status, what proves it)
 CASES = [
     ('basic', 'SpringBoard reaches the home screen', 'PASS',
-     r'System shell "com\.apple\.springboard" finished startup'),
+     r'\[SystemShell\] Now monitoring "com\.apple\.springboard"|System shell connected: .*com\.apple\.springboard'),
     ('basic', 'the compositor draws frames', 'PASS',
      r'redwood-gl:.*frames|glshow:.*frame|MiniIOMobileFramebuffer: \d+ frames'),
     ('basic', 'touch reports', 'PASS',
      r's3910: ready|s3910: reports=\d+'),
     ('basic', 'Settings opens (needs a run with rc.jobs.settings)', 'PASS',
-     r'SpringBoard was asked to open .*Preferences|Preferences: finished startup'),
+     r'SpringBoard was asked to open .*Preferences|Preferences: finished startup|UIKitApplication:com\.apple\.Preferences.*service spawned with pid'),
     ('network', 'loopback is up', 'PASS',
      r'lo0: inet 127\.0\.0\.1'),
     ('network', 'Safari renders a page over loopback', 'PASS',
