@@ -36,6 +36,12 @@
 - 梯子：1（基线）→ 6 → 12，每档跑同一手势脚本，`tools/frames.py` 判 89%/70% 窗口；高频率可能挂死，giulia 没有 GPU 恢复，只能物理重启。
 - 归因：`eagl.c` 的 summary 和每 20 帧行现在分别打印 `hashing`（整面哈希）、`mirroring`（镜像纹理）、`uploading`（glTexImage2D）。先跑基线，再按数字决定改哪一个。
 
+**实测（2026-11-06，同一手势脚本 4 次）**：
+
+- DCVS 1/6/12（231/578/903 MHz）：帧时间 2812 / 2861 / 2814 µs，手势帧率与 >16.7 ms 比例都在噪声内——**这条 UI 路径在 231 MHz 下不是 GPU 频率瓶颈**；903 MHz 跑完不挂，档位可留给重负载（Metal/Vulkan）用。
+- 每帧成本：`hashing` 330 µs、`mirroring` 1 µs、`uploading` 5–6 µs、`attach` ~10 µs。**旧数字里的 792 µs "making textures"，可归因的主要就是整面哈希**；上传只有 5 µs，说明绝大多数哈希结论是"没变"。
+- 把哈希改成 4 条独立 lane（仍是全覆盖、同一混合）：**330 → 162 µs/帧**，帧时间 2812 → 2691 µs；>16.7 ms 比例不变（60 Hz 节拍限制），0 错误、无陈旧纹理。
+
 如果重开 Metal 线，起点不是 `RedwoodMetal` 的运行时，而是同族已经跑通的那条：`superboyyy/hakios-arm64e-dada` 的 `gpu2/`（metal2vulkan + NativeMetal + Turnip 补丁）与 `UniXNU/AdrenoMetal`；我们的 Turnip gate 1–8（step 9 已备）正好是这条路的底座，缺的 WSI/CA 桥在那边有实现可对照。
 
 ## 4. 明确不需要的

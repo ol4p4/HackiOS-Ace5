@@ -2798,3 +2798,27 @@ returns); at 400 ms it has (Messages' "Shared with You" ~320 ms after the tap).
 **Music crashed with SIGSEGV on all three launches** (`UIKitApplication:com.apple.Music
 … exited due to SIGSEGV`) — an app fault, not display.
 
+### GPU clock ladder and the IOSurface hash's cost (2026-11-06)
+
+Four runs, one script (`touch_auto=45 touch_auto_exit=1 glframes=1 touch_lat=1`,
+`ca_vbl=1 fb_minint=1`), same kernel (`out/giulia-kernel/mach.autotest`, built from
+the full `xnu/files` overlay) and root (`root-daily.apfs` with `libredwood-gl.dylib`).
+The stage-15 line names the point:
+
+| run | `ace5_gpu_speed` | stage 15 | frame | hashing | GPU wait |
+| --- | --- | --- | --- | --- | --- |
+| 20261106-210254 | 1 | point 1, 231000 kHz | 2812 µs | 330 µs | 445 µs |
+| 20261106-210615 | 6 | point 6, 578000 kHz | 2861 µs | 332 µs | 508 µs |
+| 20261106-210931 | 12 | point 12, 903000 kHz | 2814 µs | 330 µs | 516 µs |
+| 20261106-211230 | 1, 4-lane hash | point 1, 231000 kHz | 2691 µs | 162 µs | 445 µs |
+
+Gesture fps and the >16.7 ms share do not move across the ladder (58–59 fps on the
+swipes, 4 % / 2 % all gestures); the clock is not this path's limit at 231 MHz.
+903 MHz ran clean (0 errors, no hang). Per-frame attribution: `hashing` 330 µs,
+`mirroring` 1 µs, `uploading` 5–6 µs, `attach` ~10 µs — the old "792 µs making
+textures" is mostly the whole-surface hash, and uploads of 5 µs say almost every
+hash concludes "unchanged". Four independent lanes (full coverage, same mix) halve
+it to 162 µs; frame time −121 µs, no stale textures, the same copy counts
+(50 copied / 4 shared). End screenshot 20261106-211230-screen.png: home screen
+correct.
+

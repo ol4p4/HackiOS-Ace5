@@ -659,14 +659,32 @@ surface_changed(struct eagl *e, struct image *image)
 	size_t size = IOSurfaceGetBytesPerRow(surface) * (size_t)(image->height - 1) +
 	    (size_t)image->width * bytes_a_pixel(image->format, image->type);
 	const uint8_t *base = IOSurfaceGetBaseAddress(surface);
-	uint64_t sum = size, word;
+	uint64_t sum, word;
 
 	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
 		return false;
 	}
 	image->looked = e->frames + 1;
 	uint64_t started = now_us();
-	for (size_t at = 0; at + 8 <= size; at += 8) {
+	/* Four independent lanes: the mix is a serial multiply chain, and one lane leaves the
+	 * whole surface at the speed of that chain. Full coverage, same idea, four chains wide. */
+	uint64_t s0 = size, s1 = 0x9e3779b97f4a7c15ull, s2 = 0xc2b2ae3d27d4eb4full, s3 = 0x165667b19e3779f9ull;
+	size_t at = 0;
+
+	for (; at + 32 <= size; at += 32) {
+		uint64_t w0, w1, w2, w3;
+
+		memcpy(&w0, base + at, 8);
+		memcpy(&w1, base + at + 8, 8);
+		memcpy(&w2, base + at + 16, 8);
+		memcpy(&w3, base + at + 24, 8);
+		s0 = (s0 ^ w0) * 0x9e3779b97f4a7c15ull; s0 ^= s0 >> 29;
+		s1 = (s1 ^ w1) * 0x9e3779b97f4a7c15ull; s1 ^= s1 >> 29;
+		s2 = (s2 ^ w2) * 0x9e3779b97f4a7c15ull; s2 ^= s2 >> 29;
+		s3 = (s3 ^ w3) * 0x9e3779b97f4a7c15ull; s3 ^= s3 >> 29;
+	}
+	sum = (s0 ^ s1 ^ s2 ^ s3) + size;
+	for (; at + 8 <= size; at += 8) {
 		memcpy(&word, base + at, 8);
 		sum = (sum ^ word) * 0x9e3779b97f4a7c15ull;
 		sum ^= sum >> 29;
