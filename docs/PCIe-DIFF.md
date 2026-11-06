@@ -54,3 +54,42 @@ giulia 一列来自 `dtb/giulia.dtb`（`tools/ace5/hw-facts.py`、`tools/ace5/pc
 - annibale：GitHub `iola1999/hackios-redmi-k90-annibale` 的 `docs/progress/2026-10-26-wifi-pcie-survey.md`、`docs/plan/wcn7850-plan.md`（代码未公开）。
 - thyme：GitHub `azzlantern/hackios-thyme` 的 `devices/thyme/overlays/xnu/files/bsd/dev/umi_pcie.c`、`umi_pcie_phy.h`、`umi_mhi.c`。
 - giulia：`dtb/giulia.dtb` → `docs/ACE5-HW.md`、`xnu/files/bsd/dev/giulia_pcie_regs.h`。
+
+## 6. K90 的实测与源码（2026-11-06，源码已公开）
+
+`docs/WIFI.md` 写"annibale 的 `redwood_pcie.c` 没有公开"已过时：2026-11-06 时
+`iola1999/hackios-xnu-kernel` 的 `xnu/files/bsd/dev/` 下有完整的
+`mhi_pcie.c`、`mhi_pcie_power.c`、`mhi_pcie_fw.c`、`mhi_pcie_wlfw.c`、
+`mhi_pcie_phy_seq.h`、`mhi_pcie_private.h`，可直接读。
+
+他们踩过与本次相同的坑，并把结论写进了 `mhi_pcie.c` 的注释：
+
+- **step 1 只读 GCC/TLMM**：两个 PCIe GDSC、根复合体的时钟、DT 接的六个引脚
+  （wlan-en 16、sw-ctrl 18/19、perst 102、clkreq 103、wake 104）。
+- **step 2 才读根复合体**，而且有两个前提：① 隔 30 秒，"so that the host has step 1's
+  report if these reads stall the SoC"；② 两个 GDSC 都 `PWR_ON` 且 `cfg_ahb`、`slv_axi`、
+  `mstr_axi`、`aux` 时钟都在跑（`show_power()` 的 `readable`）。读的是 LTSSM、
+  LINKCTRLSTATUS、PHYSTATUS、DBI 里的 RC 头、整个 iATU 窗。
+- **他们的第一次把根复合体读取放在 step 1（内核 `474d6e9`），第 8 秒就不回 USB 了**
+  ——和我们在 2026-11-06 遇到的两次完全同型。
+- 映射本身是安全的：他们在 survey 一开始就把 parf/phy/dm_core/conf/pcie_sm/gcc/tlmm
+  全映射了；**杀 USB 的是读，不是 map**。
+
+对本板的含义：`giulia_pcie.c` 现在的 step 1（不映射、不读 PCIe 窗，只 GCC/TLMM）就是
+K90 的 step 1；窗读取必须另行成步，并满足他们的两个前提。`windows_clocked()` 也要按
+K90 的规则收紧：两个 GDSC + 四个时钟，而不是只看 core GDSC 一个位。
+
+## 7. step 2 上电顺序对照（2026-11-06，读 `mhi_pcie_power.c`）
+
+| 阶段 | K90（`mhi_pcie_power_up`） | 我们（`giulia_pcie.c`） | 差异 |
+| --- | --- | --- | --- |
+| PERST / WLAN_EN 拉低 | B：PERST 2 mA、WLAN_EN 8 mA 输出低 | `gpio_out` 两脚拉低 | 同 |
+| RPMh 供电 | C：从 cmd-db 找齐七路 `vdd-wlan-*` 再投票 | **没有** | 缺；没有供电 PHY/卡不会起 |
+| 电源域与时钟 | D：两个 GDSC + `clocks_on()` | GDSC core/phy + vote `0x2f` | 同 |
+| 复位与控制器 glue | E/F：`resets_pulse()` 后 **`parf_setup()`**（DBI_BASE_ADDR_V2、RO_WR_EN、LNKCTL2 目标 Gen1） | 只有复位脉冲，**没有 parf_setup** | 缺 |
+| PHY | G：厂商序列 | DTB 115 步序列 | 同 |
+| 卡使能 | H：WLAN_EN 高 → 50 ms → CLKREQ/WAKE 引脚 → `root_port_setup` → 50 ms（使能到 PERST 100 ms）→ **PERST 高** | **先 PERST 高，再 WLAN_EN 高** | 顺序相反 |
+| 链路训练 | `PARF_LTSSM |= LTSSM_EN`，10 × 90 ms 轮询状态机与 LINKCTRLSTATUS | 只轮询 DBI 的 LINKCTRLSTATUS，**没有写 LTSSM_EN** | 缺 |
+
+step 2 真正上机前，这四处（RPMh 七路、parf_setup、使能→PERST 顺序、LTSSM_EN）要补齐；
+否则链路不会按 PCIe 规范起来。

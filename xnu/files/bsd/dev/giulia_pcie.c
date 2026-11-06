@@ -113,18 +113,20 @@ reset_pulse(uint32_t offset)
 }
 
 /*
- * Whether the PCIe register windows (PARF/PHY/DBI/SM) can be read at all. They sit
- * behind the PCIe core's clock and power domain; a read of a window whose clocks are
- * halted can hang the AHB instead of returning. Both registers read here are in the
- * always-on GCC block.
+ * Whether the PCIe register windows (PARF/PHY/DBI/SM) can be read at all. K90's rule
+ * (mhi_pcie.c, step 2): both power domains on AND the cfg_ahb/slv_axi/mstr_axi/aux
+ * clocks running. All of these are in the always-on GCC block. Their first run with
+ * these reads in step 1 (kernel 474d6e9) stopped answering USB 8 s into the boot.
  */
 static bool
 windows_clocked(void)
 {
-	uint32_t gdsc = rd(gcc, GIULIA_GCC_PCIE0_GDSCR);
-	uint32_t halt = rd(gcc, GIULIA_GCC_PCIE0_SLV_HALT);
+	uint32_t core = rd(gcc, GIULIA_GCC_PCIE0_GDSCR);
+	uint32_t phy = rd(gcc, GIULIA_GCC_PCIE0_PHY_GDSCR);
+	uint32_t clocks = rd(gcc, GIULIA_GCC_PCIE0_SLV_HALT) | rd(gcc, GIULIA_GCC_PCIE0_MSTR_HALT) |
+	    rd(gcc, GIULIA_GCC_PCIE0_AHB_HALT) | rd(gcc, GIULIA_GCC_PCIE0_AUX_HALT);
 
-	return (gdsc & 0x80000000u) != 0 && (halt & 0x80000000u) == 0;
+	return (core & 0x80000000u) != 0 && (phy & 0x80000000u) != 0 && (clocks & 0x80000000u) == 0;
 }
 
 static void
