@@ -232,18 +232,28 @@ pcie_thread(__unused void *arg, __unused wait_result_t wait)
 {
 	int error = 0;
 
+	printf("pcie: thread start, step %d windows %d\n", pcie_step, pcie_windows);
+	gcc = ml_io_map(0x100000, 0x1f4200);
+	tlmm = ml_io_map(0xf000000, 0x100000);
+	if (!gcc || !tlmm) {
+		printf("pcie: gcc/tlmm map failed gcc=%p tlmm=%p\n", (void *)gcc, (void *)tlmm);
+		goto out;
+	}
+	if (pcie_step == 1 && !pcie_windows) {
+		survey();               /* gcc/tlmm only: the PCIe windows are not mapped */
+		goto out;
+	}
+
 	parf = ml_io_map(GIULIA_PCIE_PARF, GIULIA_PCIE_PARF_SIZE);
 	phy = ml_io_map(GIULIA_PCIE_PHY, GIULIA_PCIE_PHY_SIZE);
 	dbi = ml_io_map(GIULIA_PCIE_DM_CORE, 0x2000);
 	iatu = ml_io_map(GIULIA_PCIE_IATU, GIULIA_PCIE_IATU_SIZE);
 	conf = ml_io_map(GIULIA_PCIE_CONF, 0x1000);
 	sm = ml_io_map(GIULIA_PCIE_PCIE_SM, GIULIA_PCIE_PCIE_SM_SIZE);
-	gcc = ml_io_map(0x100000, 0x1f4200);
-	tlmm = ml_io_map(0xf000000, 0x100000);
-	if (!parf || !phy || !dbi || !iatu || !conf || !sm || !gcc || !tlmm) {
-		printf("pcie: map failed parf=%p phy=%p dbi=%p iatu=%p conf=%p sm=%p gcc=%p tlmm=%p\n",
+	if (!parf || !phy || !dbi || !iatu || !conf || !sm) {
+		printf("pcie: map failed parf=%p phy=%p dbi=%p iatu=%p conf=%p sm=%p\n",
 		    (void *)parf, (void *)phy, (void *)dbi, (void *)iatu,
-		    (void *)conf, (void *)sm, (void *)gcc, (void *)tlmm);
+		    (void *)conf, (void *)sm);
 		goto out;
 	}
 
@@ -254,8 +264,8 @@ pcie_thread(__unused void *arg, __unused wait_result_t wait)
 	} else {
 		printf("pcie: step %d not implemented\n", pcie_step);
 	}
-	printf("pcie: step %d finished rc=%d\n", pcie_step, error);
 out:
+	printf("pcie: step %d finished rc=%d\n", pcie_step, error);
 	thread_terminate(current_thread());
 }
 
