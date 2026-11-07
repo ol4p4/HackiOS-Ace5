@@ -2897,5 +2897,37 @@ reading GPIO 94's config at 0xf05e000, inside other tiles' registers, in every
 
 `pcie_pause=N` (seconds, default 30 before the step-2 reads) is the
 escape hatch that keeps a stalled run diagnosable: the host pulls the log
+
+### PCIe M1, 2026-11-07 continued: the supplies vote confirmed end to end (runs 13:12-14:47)
+
+With the TLMM fix in, one run per finding, each visible live through pcie_log:
+
+- **step 1 green** (run 20261107-122230): cold registers read, loader alive the
+  whole run — the GPIO-bank fix retired the 900E class.
+- **step 2 green** (run 20261107-123736): the gate refused to read the
+  powered-off windows (gdsc 0x22f801, halts all set) — exactly the design.
+- **step 3's supply stage green** (run 20261107-140902 after the TCS rewrite
+  `8d93e37`): all seven cnss-kiwi rails plus rfclka1 found in cmd-db at
+  0x81c60000, and each rail voted `RPMh HAS DONE IT after 100 us` through the
+  apps RSC DRV 2 slot the s39 discipline picked. The card's power is real.
+- Three of our own bugs fixed on the way: the vote overwrote the armed slot's
+  enable register (must OR, per __tcs_buffer_write), the timeout path skipped
+  the reclaim (a dead transfer left armed wedged the DRV2 sequencer — the
+  14:29 run's `s3910 power rc=-13` and the GPU ZAP auth timeout behind it),
+  and the IRQ registers are inside the TCS block at 0xd00, not at the RSC base.
+- **Where it stops**: after the supplies, the GDSC stage fails — the DTB shows
+  both PCIe GDSCs are VOTABLE (`qcom,collapse-vote` = syscon@15214c bit 0 / bit
+  3, the same GCC+0x5214c K90 clears with bits 0/2 on SM8750), the collapse
+  clear is now in, but GDSCR still reads 0x22f801 after the clear — the
+  CFG-GDSCR power-up bit position on SM8650 is unknown (K90's 1<<0 / 1<<2 are
+  a guess). The diagnostic prints gdscr+4 on every timeout.
+- **Cross-boot state discovered**: the GPU CX GDSC and the PCIe supply rails
+  keep their state across a loader return — the 14:47 run's GPU probe refused
+  ("CX already active") because the 14:29 kernel panicked with CX on. The A/B
+  decomposition (`pcie_supplies=0/1`, `pcie_gdsc=0/1`, one kernel covers all
+  cells) must run each cell after a full reboot to Android.
+- A 200 ms timeout is also too short for a first vote; next round polls 400 ms
+  and additionally accepts the command status word's own complete echo as a
+  secondary completion signal.
 before the risky stage.
 
