@@ -29,8 +29,9 @@
  * generated from this phone's device tree. GCC offsets are from Linux's
  * gcc-sm8650.c (see the header). The supplies are the seven regulators the
  * cnss-kiwi node's -supply phandles point at (rpmh-regulator-smpc2/smpc3/
- * ldob15/ldoc3/smpc6/smpc1/smpi4), voted through the apps sequencer at
- * 0x18220000 DRV 2, TCS 1 -- TCS 0 is redwood_adsp.c's.
+ * ldob15/ldoc3/smpc6/smpc1/smpi4), voted through the apps RSC's DRV 2 at
+ * 0x17a20000 -- the sequencer giulia_s3910.c already votes ldob4 through,
+ * one rail per transaction in s39_power's exact slot discipline.
  */
 #include <kern/clock.h>
 #include <kern/sched_prim.h>
@@ -250,33 +251,38 @@ survey_step2(void)
 /* ---- C: RPMh -- the card's seven supplies --------------------------------------- */
 
 /*
- * The same sequencer redwood_adsp.c asks the DSP's rails through: the apps RSC
- * at 0x18220000, DRV 2, whose TCS 0 and 1 serve requests made at once. TCS 0
- * is redwood_adsp.c's; this driver uses TCS 1. Layout from that driver (RSC
- * v2: a TCS is 672 bytes from 0xd00, a command 20 bytes from 0x30).
+ * The apps RSC's DRV 2 at 0x17a20000 -- the sequencer giulia_s3910.c votes the
+ * touch panel's ldob4 through, on this phone. RSC v3 (the driver checks the
+ * layout's major in rsc_id): the three ACTIVE slot sets sit at 0xd00, 672 bytes
+ * apart; per slot the wait/control/status/enable registers are at
+ * 0x20/0x24/0x28/0x2c and the commands are 24 bytes from 0x34 (message id,
+ * address, value, status). The interrupt registers are global at +0/+4/+8.
+ * Every transaction votes at most three commands on an idle slot and gives the
+ * slot back the way it was (s39_power's path); our votes are one rail each.
  */
-#define PCIE_RSC_PHYS           0x18220000UL
+#define PCIE_RSC_PHYS           0x17a20000UL
 #define PCIE_RSC_SIZE           0x10000UL
-#define PCIE_CMD_DB_PHYS        0x80860000UL
+#define PCIE_CMD_DB_PHYS        0x81c60000UL    /* dt: aop_cmd_db_region@81c60000; S39_DB_PA */
 #define PCIE_CMD_DB_SIZE        0x20000UL
-#define PCIE_TCS                1
 
-#define RSC_TCS(n)              (0xd00 + 672 * (n))
-#define RSC_IRQ_STATUS          0xd04                   /* a bit per TCS: done */
-#define RSC_IRQ_CLEAR           0xd08
-#define TCS_WAIT_FOR_DONE       0x10
-#define TCS_CONTROL             0x14
-#define TCS_STATUS              0x18                    /* not zero: idle */
-#define TCS_ENABLED             0x1c
-#define TCS_COMMAND(c)          (0x30 + 20 * (c))       /* message id, address, value, status */
-#define TCS_ACTIVE_MODE         (1u << 16)
-#define TCS_TRIGGER             (1u << 24)
-#define MSGID_WRITE_WAITED      (8u | 1u << 8 | 1u << 16)  /* four bytes, an answer wanted, a write */
-#define PCIE_TCS_COMMANDS       16
+#define RSC_IRQ_ENABLE          0xd00                   /* the DRV's IRQ registers live in the */
+#define RSC_IRQ_STATUS          0xd04                   /* TCS register block at 0xd00, not at */
+#define RSC_IRQ_CLEAR           0xd08                   /* the RSC base (s39_power waits at +0xd04) */
+#define RSC_ACTIVE_SLOTS        3
+#define RSC_SLOT(n)             (0xd00 + 672 * (n))
+#define TCS_WAIT                0x020
+#define TCS_CONTROL             0x024
+#define TCS_STATUS              0x028
+#define TCS_CMD_ENABLE          0x02c
+#define TCS_COMMAND(c)          (0x034 + 24 * (c))      /* message id, address, value, status */
+#define TCS_CONTROL_ENABLE      (1u << 16)
+#define TCS_CONTROL_TRIGGER     (1u << 24)
+#define MSGID_WRITE_WAITED      0x10108                 /* four bytes, an answer wanted, a write */
+#define RSC_LAYOUT_MAJOR        3                       /* (rsc_id >> 16) & 255 must be this */
 
 /*
- * VRM set: the voltage at +0 in millivolts, the enable at +4, the mode at +8
- * (K90's mhi_pcie_power.c; cmd-db marks a regulator's kind in bits 19:16).
+ * VRM set: the voltage at +0 in millivolts, the enable at +4, the mode at +8;
+ * cmd-db marks a regulator's kind in bits 19:16 of its address (4: VRM).
  */
 #define VRM_VOLTAGE             0
 #define VRM_ENABLE              4
@@ -284,23 +290,6 @@ survey_step2(void)
 #define VRM_MODE_LDO_HPM        7
 #define CMD_DB_VRM              4
 #define VRM_CLOCK_ENABLE        4
-
-struct cmd_db_slave {
-	uint16_t id, header_offset, data_offset, count, version, reserved[3];
-};
-struct cmd_db_header {
-	uint32_t version;
-	uint8_t magic[4];
-	struct cmd_db_slave slave[8];
-	uint32_t checksum, reserved;
-	uint8_t data[];
-};
-struct cmd_db_entry {
-	char id[8];
-	uint32_t priority[2];
-	uint32_t address;
-	uint16_t length, offset;
-};
 
 /*
  * The card's seven regulators, in the order the vendor's cnss driver turns
@@ -324,82 +313,145 @@ static const struct supply {
 };
 
 static uint32_t
+le32(const uint8_t *p)
+{
+	return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* The regulator's RPMh address by its cmd-db id (s39_find_ldob4's walk). */
+static uint32_t
 rpmh_address(const char *name)
 {
-	const struct cmd_db_header *db = (const struct cmd_db_header *)cmd_db;
-	char id[8] = { 0 };
-	uint32_t address = 0;
+	const uint8_t *db = (const uint8_t *)cmd_db;
+	uint8_t id[8] = { 0 };
 
-	if (db == NULL || !(db->magic[0] == 0xdb && db->magic[1] == 0x30 && db->magic[2] == 0x03 && db->magic[3] == 0x0c)) {
-		pcie_log("pcie: power: the boot loader's command database is not there\n");
+	if (cmd_db == 0) {
+		pcie_log("pcie: power: the command database is not mapped\n");
 		return 0;
 	}
-	strlcpy(id, name, sizeof(id));
-	for (unsigned s = 0; s < 8 && address == 0; s++) {
-		const struct cmd_db_slave *slave = &db->slave[s];
-		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(db->data + slave->header_offset);
+	if (le32(db + 4) != 0x0c0330dbu) {
+		pcie_log("pcie: power: the command database's magic is %#x\n", le32(db + 4));
+		return 0;
+	}
+	for (unsigned i = 0; i < 8 && name[i]; i++) {
+		id[i] = (uint8_t)name[i];
+	}
+	for (unsigned s = 0; s < 8; s++) {
+		const uint8_t *d = db + 8 + s * 16;
+		unsigned off = d[2] | d[3] << 8, count = d[6] | d[7] << 8;
 
-		if (slave->id == 0 || slave->header_offset >= PCIE_CMD_DB_SIZE - 0x1000 || slave->count > 512) {
+		if ((d[0] == 0 && d[1] == 0) || count > 512 || off + count * 24 > PCIE_CMD_DB_SIZE - 144) {
 			continue;
 		}
-		for (unsigned i = 0; i < slave->count; i++) {
-			if (memcmp(entry[i].id, id, sizeof(id)) != 0) {
+		for (unsigned i = 0; i < count; i++) {
+			const uint8_t *e = db + 144 + off + 24 * i;
+
+			if (memcmp(e, id, sizeof(id)) != 0) {
 				continue;
 			}
-			address = entry[i].address;
+			uint32_t address = le32(e + 16);
 			if ((address >> 16 & 0xf) != CMD_DB_VRM) {
 				pcie_log("pcie: power: %s is at %#x and is not tagged as a regulator\n", name, address);
 				return 0;
 			}
-			break;
+			return address;
 		}
 	}
-	if (address == 0) {
-		pcie_log("pcie: power: the command database has no \"%s\"\n", name);
-	}
-	return address;
+	pcie_log("pcie: power: the command database has no \"%s\"\n", name);
+	return 0;
 }
 
-/* Up to PCIE_TCS_COMMANDS writes in one transaction on TCS 1, waited for. The shared
- * interrupt registers are touched only in this TCS's bit. */
+/*
+ * One transaction of at most three VRM commands on an idle ACTIVE slot, the
+ * slot's previous commands saved and given back -- s39_power's exact path, so
+ * nothing is written that the touch driver has not already proven works.
+ */
 static bool
-rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
+rpmh_vote(const uint32_t *addresses, const uint32_t *values, unsigned count)
 {
-	uint32_t mask = count >= 32 ? 0xffffu : (1u << count) - 1;
+	uintptr_t base = rsc + 0xd00, t = 0;
+	uint32_t saved[9], irq, control, wait;
+	uint32_t mask;
 	bool done = false;
+	unsigned slot, i;
 
-	if (count == 0 || count > PCIE_TCS_COMMANDS) {
+	if (count == 0 || count > 3) {
 		return false;
 	}
-	if (rd(rsc, TCS_STATUS) == 0) {
-		pcie_log("pcie: power: TCS %u of the sequencer is busy (status %#x, control %#x)\n", PCIE_TCS,
-		    rd(rsc, TCS_STATUS), rd(rsc, TCS_CONTROL));
+	uint32_t rsc_id = rd(rsc, 0);
+	if (((rsc_id >> 16) & 255) != RSC_LAYOUT_MAJOR) {
+		pcie_log("pcie: power: the sequencer's layout is not v%d (rsc_id %#x); nothing is voted\n",
+		    RSC_LAYOUT_MAJOR, rsc_id);
 		return false;
 	}
-	wr(rsc, RSC_IRQ_CLEAR, 1u << PCIE_TCS);
-	for (unsigned i = 0; i < count; i++) {
-		wr(rsc, RSC_TCS(PCIE_TCS) + TCS_COMMAND(i), MSGID_WRITE_WAITED);
-		wr(rsc, RSC_TCS(PCIE_TCS) + TCS_COMMAND(i) + 4, address[i]);
-		wr(rsc, RSC_TCS(PCIE_TCS) + TCS_COMMAND(i) + 8, data[i]);
+	for (unsigned s = 0; s < RSC_ACTIVE_SLOTS; s++) {
+		uintptr_t c = base + s * 672;
+
+		pcie_log("pcie: power: slot %u: status %#x control %#x enable %#x\n", s,
+		    rd(c, TCS_STATUS), rd(c, TCS_CONTROL), rd(c, TCS_CMD_ENABLE));
 	}
-	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_WAIT_FOR_DONE, mask);
-	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_ENABLED, mask);
-	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_CONTROL, rd(rsc, TCS_CONTROL) & ~(TCS_ACTIVE_MODE | TCS_TRIGGER));
-	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_CONTROL, rd(rsc, TCS_CONTROL) | TCS_ACTIVE_MODE);
-	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_CONTROL, rd(rsc, TCS_CONTROL) | TCS_TRIGGER);
-	for (unsigned waited = 0; waited < 100000; waited += 50) {
-		if (rd(rsc, RSC_IRQ_STATUS) & (1u << PCIE_TCS)) {
-			done = true;
+	/* The armed resting state (control ENABLE|TRIGGER left set) is how a finished
+	 * ACTIVE slot looks; Linux clears and re-triggers the same slot every vote.
+	 * Prefer a disarmed slot, fall back to the first one. */
+	for (slot = 0; slot < RSC_ACTIVE_SLOTS; slot++) {
+		uintptr_t candidate = base + slot * 672;
+
+		if ((rd(candidate, TCS_CONTROL) & TCS_CONTROL_TRIGGER) == 0) {
+			t = candidate;
 			break;
 		}
-		delay_us(50);
 	}
-	pcie_log("pcie: power: RPMh %s; the commands' status %#x, the TCS's %#x\n", done ? "HAS DONE IT" :
-	    "HAS NOT SAID DONE", rd(rsc, RSC_TCS(PCIE_TCS) + TCS_COMMAND(0) + 12),
-	    rd(rsc, RSC_TCS(PCIE_TCS) + TCS_STATUS));
-	wr(rsc, RSC_IRQ_CLEAR, 1u << PCIE_TCS);
-	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_CONTROL, rd(rsc, TCS_CONTROL) & ~(TCS_ACTIVE_MODE | TCS_TRIGGER));
-	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_ENABLED, 0);
+	if (t == 0) {
+		slot = 0;
+		t = base;
+		pcie_log("pcie: power: all slots armed; re-triggering slot 0\n");
+	}
+	pcie_log("pcie: power: voting through slot %u\n", slot);
+	mask = 1u << slot;
+	irq = rd(rsc, RSC_IRQ_ENABLE);
+	control = rd(t, TCS_CONTROL);
+	wait = rd(t, TCS_WAIT);
+	for (i = 0; i < 3; i++) {
+		for (unsigned j = 0; j < 3; j++) {
+			saved[i * 3 + j] = rd(t, TCS_COMMAND(i) + j * 4);
+		}
+	}
+	wr(rsc, RSC_IRQ_CLEAR, mask);
+	for (i = 0; i < count; i++) {
+		wr(t, TCS_COMMAND(i), MSGID_WRITE_WAITED);
+		wr(t, TCS_COMMAND(i) + 4, addresses[i]);
+		wr(t, TCS_COMMAND(i) + 8, values[i]);
+	}
+	/* Linux ORs the new command bits into the armed slot's enable register
+	 * instead of overwriting it (__tcs_buffer_write); clobbering the armed
+	 * bits stalled every transfer in the 13:xx runs. */
+	mask |= rd(t, TCS_CMD_ENABLE);
+	wr(t, TCS_CMD_ENABLE, mask);
+	wr(rsc, RSC_IRQ_ENABLE, irq | mask);
+	wr(t, TCS_CONTROL, control & ~TCS_CONTROL_ENABLE);
+	wr(t, TCS_CONTROL, TCS_CONTROL_ENABLE);
+	wr(t, TCS_CONTROL, TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER);
+	for (i = 0; i < 2000 && (rd(rsc, RSC_IRQ_STATUS) & mask) == 0; i++) {
+		delay_us(100);
+	}
+	done = i < 2000;
+	pcie_log("pcie: power: RPMh %s after %u00 us; the commands' status %#x, control %#x, enable %#x\n",
+	    done ? "HAS DONE IT" : "HAS NOT SAID DONE", i, rd(t, TCS_COMMAND(0) + 12),
+	    rd(t, TCS_CONTROL), rd(t, TCS_CMD_ENABLE));
+	/* Give the slot back the way it was; on timeout do not overwrite in-flight slots. */
+	if (done) {
+		wr(t, TCS_CONTROL, TCS_CONTROL_ENABLE);
+		wr(t, TCS_CMD_ENABLE, 0);
+		wr(t, TCS_WAIT, wait);
+		wr(rsc, RSC_IRQ_CLEAR, mask);
+		wr(rsc, RSC_IRQ_ENABLE, irq);
+		for (unsigned a = 0; a < 3; a++) {
+			for (unsigned j = 0; j < 3; j++) {
+				wr(t, TCS_COMMAND(a) + j * 4, saved[a * 3 + j]);
+			}
+		}
+		wr(t, TCS_CONTROL, control);
+	}
 	return done;
 }
 
@@ -435,37 +487,36 @@ supplies_found(uint32_t *found, uint32_t *xo)
 static bool
 supplies_on(const uint32_t *found, uint32_t xo)
 {
-	uint32_t address[PCIE_TCS_COMMANDS], data[PCIE_TCS_COMMANDS];
-	unsigned count = 0;
+	uint32_t addresses[3], values[3];
 
 	for (unsigned i = 0; i < sizeof(supplies) / sizeof(supplies[0]); i++) {
 		const struct supply *s = &supplies[i];
+		bool done;
 
 		if (s->mv * 1000 < s->min_uv || s->mv * 1000 > s->max_uv) {
 			pcie_log("pcie: power: %u mV for %s is outside %u-%u uV; refused\n", s->mv, s->name, s->min_uv, s->max_uv);
 			return false;
 		}
-		address[count] = found[i] + VRM_VOLTAGE; data[count++] = s->mv;
-		address[count] = found[i] + VRM_ENABLE; data[count++] = 1;
-		pcie_log("pcie: power: %s on at %u mV\n", s->name, s->mv);
-	}
-	if (!rpmh_write(address, data, count)) {
-		pcie_log("pcie: power: the supplies' vote was not confirmed\n");
-		return false;
-	}
-	count = 0;
-	for (unsigned i = 0; i < sizeof(supplies) / sizeof(supplies[0]); i++) {
-		if (!supplies[i].ldo) {
-			continue;
+		addresses[0] = found[i] + VRM_VOLTAGE; values[0] = s->mv;
+		addresses[1] = found[i] + VRM_ENABLE; values[1] = 1;
+		if (s->ldo) {
+			addresses[2] = found[i] + VRM_MODE; values[2] = VRM_MODE_LDO_HPM;
+			done = rpmh_vote(addresses, values, 3);
+		} else {
+			done = rpmh_vote(addresses, values, 2);
 		}
-		address[count] = found[i] + VRM_MODE; data[count++] = VRM_MODE_LDO_HPM;
+		pcie_log("pcie: power: %s on at %u mV: %s\n", s->name, s->mv, done ? "confirmed" : "NOT confirmed");
+		if (!done) {
+			return false;
+		}
 	}
 	if (xo != 0) {
-		address[count] = xo + VRM_CLOCK_ENABLE; data[count++] = 1;
-	}
-	if (count != 0 && !rpmh_write(address, data, count)) {
-		pcie_log("pcie: power: the LDO modes' vote was not confirmed\n");
-		return false;
+		addresses[0] = xo + VRM_CLOCK_ENABLE; values[0] = 1;
+		if (!rpmh_vote(addresses, values, 1)) {
+			pcie_log("pcie: power: the card's crystal's vote was not confirmed\n");
+			return false;
+		}
+		pcie_log("pcie: power: the card's crystal is on\n");
 	}
 	pcie_log("pcie: power: the card's supplies are on\n");
 	return true;
@@ -640,6 +691,12 @@ pcie_thread(__unused void *arg, __unused wait_result_t wait)
 	if (pcie_step == 2) {
 		survey_step2();
 	} else if (pcie_step == 3) {
+		rsc = ml_io_map(PCIE_RSC_PHYS, PCIE_RSC_SIZE);
+		cmd_db = ml_io_map_wcomb(PCIE_CMD_DB_PHYS, PCIE_CMD_DB_SIZE);
+		if (!rsc || !cmd_db) {
+			pcie_log("pcie: map failed rsc=%p cmd_db=%p\n", (void *)rsc, (void *)cmd_db);
+			goto out;
+		}
 		error = power_up();
 		if (error == 0) {
 			survey_windows();
