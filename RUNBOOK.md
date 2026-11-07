@@ -2860,3 +2860,42 @@ starts it or the boot-arg parse fails; a run that dies cannot decide which.
 trigger the survey at runtime (a device ioctl from userland) or from the
 loader/UEFI, so a hang leaves the boot log readable. No more blind pcie runs.
 
+### PCIe M1 root cause: the TLMM GPIO bank, and K90's structure adopted (2026-11-07)
+
+The family survey (K90/thyme/dada/main line; the table in the session log,
+details in docs/PCIe-DIFF.md §6–§8) settled how PCIe bring-up is triggered
+everywhere: a boot arg selects staged steps, a dedicated kernel worker thread
+does every MMIO access, root-complex reads are gated on both GDSCs and four
+clocks, and `pcie_pause=N` sleeps before each stage so the host keeps the
+previous stage's log. Nobody triggers from userland or the loader — so the
+"runtime ioctl / loader-side" redesign is withdrawn; what was missing is the
+gating and one address.
+
+K90's `mhi_pcie_power.c` also records our exact failure shape: their kernel
+`76c1ad6` stopped the SoC reading a pin at a wrong TLMM base. Ours was wrong
+the same way: the device tree's pinctrl is `/soc/pinctrl@f000000` (0x1000000
+long), but the per-pin CFG/IO blocks start at **+0x100000** — the address
+`giulia_s3910_hw.h` calls `S39_TLMM_PA` (0xf100000). `giulia_pcie.c` was
+reading GPIO 94's config at 0xf05e000, inside other tiles' registers, in every
+"safe" run too.
+
+`giulia_pcie.c` now follows K90's structure with this board's numbers:
+
+- **step 1** gcc/tlmm only, TLMM mapped at the GPIO bank (`GIULIA_TLMM_GPIO
+  0x0f100000`, new in giulia_pcie_regs.h).
+- **step 2** the root complex, 30 s later (`pcie_pause`) and only when
+  `windows_clocked()` — both GDSCs on, `cfg_ahb/slv_axi/mstr_axi/aux` running.
+- **step 3** the power-up: the seven supplies the cnss-kiwi node names
+  (smpc2/smpc3/ldob15/ldoc3/smpc6/smpc1/smpi4 — cmd-db names straight from the
+  `-supply` phandles' target nodes), voted through the apps sequencer at
+  0x18220000 DRV 2, TCS 1 (the same sequencer redwood_adsp.c uses; TCS 0 is
+  its); PERST/WLAN_EN low, GDSCs, clocks, resets, `parf_setup` (pcie-qcom
+  init_2_7_0 with our DBI 0x60000000 and iATU 0x60001000), the vendor PHY
+  sequence, WLAN_EN high → 100 ms → `root_port_setup` → PERST high →
+  `LTSSM_EN` → link poll with the LTSSM state printed; on a live link the
+  step-2 survey runs.
+
+`pcie_pause=N` (seconds, default 30 before the step-2 reads) is the
+escape hatch that keeps a stalled run diagnosable: the host pulls the log
+before the risky stage.
+

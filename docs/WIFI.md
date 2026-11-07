@@ -52,11 +52,16 @@ WCN6750 与 WCN7850 的差别只在**总线与固件协议**：6750 走 WPSS（A
 
 M1–M3.5 是"移植 + 板级差异"：annibale 给出同 SoC 的寄存器与流程，thyme 给出 MHI 的接口面，本板要改的是基址、GPIO、RPMh 轨和 SMMU 映射。M4 的 `mhi_*` 接口正好是 ath12k 要的那一小把（`mhi_alloc_controller/mhi_register_controller/mhi_prepare_for_power_up/mhi_sync_power_up/mhi_prepare_for_transfer/mhi_queue_*`），FreeBSD LinuxKPI 没有 MHI 框架，这一层要由我们提供。M5–M6 是"接上 ath12k"，理论上是 `mk-ath11k.sh` 的兄弟脚本加 `DRIVER` 列表。
 
-> **2026-11-06：M1 上机暂停。** `pcie_step=1` 在启动路径里跑了 4 次，每次 loader USB
-> 都在 ~20 s 内消失、手机落 Qualcomm diag 900E（需物理重启）；同一 recipe 去掉
-> `pcie_step` 则 6 次全部正常。唯一返回的一次内核日志（1.44 MB）里**没有任何 `pcie:`
-> 行**。下一步改为运行时触发（设备 ioctl 或 UEFI 里的勘察），不再从启动路径盲跑。
-> 详见 `RUNBOOK.md` 同日条目。
+> **2026-11-06：M1 上机暂停；2026-11-07 病根定位，按 K90 结构重启。** `pcie_step=1`
+> 在启动路径里跑了 4 次，每次 loader USB 都在 ~20 s 内消失、手机落 Qualcomm diag
+> 900E（需物理重启）。调研（四家对照 + K90 源码）找到两件事：① 全家都是"boot-arg
+> 选阶段 + 专职内核线程 + 读前门控 + 每阶段暂停"，没有人从 userland/loader 触发；
+> ② 病根是 **TLMM 基址**——本机每引脚寄存器在 pinctrl@f000000 的 **+0x100000**
+> （0xf100000，即 s3910 的 `S39_TLMM_PA`），驱动原来从 0xf000000 读 GPIO 94，
+> 正是 K90 kernel 76c1ad6 "stopped the SoC" 的同型错误。`giulia_pcie.c` 已改成
+> K90 结构（step 1 只读 GCC/TLMM；step 2 隔 30 s 且 `windows_clocked()` 才读根
+> 复合体；step 3 上电含七路 RPMh 供电、`parf_setup`、使能→PERST 顺序、`LTSSM_EN`）。
+> 详见 `RUNBOOK.md` 2026-11-07 条目与 `docs/PCIe-DIFF.md` §6–§8。
 
 **容量预算（2026-10-30 实测）**：小根镜像上限 32 MiB = 33,554,432 字节（`tools/ace5/phone.py:272-273`）。WCN7850 三件实测：`amss.bin` 6,090,816 + `m3.bin` 299,660 + `board-2.bin` 2,431,968 = **8,822,444 字节（8.41 MiB）**；`regdb.bin` 不在 linux-firmware 的 WCN7850 目录里（ath12k 先取 `board-2.bin` 里的 REGDB IE，最后才退回 `regdb.bin`）。把三件放进 `local/root-daily` 的 `fw/` 重打（`mkapfs.py -z --plain fw`）：镜像从 10,743,808 涨到 **19,873,792 字节（18.95 MiB）**，**余量 13,680,640 字节（13.05 MiB）**。结论：**装得下**，不需要分区读取或第二个 ramdisk；但 `fw/` 按 `--plain` 不压缩，后面 ADSP 那几十 MB 固件不能再走这条路。固件查找也已放宽：`redwood_wifi_driver_file()` 对未知名字回落到 `fw/<basename>`（原来只认 WCN6750 的 `board.bin`/`regdb.bin`），否则 ath12k 的 `amss.bin`/`m3.bin`/`board-2.bin` 根本读不到。
 

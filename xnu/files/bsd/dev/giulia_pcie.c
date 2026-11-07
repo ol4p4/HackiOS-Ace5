@@ -1,18 +1,39 @@
 /* OnePlus Ace 5 / giulia PCIe0 host controller (WCN7850's bus).
- * Explicit pcie_step=N opt-in, in the same style as giulia_s3910.c.
+ * Explicit pcie_step=N opt-in, in the same style as giulia_s3910.c and the
+ * same split K90's mhi_pcie.c settled on after their own USB deaths:
  *
- *   pcie_step=1  read-only survey: GDSC/clock/reset state, PARF/PHY/DBI
- *                registers and the PCIe pins. Writes nothing.
- *   pcie_step=2  power-up per Linux pcie-qcom: GDSCs, clock votes, core and
- *                PHY resets, the vendor PHY sequence from the device tree,
- *                PERST/WLAN_EN, then poll for link training. Never writes the
- *                endpoint: config space is M2.
+ *   pcie_step=1  read-only survey of the always-on blocks only: the clock
+ *                controller's PCIe domains/clocks/resets and the card's six
+ *                pins as the firmware left them. The PCIe windows are not
+ *                even mapped. Writes nothing.
+ *   pcie_step=2  read-only survey of the root complex itself, after
+ *                pcie_pause (30 s by default) and only when both power
+ *                domains are on and the four PCIe clocks are running
+ *                (windows_clocked()). Otherwise it says so and reads nothing.
+ *   pcie_step=3  power-up: RPMh votes for the card's seven supplies, PERST
+ *                and WLAN_EN low, GDSCs, clocks, resets, PARF setup, the
+ *                vendor PHY sequence, WLAN_EN high, the root port's header,
+ *                PERST high, LTSSM enable, then the link poll; on a live
+ *                link the step-2 survey runs too.
+ *
+ * pcie_pause=N seconds before each stage, so the host has the previous
+ * stage's log if a read stalls the SoC (K90's kernels 474d6e9 and 32bbef4
+ * stopped answering USB in 8 s without it; ours died the same way).
+ *
+ * The per-pin registers are in the TLMM GPIO bank at 0xf100000 -- the device
+ * tree's pinctrl@f000000 plus 0x100000, the same address giulia_s3910_hw.h
+ * calls S39_TLMM_PA. Reading pin*0x1000 from the pinctrl base itself is what
+ * stopped K90's kernel 76c1ad6, and us (2026-11-06's four 900E rounds).
  *
  * Register windows, pins and the PHY sequence come from giulia_pcie_regs.h,
  * generated from this phone's device tree. GCC offsets are from Linux's
- * gcc-sm8650.c (see the header).
+ * gcc-sm8650.c (see the header). The supplies are the seven regulators the
+ * cnss-kiwi node's -supply phandles point at (rpmh-regulator-smpc2/smpc3/
+ * ldob15/ldoc3/smpc6/smpc1/smpi4), voted through the apps sequencer at
+ * 0x18220000 DRV 2, TCS 1 -- TCS 0 is redwood_adsp.c's.
  */
 #include <kern/clock.h>
+#include <kern/sched_prim.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
@@ -22,11 +43,13 @@
 #include "giulia_pcie_regs.h"
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
 
-static uintptr_t parf, phy, dbi, iatu, conf, sm, gcc, tlmm;
+static uintptr_t parf, phy, dbi, sm, gcc, tlmm, rsc, cmd_db;
 static int pcie_step;
-static int pcie_windows;        /* boot-arg pcie_windows=1: allow the guarded reads */
+static unsigned pcie_pause_s;
+static volatile unsigned pcie_pause_event;
 
 static uint32_t
 rd(uintptr_t base, uint32_t offset)
@@ -45,6 +68,22 @@ static void
 delay_us(unsigned us)
 {
 	delay_for_interval(us, NSEC_PER_USEC);
+}
+
+/*
+ * Seconds of sleep before a stage, so the host has the previous stage's log
+ * if this one stalls the SoC. Sleeps, not spins: the run's other work goes on.
+ */
+static void
+pcie_pause(unsigned seconds, const char *stage)
+{
+	if (seconds == 0) {
+		return;
+	}
+	printf("pcie: next, in %u s: %s\n", seconds, stage);
+	assert_wait_timeout((event_t)&pcie_pause_event, THREAD_UNINT,
+	    seconds * 1000, NSEC_PER_MSEC);
+	thread_block(THREAD_AWAKENED);
 }
 
 static int
@@ -129,10 +168,12 @@ windows_clocked(void)
 	return (core & 0x80000000u) != 0 && (phy & 0x80000000u) != 0 && (clocks & 0x80000000u) == 0;
 }
 
+/* ---- step 1: the always-on blocks -------------------------------------------------------------- */
+
 static void
-survey(void)
+survey_gcc_tlmm(void)
 {
-	printf("pcie: step 1 read-only survey\n");
+	printf("pcie: step 1 read-only survey (gcc/tlmm)\n");
 	printf("pcie: gcc gdsc=%#x phy_gdsc=%#x vote=%#x\n",
 	    rd(gcc, GIULIA_GCC_PCIE0_GDSCR), rd(gcc, GIULIA_GCC_PCIE0_PHY_GDSCR),
 	    rd(gcc, GIULIA_GCC_PCIE_VOTE));
@@ -146,62 +187,361 @@ survey(void)
 	    rd(tlmm, GIULIA_PCIE_PERST_GPIO * 0x1000), rd(tlmm, GIULIA_PCIE_PERST_GPIO * 0x1000 + 4),
 	    rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000), rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000 + 4),
 	    rd(tlmm, GIULIA_PCIE_WAKE_GPIO * 0x1000), rd(tlmm, GIULIA_PCIE_WAKE_GPIO * 0x1000 + 4));
-	printf("pcie: cnss wlan_en=%#x/%#x sw_ctrl=%#x/%#x\n",
+	printf("pcie: cnss wlan_en=%#x/%#x bt_en=%#x/%#x sw_ctrl=%#x/%#x\n",
 	    rd(tlmm, GIULIA_CNSS_WLAN_EN_GPIO * 0x1000), rd(tlmm, GIULIA_CNSS_WLAN_EN_GPIO * 0x1000 + 4),
+	    rd(tlmm, GIULIA_CNSS_BT_EN_GPIO * 0x1000), rd(tlmm, GIULIA_CNSS_BT_EN_GPIO * 0x1000 + 4),
 	    rd(tlmm, GIULIA_CNSS_SW_CTRL_GPIO * 0x1000), rd(tlmm, GIULIA_CNSS_SW_CTRL_GPIO * 0x1000 + 4));
-	if (!pcie_windows) {
-		printf("pcie: window reads are off (pcie_windows=1 turns them on); gcc/tlmm only\n");
-		printf("pcie: step 1 done\n");
-		return;
-	}
-	if (!windows_clocked()) {
-		printf("pcie: windows not clocked (gdsc=%#x slv_halt=%#x): PARF/PHY/DBI/SM left unread\n",
-		    rd(gcc, GIULIA_GCC_PCIE0_GDSCR), rd(gcc, GIULIA_GCC_PCIE0_SLV_HALT));
-		printf("pcie: step 1 done (gcc/tlmm only; step 2 powers the windows)\n");
-		return;
-	}
+	printf("pcie: step 1 done\n");
+}
+
+/* ---- step 2: the root complex, only with power and clocks on -------------------- */
+
+static void
+survey_windows(void)
+{
+	printf("pcie: the root complex's registers, with the domains on and the clocks running\n");
 	printf("pcie: parf %#x %#x %#x %#x\n", rd(parf, 0), rd(parf, 0x40),
 	    rd(parf, 0x1000), rd(parf, 0x2c00));
 	printf("pcie: phy status=%#x\n", rd(phy, GIULIA_PCIE_PHY_STATUS));
 	printf("pcie: dbi id=%#x class=%#x link=%#x cap=%#x ctrl=%#x\n",
 	    rd(dbi, 0), rd(dbi, 8), rd(dbi, 0x80), rd(dbi, 0xa0), rd(dbi, 0x78));
 	printf("pcie: sm %#x %#x %#x %#x\n", rd(sm, 0), rd(sm, 4), rd(sm, 8), rd(sm, 0xc));
-	printf("pcie: step 1 done\n");
 }
+
+static void
+survey_step2(void)
+{
+	pcie_pause(pcie_pause_s ? pcie_pause_s : 30, "the root complex's registers");
+	if (!windows_clocked()) {
+		printf("pcie: domains off or clocks halted, nothing read "
+		    "(gdsc=%#x phy_gdsc=%#x halts %#x/%#x/%#x/%#x)\n",
+		    rd(gcc, GIULIA_GCC_PCIE0_GDSCR), rd(gcc, GIULIA_GCC_PCIE0_PHY_GDSCR),
+		    rd(gcc, GIULIA_GCC_PCIE0_SLV_HALT), rd(gcc, GIULIA_GCC_PCIE0_MSTR_HALT),
+		    rd(gcc, GIULIA_GCC_PCIE0_AHB_HALT), rd(gcc, GIULIA_GCC_PCIE0_AUX_HALT));
+		printf("pcie: step 2 done (nothing read; step 3 powers the card)\n");
+		return;
+	}
+	survey_windows();
+	printf("pcie: step 2 done\n");
+}
+
+/* ---- C: RPMh -- the card's seven supplies --------------------------------------- */
+
+/*
+ * The same sequencer redwood_adsp.c asks the DSP's rails through: the apps RSC
+ * at 0x18220000, DRV 2, whose TCS 0 and 1 serve requests made at once. TCS 0
+ * is redwood_adsp.c's; this driver uses TCS 1. Layout from that driver (RSC
+ * v2: a TCS is 672 bytes from 0xd00, a command 20 bytes from 0x30).
+ */
+#define PCIE_RSC_PHYS           0x18220000UL
+#define PCIE_RSC_SIZE           0x10000UL
+#define PCIE_CMD_DB_PHYS        0x80860000UL
+#define PCIE_CMD_DB_SIZE        0x20000UL
+#define PCIE_TCS                1
+
+#define RSC_TCS(n)              (0xd00 + 672 * (n))
+#define RSC_IRQ_STATUS          0xd04                   /* a bit per TCS: done */
+#define RSC_IRQ_CLEAR           0xd08
+#define TCS_WAIT_FOR_DONE       0x10
+#define TCS_CONTROL             0x14
+#define TCS_STATUS              0x18                    /* not zero: idle */
+#define TCS_ENABLED             0x1c
+#define TCS_COMMAND(c)          (0x30 + 20 * (c))       /* message id, address, value, status */
+#define TCS_ACTIVE_MODE         (1u << 16)
+#define TCS_TRIGGER             (1u << 24)
+#define MSGID_WRITE_WAITED      (8u | 1u << 8 | 1u << 16)  /* four bytes, an answer wanted, a write */
+#define PCIE_TCS_COMMANDS       16
+
+/*
+ * VRM set: the voltage at +0 in millivolts, the enable at +4, the mode at +8
+ * (K90's mhi_pcie_power.c; cmd-db marks a regulator's kind in bits 19:16).
+ */
+#define VRM_VOLTAGE             0
+#define VRM_ENABLE              4
+#define VRM_MODE                8
+#define VRM_MODE_LDO_HPM        7
+#define CMD_DB_VRM              4
+#define VRM_CLOCK_ENABLE        4
+
+struct cmd_db_slave {
+	uint16_t id, header_offset, data_offset, count, version, reserved[3];
+};
+struct cmd_db_header {
+	uint32_t version;
+	uint8_t magic[4];
+	struct cmd_db_slave slave[8];
+	uint32_t checksum, reserved;
+	uint8_t data[];
+};
+struct cmd_db_entry {
+	char id[8];
+	uint32_t priority[2];
+	uint32_t address;
+	uint16_t length, offset;
+};
+
+/*
+ * The card's seven regulators, in the order the vendor's cnss driver turns
+ * them on. Names and ranges from this phone's device tree: the cnss-kiwi
+ * node's -supply phandles point at rpmh-regulator-smpc2/smpc3/ldob15/ldoc3/
+ * smpc6/smpc1/smpi4, and the voted millivolts sit inside each regulator's
+ * min/max (the values Android's boot leaves them at, docs/ACE5-HW.md §1).
+ */
+static const struct supply {
+	const char *name, *what;
+	uint32_t mv, min_uv, max_uv;
+	bool ldo;
+} supplies[] = {
+	{ "smpc2",  "card vdd-wlan-aon (SMPS C2)",   980,  500000, 1036000, false },
+	{ "smpc3",  "card vdd-wlan-dig (SMPS C3)",   916,  904000, 1064000, false },
+	{ "ldob15", "card vdd-wlan-io (LDO B15)",   1800, 1800000, 1800000, true },
+	{ "ldoc3",  "card vdd-wlan-io12 (LDO C3)",  1200, 1200000, 1200000, true },
+	{ "smpc6",  "card vdd-wlan-rfa1 (SMPS C6)", 1866, 1856000, 2000000, false },
+	{ "smpc1",  "card vdd-wlan-rfa2 (SMPS C1)", 1316, 1224000, 1348000, false },
+	{ "smpi4",  "card vdd-wlan (SMPS I4)",       938,  300000, 1004000, false },
+};
+
+static uint32_t
+rpmh_address(const char *name)
+{
+	const struct cmd_db_header *db = (const struct cmd_db_header *)cmd_db;
+	char id[8] = { 0 };
+	uint32_t address = 0;
+
+	if (db == NULL || !(db->magic[0] == 0xdb && db->magic[1] == 0x30 && db->magic[2] == 0x03 && db->magic[3] == 0x0c)) {
+		printf("pcie: power: the boot loader's command database is not there\n");
+		return 0;
+	}
+	strlcpy(id, name, sizeof(id));
+	for (unsigned s = 0; s < 8 && address == 0; s++) {
+		const struct cmd_db_slave *slave = &db->slave[s];
+		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(db->data + slave->header_offset);
+
+		if (slave->id == 0 || slave->header_offset >= PCIE_CMD_DB_SIZE - 0x1000 || slave->count > 512) {
+			continue;
+		}
+		for (unsigned i = 0; i < slave->count; i++) {
+			if (memcmp(entry[i].id, id, sizeof(id)) != 0) {
+				continue;
+			}
+			address = entry[i].address;
+			if ((address >> 16 & 0xf) != CMD_DB_VRM) {
+				printf("pcie: power: %s is at %#x and is not tagged as a regulator\n", name, address);
+				return 0;
+			}
+			break;
+		}
+	}
+	if (address == 0) {
+		printf("pcie: power: the command database has no \"%s\"\n", name);
+	}
+	return address;
+}
+
+/* Up to PCIE_TCS_COMMANDS writes in one transaction on TCS 1, waited for. The shared
+ * interrupt registers are touched only in this TCS's bit. */
+static bool
+rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
+{
+	uint32_t mask = count >= 32 ? 0xffffu : (1u << count) - 1;
+	bool done = false;
+
+	if (count == 0 || count > PCIE_TCS_COMMANDS) {
+		return false;
+	}
+	if (rd(rsc, TCS_STATUS) == 0) {
+		printf("pcie: power: TCS %u of the sequencer is busy (status %#x, control %#x)\n", PCIE_TCS,
+		    rd(rsc, TCS_STATUS), rd(rsc, TCS_CONTROL));
+		return false;
+	}
+	wr(rsc, RSC_IRQ_CLEAR, 1u << PCIE_TCS);
+	for (unsigned i = 0; i < count; i++) {
+		wr(rsc, RSC_TCS(PCIE_TCS) + TCS_COMMAND(i), MSGID_WRITE_WAITED);
+		wr(rsc, RSC_TCS(PCIE_TCS) + TCS_COMMAND(i) + 4, address[i]);
+		wr(rsc, RSC_TCS(PCIE_TCS) + TCS_COMMAND(i) + 8, data[i]);
+	}
+	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_WAIT_FOR_DONE, mask);
+	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_ENABLED, mask);
+	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_CONTROL, rd(rsc, TCS_CONTROL) & ~(TCS_ACTIVE_MODE | TCS_TRIGGER));
+	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_CONTROL, rd(rsc, TCS_CONTROL) | TCS_ACTIVE_MODE);
+	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_CONTROL, rd(rsc, TCS_CONTROL) | TCS_TRIGGER);
+	for (unsigned waited = 0; waited < 100000; waited += 50) {
+		if (rd(rsc, RSC_IRQ_STATUS) & (1u << PCIE_TCS)) {
+			done = true;
+			break;
+		}
+		delay_us(50);
+	}
+	printf("pcie: power: RPMh %s; the commands' status %#x, the TCS's %#x\n", done ? "HAS DONE IT" :
+	    "HAS NOT SAID DONE", rd(rsc, RSC_TCS(PCIE_TCS) + TCS_COMMAND(0) + 12),
+	    rd(rsc, RSC_TCS(PCIE_TCS) + TCS_STATUS));
+	wr(rsc, RSC_IRQ_CLEAR, 1u << PCIE_TCS);
+	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_CONTROL, rd(rsc, TCS_CONTROL) & ~(TCS_ACTIVE_MODE | TCS_TRIGGER));
+	wr(rsc, RSC_TCS(PCIE_TCS) + TCS_ENABLED, 0);
+	return done;
+}
+
+static bool
+supplies_found(uint32_t *found, uint32_t *xo)
+{
+	static const char *const xos[] = { "rfclka1", "rfclka2", "rfclka3" };
+	bool all = true;
+
+	for (unsigned i = 0; i < sizeof(supplies) / sizeof(supplies[0]); i++) {
+		found[i] = rpmh_address(supplies[i].name);
+		printf("pcie: power: %s for the %s at RPMh %#x\n", supplies[i].name, supplies[i].what, found[i]);
+		if (found[i] == 0 || (found[i] >> 16 & 0xf) != CMD_DB_VRM) {
+			all = false;
+		}
+	}
+	*xo = 0;
+	for (unsigned i = 0; i < sizeof(xos) / sizeof(xos[0]) && *xo == 0; i++) {
+		*xo = rpmh_address(xos[i]);
+		if (*xo != 0) {
+			printf("pcie: power: the card's crystal is %s at RPMh %#x\n", xos[i], *xo);
+		}
+	}
+	if (*xo == 0) {
+		printf("pcie: power: no rfclk resource found; the crystal stays as firmware left it\n");
+	}
+	if (!all) {
+		printf("pcie: power: a supply is missing or not tagged as a regulator; nothing is voted\n");
+	}
+	return all;
+}
+
+static bool
+supplies_on(const uint32_t *found, uint32_t xo)
+{
+	uint32_t address[PCIE_TCS_COMMANDS], data[PCIE_TCS_COMMANDS];
+	unsigned count = 0;
+
+	for (unsigned i = 0; i < sizeof(supplies) / sizeof(supplies[0]); i++) {
+		const struct supply *s = &supplies[i];
+
+		if (s->mv * 1000 < s->min_uv || s->mv * 1000 > s->max_uv) {
+			printf("pcie: power: %u mV for %s is outside %u-%u uV; refused\n", s->mv, s->name, s->min_uv, s->max_uv);
+			return false;
+		}
+		address[count] = found[i] + VRM_VOLTAGE; data[count++] = s->mv;
+		address[count] = found[i] + VRM_ENABLE; data[count++] = 1;
+		printf("pcie: power: %s on at %u mV\n", s->name, s->mv);
+	}
+	if (!rpmh_write(address, data, count)) {
+		printf("pcie: power: the supplies' vote was not confirmed\n");
+		return false;
+	}
+	count = 0;
+	for (unsigned i = 0; i < sizeof(supplies) / sizeof(supplies[0]); i++) {
+		if (!supplies[i].ldo) {
+			continue;
+		}
+		address[count] = found[i] + VRM_MODE; data[count++] = VRM_MODE_LDO_HPM;
+	}
+	if (xo != 0) {
+		address[count] = xo + VRM_CLOCK_ENABLE; data[count++] = 1;
+	}
+	if (count != 0 && !rpmh_write(address, data, count)) {
+		printf("pcie: power: the LDO modes' vote was not confirmed\n");
+		return false;
+	}
+	printf("pcie: power: the card's supplies are on\n");
+	return true;
+}
+
+/* ---- F: PARF (pcie-qcom.c init_2_7_0 and configure_dbi_atu_base) -------------------------------- */
+
+static void
+parf_setup(void)
+{
+	vm_offset_t p = parf;
+
+	wr(p, 0x1000, 0x4);                                     /* DEVICE_TYPE: root complex */
+	wr(p, 0x040, rd(p, 0x040) & ~1u);                       /* PHY_CTRL: PHY_TEST_PWR_DOWN off */
+	wr(p, 0x350, GIULIA_PCIE_DM_CORE);                      /* DBI_BASE_ADDR_V2 */
+	wr(p, 0x354, 0);
+	wr(p, 0x634, GIULIA_PCIE_IATU);                         /* ATU_BASE_ADDR */
+	wr(p, 0x638, 0);
+	wr(p, 0x358, 0);                                        /* SLV_ADDR_SPACE_SIZE_V2 */
+	wr(p, 0x35c, 0x80000000);
+	wr(p, 0x000, rd(p, 0x000) & ~(1u << 29));               /* SYS_CTRL: MAC_PHY_POWERDOWN_IN_P2_D_MUX_EN */
+	wr(p, 0x174, rd(p, 0x174) | (1u << 4));                 /* MHI_CLOCK_RESET_CTRL: BYPASS */
+	wr(p, 0x020, rd(p, 0x020) & ~(1u << 5));                /* PM_CTRL: REQ_NOT_ENTR_L1 */
+	wr(p, 0x1a8, rd(p, 0x1a8) | (1u << 31));                /* AXI_MSTR_WR_ADDR_HALT_V2: EN */
+	wr(p, 0x2c48, rd(p, 0x2c48) & ~1u);                     /* vendor CESTA_CLKREQ_SEL off (qcom,pcie-clkreq-offset) */
+}
+
+/* ---- I: the root port's header (a part of dw_pcie_setup_rc) ------------------------------------- */
+
+#define DBI_RO_WR_EN            0x8bc
+#define DBI_LNKCTL2             0xa0                /* the express capability at 0x70 + 0x30 */
+#define PARF_LTSSM              0x1b0
+#define LTSSM_EN                (1u << 8)
+#define DBI_LINKCTRLSTATUS      0x80
+#define LINK_ACTIVE             (1u << 29)
+
+static void
+root_port_setup(void)
+{
+	vm_offset_t d = dbi;
+
+	wr(d, DBI_RO_WR_EN, rd(d, DBI_RO_WR_EN) | 1);
+	wr(d, 0x3c, (rd(d, 0x3c) & 0xffff00ffu) | 0x100);       /* interrupt pin A */
+	wr(d, 0x18, (rd(d, 0x18) & 0xff000000u) | 0x00ff0100);  /* buses: primary 0, secondary 1, subordinate 0xff */
+	wr(d, 0x04, rd(d, 0x04) | 0x107);                       /* IO, memory, bus master, SERR */
+	wr(d, 0x08, (rd(d, 0x08) & 0x0000ffffu) | (0x0604u << 16));     /* class: PCI bridge */
+	wr(d, DBI_LNKCTL2, (rd(d, DBI_LNKCTL2) & ~0xfu) | 1);   /* target speed Gen1, for this first batch */
+	wr(d, DBI_RO_WR_EN, rd(d, DBI_RO_WR_EN) & ~1u);
+}
+
+/* ---- step 3: the whole power-up ----------------------------------------------------------------- */
 
 static int
 power_up(void)
 {
+	uint32_t found[sizeof(supplies) / sizeof(supplies[0])], xo = 0;
+	uint32_t ltssm = 0xff;
+	bool up = false;
 	int error;
 
-	printf("pcie: step 2 power-up\n");
+	printf("pcie: step 3 power-up\n");
+	pcie_pause(pcie_pause_s, "PERST and the card's enable driven low");
 	gpio_out(GIULIA_PCIE_PERST_GPIO, false);
 	gpio_out(GIULIA_CNSS_WLAN_EN_GPIO, false);
 	delay_us(1000);
 
+	pcie_pause(pcie_pause_s, "the supplies");
+	if (!supplies_found(found, &xo)) {
+		return EINVAL;
+	}
+	if (!supplies_on(found, xo)) {
+		return EINVAL;
+	}
+
+	pcie_pause(pcie_pause_s, "power domains and clocks");
 	error = gdsc_on(GIULIA_GCC_PCIE0_GDSCR);
-	printf("pcie: gdsc core %s (%#x)\n", error ? "failed" : "on",
-	    rd(gcc, GIULIA_GCC_PCIE0_GDSCR));
+	printf("pcie: gdsc core %s (%#x)\n", error ? "failed" : "on", rd(gcc, GIULIA_GCC_PCIE0_GDSCR));
 	if (error) {
 		return error;
 	}
 	error = gdsc_on(GIULIA_GCC_PCIE0_PHY_GDSCR);
-	printf("pcie: gdsc phy %s (%#x)\n", error ? "failed" : "on",
-	    rd(gcc, GIULIA_GCC_PCIE0_PHY_GDSCR));
+	printf("pcie: gdsc phy %s (%#x)\n", error ? "failed" : "on", rd(gcc, GIULIA_GCC_PCIE0_PHY_GDSCR));
 	if (error) {
 		return error;
 	}
-
 	error = clocks_on();
 	if (error) {
 		return error;
 	}
 	printf("pcie: clocks voted (%#x)\n", rd(gcc, GIULIA_GCC_PCIE_VOTE));
 
+	pcie_pause(pcie_pause_s, "resets, then the controller's glue");
 	reset_pulse(GIULIA_GCC_PCIE0_CORE_BCR);
 	reset_pulse(GIULIA_GCC_PCIE0_PHY_BCR);
-	printf("pcie: resets pulsed\n");
+	parf_setup();
+	printf("pcie: resets pulsed, parf set up\n");
 
+	pcie_pause(pcie_pause_s, "the PHY");
 	for (unsigned i = 0; i < sizeof(giulia_pcie_phy) / sizeof(giulia_pcie_phy[0]); i++) {
 		wr(phy, giulia_pcie_phy[i].offset, giulia_pcie_phy[i].value);
 		if (giulia_pcie_phy[i].delay_us) {
@@ -209,24 +549,43 @@ power_up(void)
 		}
 	}
 	wr(gcc, GIULIA_GCC_PCIE_VOTE, rd(gcc, GIULIA_GCC_PCIE_VOTE) | 0x10u); /* PIPE */
-	error = poll(phy, GIULIA_PCIE_PHY_STATUS, 1u << GIULIA_PCIE_PHY_STATUS_BIT, 0, 100000);
-	printf("pcie: phy %s (%#x)\n", error ? "not ready" : "ready",
-	    rd(phy, GIULIA_PCIE_PHY_STATUS));
+	error = poll(phy, GIULIA_PCIE_PHY_STATUS, 1u << GIULIA_PCIE_PHY_STATUS_BIT, 1u << GIULIA_PCIE_PHY_STATUS_BIT, 100000);
+	printf("pcie: phy %s (%#x)\n", error ? "not ready" : "ready", rd(phy, GIULIA_PCIE_PHY_STATUS));
 	if (error) {
 		return error;
 	}
 	delay_us(GIULIA_PCIE_EP_LATENCY_MS * 1000);
 
+	pcie_pause(pcie_pause_s, "the card's enable");
+	gpio_out(GIULIA_CNSS_WLAN_EN_GPIO, true);
+	delay_us(100000);                       /* 100 ms from the enable to PERST (PCIE_T_PVPERL_MS) */
+	printf("pcie: wlan_en high; sw-ctrl pins read %u %u\n",
+	    rd(tlmm, GIULIA_CNSS_SW_CTRL_GPIO * 0x1000 + 4) & 1, rd(tlmm, GIULIA_CNSS_WLAN_SW_GPIO * 0x1000 + 4) & 1);
+	root_port_setup();
+	delay_us(50000);
+
 	gpio_out(GIULIA_PCIE_PERST_GPIO, true);
 	delay_us(1000);
-	gpio_out(GIULIA_CNSS_WLAN_EN_GPIO, true);
-	printf("pcie: perst released, wlan_en high\n");
+	wr(parf, PARF_LTSSM, rd(parf, PARF_LTSSM) | LTSSM_EN);
+	for (unsigned i = 0; i < 10 && !up; i++) {
+		uint32_t state = rd(parf, PARF_LTSSM) & 0x3f;
 
-	error = poll(dbi, 0x80, 1u << 29, 1u << 29, 100000);
-	uint32_t link = rd(dbi, 0x80);
-	printf("pcie: link %s status=%#x speed=%u width=%u\n",
-	    error ? "down" : "up", link, (link >> 16) & 0xf, (link >> 20) & 0x3f);
-	return error;
+		if (state != ltssm) {
+			printf("pcie: link training, state machine %#x after %u ms\n", state, i * 90);
+			ltssm = state;
+		}
+		up = (rd(dbi, DBI_LINKCTRLSTATUS) & LINK_ACTIVE) != 0;
+		if (!up) {
+			delay_us(90000);
+		}
+	}
+	printf("pcie: link %s (state machine %#x, link status %#x, speed=%u width=%u)\n", up ? "up" : "still down",
+	    rd(parf, PARF_LTSSM) & 0x3f, rd(dbi, DBI_LINKCTRLSTATUS),
+	    (rd(dbi, DBI_LINKCTRLSTATUS) >> 16) & 0xf, (rd(dbi, DBI_LINKCTRLSTATUS) >> 20) & 0x3f);
+	if (up) {
+		delay_us(100000);
+	}
+	return up ? 0 : ETIMEDOUT;
 }
 
 static void
@@ -234,35 +593,35 @@ pcie_thread(__unused void *arg, __unused wait_result_t wait)
 {
 	int error = 0;
 
-	printf("pcie: thread start, step %d windows %d\n", pcie_step, pcie_windows);
+	printf("pcie: thread start, step %d pause %u s\n", pcie_step, pcie_pause_s);
 	gcc = ml_io_map(0x100000, 0x1f4200);
-	tlmm = ml_io_map(0xf000000, 0x100000);
+	tlmm = ml_io_map(GIULIA_TLMM_GPIO, GIULIA_TLMM_GPIO_SIZE);
 	if (!gcc || !tlmm) {
 		printf("pcie: gcc/tlmm map failed gcc=%p tlmm=%p\n", (void *)gcc, (void *)tlmm);
 		goto out;
 	}
-	if (pcie_step == 1 && !pcie_windows) {
-		survey();               /* gcc/tlmm only: the PCIe windows are not mapped */
+	if (pcie_step == 1) {
+		survey_gcc_tlmm();
 		goto out;
 	}
 
 	parf = ml_io_map(GIULIA_PCIE_PARF, GIULIA_PCIE_PARF_SIZE);
 	phy = ml_io_map(GIULIA_PCIE_PHY, GIULIA_PCIE_PHY_SIZE);
 	dbi = ml_io_map(GIULIA_PCIE_DM_CORE, 0x2000);
-	iatu = ml_io_map(GIULIA_PCIE_IATU, GIULIA_PCIE_IATU_SIZE);
-	conf = ml_io_map(GIULIA_PCIE_CONF, 0x1000);
 	sm = ml_io_map(GIULIA_PCIE_PCIE_SM, GIULIA_PCIE_PCIE_SM_SIZE);
-	if (!parf || !phy || !dbi || !iatu || !conf || !sm) {
-		printf("pcie: map failed parf=%p phy=%p dbi=%p iatu=%p conf=%p sm=%p\n",
-		    (void *)parf, (void *)phy, (void *)dbi, (void *)iatu,
-		    (void *)conf, (void *)sm);
+	if (!parf || !phy || !dbi || !sm) {
+		printf("pcie: map failed parf=%p phy=%p dbi=%p sm=%p\n",
+		    (void *)parf, (void *)phy, (void *)dbi, (void *)sm);
 		goto out;
 	}
 
-	if (pcie_step == 1) {
-		survey();
-	} else if (pcie_step == 2) {
+	if (pcie_step == 2) {
+		survey_step2();
+	} else if (pcie_step == 3) {
 		error = power_up();
+		if (error == 0) {
+			survey_windows();
+		}
 	} else {
 		printf("pcie: step %d not implemented\n", pcie_step);
 	}
@@ -284,7 +643,7 @@ giulia_pcie_init(void)
 	}
 	printf("pcie: init step=%u\n", step);
 	pcie_step = (int)step;
-	PE_parse_boot_argn("pcie_windows", &pcie_windows, sizeof(pcie_windows));
+	PE_parse_boot_argn("pcie_pause", &pcie_pause_s, sizeof(pcie_pause_s));
 	if (kernel_thread_start(pcie_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	} else {

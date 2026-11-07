@@ -40,6 +40,16 @@
 #define GIULIA_CNSS_WLAN_SW_GPIO    19u
 #define GIULIA_CNSS_QMP_MBOX        63u
 
+/*
+ * The TLMM GPIO bank the per-pin registers live in. The device tree's
+ * /soc/pinctrl@f000000 spans 0x1000000, but the per-GPIO CFG/IO blocks start
+ * 0x100000 into it -- the same address giulia_s3910_hw.h calls S39_TLMM_PA.
+ * Reading pin*0x1000 from the pinctrl base itself (0xf00xx000) lands in other
+ * tiles' registers; K90's kernel 76c1ad6 stopped the SoC on the same mistake.
+ */
+#define GIULIA_TLMM_GPIO            0x0f100000u
+#define GIULIA_TLMM_GPIO_SIZE       0x00100000u
+
 #define GIULIA_PCIE_PHY_STATUS      0x214u /* bit 6 = PHY ready */
 #define GIULIA_PCIE_PHY_STATUS_BIT  6u
 #define GIULIA_PCIE_PHY_PWRDOWN     0x240u

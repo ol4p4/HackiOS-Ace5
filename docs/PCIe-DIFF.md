@@ -93,3 +93,20 @@ K90 的规则收紧：两个 GDSC + 四个时钟，而不是只看 core GDSC 一
 
 step 2 真正上机前，这四处（RPMh 七路、parf_setup、使能→PERST 顺序、LTSSM_EN）要补齐；
 否则链路不会按 PCIe 规范起来。
+
+## 8. TLMM 基址：我们四次 900E 的病根（2026-11-07）
+
+- 本机 DTB 是 `/soc/pinctrl@f000000`（`qcom,pineapple-pinctrl`，reg `0xf000000 0x1000000`），
+  但**每引脚的 CFG/IO 块从 +0x100000 开始**——`giulia_s3910_hw.h` 的
+  `S39_TLMM_PA 0x0f100000`（注释即"TLMM + GPIO register bank offset"）就是它。
+- `giulia_pcie.c` 原来拿 `0xf000000` 当每引脚基址：GPIO 94 的 CFG 落在 `0xf05e000`，
+  是别的 tile 的寄存器区。K90 的 kernel `76c1ad6` 在错误的引脚基址上 "stopped the
+  SoC"——同型错误。
+- 2026-11-06 的四次 900E 都在带 `pcie_step=1` 的运行里，其中"只映射 GCC/TLMM"的
+  安全版也读这些引脚——病根在此，而不是根复合体窗口（那扇门另有 K90 `474d6e9`
+  的坑，已用 `windows_clocked()` 门住）。
+- 现在 `giulia_pcie_regs.h` 定义 `GIULIA_TLMM_GPIO 0x0f100000`，驱动的每引脚访问
+  全部走它。
+- 顺带定案触发设计：K90/thyme/dada/主线**全部**是"boot-arg 选阶段 + 专职内核线程 +
+  读前门控 + 每阶段暂停"，没有人从 userland 或 loader 触发；上一节"运行时触发"的
+  想法据此撤回。
