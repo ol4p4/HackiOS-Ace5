@@ -72,6 +72,8 @@ pcie_log(const char *format, ...)
 static uintptr_t parf, phy, dbi, sm, gcc, tlmm, rsc, cmd_db;
 static int pcie_step;
 static unsigned pcie_pause_s;
+static int pcie_supplies = 1;   /* boot-arg pcie_supplies=0: skip the RPMh votes (A/B) */
+static int pcie_gdsc = 1;       /* boot-arg pcie_gdsc=0: skip the GDSC stage (A/B) */
 static volatile unsigned pcie_pause_event;
 
 static uint32_t
@@ -607,14 +609,22 @@ power_up(void)
 	delay_us(1000);
 
 	pcie_pause(pcie_pause_s, "the supplies");
-	if (!supplies_found(found, &xo)) {
-		return EINVAL;
-	}
-	if (!supplies_on(found, xo)) {
-		return EINVAL;
+	if (pcie_supplies) {
+		if (!supplies_found(found, &xo)) {
+			return EINVAL;
+		}
+		if (!supplies_on(found, xo)) {
+			return EINVAL;
+		}
+	} else {
+		pcie_log("pcie: power: supplies skipped (pcie_supplies=0)\n");
 	}
 
 	pcie_pause(pcie_pause_s, "power domains and clocks");
+	if (!pcie_gdsc) {
+		pcie_log("pcie: power: GDSC stage skipped (pcie_gdsc=0)\n");
+		return 0;
+	}
 	error = gdsc_on(GIULIA_GCC_PCIE0_GDSCR, GIULIA_GCC_PCIE0_GDSC_VOTE_BIT,
 	    GIULIA_GCC_CFG_GDSCR_STATUS_BIT);
 	pcie_log("pcie: gdsc core %s (%#x)\n", error ? "failed" : "on", rd(gcc, GIULIA_GCC_PCIE0_GDSCR));
@@ -748,6 +758,8 @@ giulia_pcie_init(void)
 	pcie_log("pcie: init step=%u\n", step);
 	pcie_step = (int)step;
 	PE_parse_boot_argn("pcie_pause", &pcie_pause_s, sizeof(pcie_pause_s));
+	PE_parse_boot_argn("pcie_supplies", &pcie_supplies, sizeof(pcie_supplies));
+	PE_parse_boot_argn("pcie_gdsc", &pcie_gdsc, sizeof(pcie_gdsc));
 	if (kernel_thread_start(pcie_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	} else {
