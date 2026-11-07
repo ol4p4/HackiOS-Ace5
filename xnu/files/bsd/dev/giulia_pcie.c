@@ -45,6 +45,28 @@
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
+extern void loader_log_line(const char *line);
+
+/*
+ * printf's kernel message buffer is appended to the loader's log only at loader
+ * return; mirror each line immediately, like a750_log does, so the host keeps
+ * every line even when a later read stalls the SoC.
+ */
+static void
+pcie_log(const char *format, ...) __printflike(1, 2);
+
+static void
+pcie_log(const char *format, ...)
+{
+	char line[384];
+	va_list args;
+
+	va_start(args, format);
+	vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	loader_log_line(line);
+	printf("%s", line);
+}
 
 static uintptr_t parf, phy, dbi, sm, gcc, tlmm, rsc, cmd_db;
 static int pcie_step;
@@ -80,7 +102,7 @@ pcie_pause(unsigned seconds, const char *stage)
 	if (seconds == 0) {
 		return;
 	}
-	printf("pcie: next, in %u s: %s\n", seconds, stage);
+	pcie_log("pcie: next, in %u s: %s\n", seconds, stage);
 	assert_wait_timeout((event_t)&pcie_pause_event, THREAD_UNINT,
 	    seconds * 1000, NSEC_PER_MSEC);
 	thread_block(THREAD_AWAKENED);
@@ -98,7 +120,7 @@ poll(uintptr_t base, uint32_t offset, uint32_t mask, uint32_t want, unsigned tim
 		}
 		delay_us(10);
 	}
-	printf("pcie: poll timeout %#x=%#x (want %#x mask %#x)\n", offset, value, want, mask);
+	pcie_log("pcie: poll timeout %#x=%#x (want %#x mask %#x)\n", offset, value, want, mask);
 	return ETIMEDOUT;
 }
 
@@ -173,25 +195,25 @@ windows_clocked(void)
 static void
 survey_gcc_tlmm(void)
 {
-	printf("pcie: step 1 read-only survey (gcc/tlmm)\n");
-	printf("pcie: gcc gdsc=%#x phy_gdsc=%#x vote=%#x\n",
+	pcie_log("pcie: step 1 read-only survey (gcc/tlmm)\n");
+	pcie_log("pcie: gcc gdsc=%#x phy_gdsc=%#x vote=%#x\n",
 	    rd(gcc, GIULIA_GCC_PCIE0_GDSCR), rd(gcc, GIULIA_GCC_PCIE0_PHY_GDSCR),
 	    rd(gcc, GIULIA_GCC_PCIE_VOTE));
-	printf("pcie: gcc halt slv=%#x mstr=%#x ahb=%#x aux=%#x q2a=%#x pipe=%#x\n",
+	pcie_log("pcie: gcc halt slv=%#x mstr=%#x ahb=%#x aux=%#x q2a=%#x pipe=%#x\n",
 	    rd(gcc, GIULIA_GCC_PCIE0_SLV_HALT), rd(gcc, GIULIA_GCC_PCIE0_MSTR_HALT),
 	    rd(gcc, GIULIA_GCC_PCIE0_AHB_HALT), rd(gcc, GIULIA_GCC_PCIE0_AUX_HALT),
 	    rd(gcc, GIULIA_GCC_PCIE0_Q2A_HALT), rd(gcc, GIULIA_GCC_PCIE0_PIPE_HALT));
-	printf("pcie: gcc bcr core=%#x phy=%#x\n",
+	pcie_log("pcie: gcc bcr core=%#x phy=%#x\n",
 	    rd(gcc, GIULIA_GCC_PCIE0_CORE_BCR), rd(gcc, GIULIA_GCC_PCIE0_PHY_BCR));
-	printf("pcie: gpio perst=%#x/%#x clkreq=%#x/%#x wake=%#x/%#x\n",
+	pcie_log("pcie: gpio perst=%#x/%#x clkreq=%#x/%#x wake=%#x/%#x\n",
 	    rd(tlmm, GIULIA_PCIE_PERST_GPIO * 0x1000), rd(tlmm, GIULIA_PCIE_PERST_GPIO * 0x1000 + 4),
 	    rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000), rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000 + 4),
 	    rd(tlmm, GIULIA_PCIE_WAKE_GPIO * 0x1000), rd(tlmm, GIULIA_PCIE_WAKE_GPIO * 0x1000 + 4));
-	printf("pcie: cnss wlan_en=%#x/%#x bt_en=%#x/%#x sw_ctrl=%#x/%#x\n",
+	pcie_log("pcie: cnss wlan_en=%#x/%#x bt_en=%#x/%#x sw_ctrl=%#x/%#x\n",
 	    rd(tlmm, GIULIA_CNSS_WLAN_EN_GPIO * 0x1000), rd(tlmm, GIULIA_CNSS_WLAN_EN_GPIO * 0x1000 + 4),
 	    rd(tlmm, GIULIA_CNSS_BT_EN_GPIO * 0x1000), rd(tlmm, GIULIA_CNSS_BT_EN_GPIO * 0x1000 + 4),
 	    rd(tlmm, GIULIA_CNSS_SW_CTRL_GPIO * 0x1000), rd(tlmm, GIULIA_CNSS_SW_CTRL_GPIO * 0x1000 + 4));
-	printf("pcie: step 1 done\n");
+	pcie_log("pcie: step 1 done\n");
 }
 
 /* ---- step 2: the root complex, only with power and clocks on -------------------- */
@@ -199,13 +221,13 @@ survey_gcc_tlmm(void)
 static void
 survey_windows(void)
 {
-	printf("pcie: the root complex's registers, with the domains on and the clocks running\n");
-	printf("pcie: parf %#x %#x %#x %#x\n", rd(parf, 0), rd(parf, 0x40),
+	pcie_log("pcie: the root complex's registers, with the domains on and the clocks running\n");
+	pcie_log("pcie: parf %#x %#x %#x %#x\n", rd(parf, 0), rd(parf, 0x40),
 	    rd(parf, 0x1000), rd(parf, 0x2c00));
-	printf("pcie: phy status=%#x\n", rd(phy, GIULIA_PCIE_PHY_STATUS));
-	printf("pcie: dbi id=%#x class=%#x link=%#x cap=%#x ctrl=%#x\n",
+	pcie_log("pcie: phy status=%#x\n", rd(phy, GIULIA_PCIE_PHY_STATUS));
+	pcie_log("pcie: dbi id=%#x class=%#x link=%#x cap=%#x ctrl=%#x\n",
 	    rd(dbi, 0), rd(dbi, 8), rd(dbi, 0x80), rd(dbi, 0xa0), rd(dbi, 0x78));
-	printf("pcie: sm %#x %#x %#x %#x\n", rd(sm, 0), rd(sm, 4), rd(sm, 8), rd(sm, 0xc));
+	pcie_log("pcie: sm %#x %#x %#x %#x\n", rd(sm, 0), rd(sm, 4), rd(sm, 8), rd(sm, 0xc));
 }
 
 static void
@@ -213,16 +235,16 @@ survey_step2(void)
 {
 	pcie_pause(pcie_pause_s ? pcie_pause_s : 30, "the root complex's registers");
 	if (!windows_clocked()) {
-		printf("pcie: domains off or clocks halted, nothing read "
+		pcie_log("pcie: domains off or clocks halted, nothing read "
 		    "(gdsc=%#x phy_gdsc=%#x halts %#x/%#x/%#x/%#x)\n",
 		    rd(gcc, GIULIA_GCC_PCIE0_GDSCR), rd(gcc, GIULIA_GCC_PCIE0_PHY_GDSCR),
 		    rd(gcc, GIULIA_GCC_PCIE0_SLV_HALT), rd(gcc, GIULIA_GCC_PCIE0_MSTR_HALT),
 		    rd(gcc, GIULIA_GCC_PCIE0_AHB_HALT), rd(gcc, GIULIA_GCC_PCIE0_AUX_HALT));
-		printf("pcie: step 2 done (nothing read; step 3 powers the card)\n");
+		pcie_log("pcie: step 2 done (nothing read; step 3 powers the card)\n");
 		return;
 	}
 	survey_windows();
-	printf("pcie: step 2 done\n");
+	pcie_log("pcie: step 2 done\n");
 }
 
 /* ---- C: RPMh -- the card's seven supplies --------------------------------------- */
@@ -309,7 +331,7 @@ rpmh_address(const char *name)
 	uint32_t address = 0;
 
 	if (db == NULL || !(db->magic[0] == 0xdb && db->magic[1] == 0x30 && db->magic[2] == 0x03 && db->magic[3] == 0x0c)) {
-		printf("pcie: power: the boot loader's command database is not there\n");
+		pcie_log("pcie: power: the boot loader's command database is not there\n");
 		return 0;
 	}
 	strlcpy(id, name, sizeof(id));
@@ -326,14 +348,14 @@ rpmh_address(const char *name)
 			}
 			address = entry[i].address;
 			if ((address >> 16 & 0xf) != CMD_DB_VRM) {
-				printf("pcie: power: %s is at %#x and is not tagged as a regulator\n", name, address);
+				pcie_log("pcie: power: %s is at %#x and is not tagged as a regulator\n", name, address);
 				return 0;
 			}
 			break;
 		}
 	}
 	if (address == 0) {
-		printf("pcie: power: the command database has no \"%s\"\n", name);
+		pcie_log("pcie: power: the command database has no \"%s\"\n", name);
 	}
 	return address;
 }
@@ -350,7 +372,7 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 		return false;
 	}
 	if (rd(rsc, TCS_STATUS) == 0) {
-		printf("pcie: power: TCS %u of the sequencer is busy (status %#x, control %#x)\n", PCIE_TCS,
+		pcie_log("pcie: power: TCS %u of the sequencer is busy (status %#x, control %#x)\n", PCIE_TCS,
 		    rd(rsc, TCS_STATUS), rd(rsc, TCS_CONTROL));
 		return false;
 	}
@@ -372,7 +394,7 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 		}
 		delay_us(50);
 	}
-	printf("pcie: power: RPMh %s; the commands' status %#x, the TCS's %#x\n", done ? "HAS DONE IT" :
+	pcie_log("pcie: power: RPMh %s; the commands' status %#x, the TCS's %#x\n", done ? "HAS DONE IT" :
 	    "HAS NOT SAID DONE", rd(rsc, RSC_TCS(PCIE_TCS) + TCS_COMMAND(0) + 12),
 	    rd(rsc, RSC_TCS(PCIE_TCS) + TCS_STATUS));
 	wr(rsc, RSC_IRQ_CLEAR, 1u << PCIE_TCS);
@@ -389,7 +411,7 @@ supplies_found(uint32_t *found, uint32_t *xo)
 
 	for (unsigned i = 0; i < sizeof(supplies) / sizeof(supplies[0]); i++) {
 		found[i] = rpmh_address(supplies[i].name);
-		printf("pcie: power: %s for the %s at RPMh %#x\n", supplies[i].name, supplies[i].what, found[i]);
+		pcie_log("pcie: power: %s for the %s at RPMh %#x\n", supplies[i].name, supplies[i].what, found[i]);
 		if (found[i] == 0 || (found[i] >> 16 & 0xf) != CMD_DB_VRM) {
 			all = false;
 		}
@@ -398,14 +420,14 @@ supplies_found(uint32_t *found, uint32_t *xo)
 	for (unsigned i = 0; i < sizeof(xos) / sizeof(xos[0]) && *xo == 0; i++) {
 		*xo = rpmh_address(xos[i]);
 		if (*xo != 0) {
-			printf("pcie: power: the card's crystal is %s at RPMh %#x\n", xos[i], *xo);
+			pcie_log("pcie: power: the card's crystal is %s at RPMh %#x\n", xos[i], *xo);
 		}
 	}
 	if (*xo == 0) {
-		printf("pcie: power: no rfclk resource found; the crystal stays as firmware left it\n");
+		pcie_log("pcie: power: no rfclk resource found; the crystal stays as firmware left it\n");
 	}
 	if (!all) {
-		printf("pcie: power: a supply is missing or not tagged as a regulator; nothing is voted\n");
+		pcie_log("pcie: power: a supply is missing or not tagged as a regulator; nothing is voted\n");
 	}
 	return all;
 }
@@ -420,15 +442,15 @@ supplies_on(const uint32_t *found, uint32_t xo)
 		const struct supply *s = &supplies[i];
 
 		if (s->mv * 1000 < s->min_uv || s->mv * 1000 > s->max_uv) {
-			printf("pcie: power: %u mV for %s is outside %u-%u uV; refused\n", s->mv, s->name, s->min_uv, s->max_uv);
+			pcie_log("pcie: power: %u mV for %s is outside %u-%u uV; refused\n", s->mv, s->name, s->min_uv, s->max_uv);
 			return false;
 		}
 		address[count] = found[i] + VRM_VOLTAGE; data[count++] = s->mv;
 		address[count] = found[i] + VRM_ENABLE; data[count++] = 1;
-		printf("pcie: power: %s on at %u mV\n", s->name, s->mv);
+		pcie_log("pcie: power: %s on at %u mV\n", s->name, s->mv);
 	}
 	if (!rpmh_write(address, data, count)) {
-		printf("pcie: power: the supplies' vote was not confirmed\n");
+		pcie_log("pcie: power: the supplies' vote was not confirmed\n");
 		return false;
 	}
 	count = 0;
@@ -442,10 +464,10 @@ supplies_on(const uint32_t *found, uint32_t xo)
 		address[count] = xo + VRM_CLOCK_ENABLE; data[count++] = 1;
 	}
 	if (count != 0 && !rpmh_write(address, data, count)) {
-		printf("pcie: power: the LDO modes' vote was not confirmed\n");
+		pcie_log("pcie: power: the LDO modes' vote was not confirmed\n");
 		return false;
 	}
-	printf("pcie: power: the card's supplies are on\n");
+	pcie_log("pcie: power: the card's supplies are on\n");
 	return true;
 }
 
@@ -504,7 +526,7 @@ power_up(void)
 	bool up = false;
 	int error;
 
-	printf("pcie: step 3 power-up\n");
+	pcie_log("pcie: step 3 power-up\n");
 	pcie_pause(pcie_pause_s, "PERST and the card's enable driven low");
 	gpio_out(GIULIA_PCIE_PERST_GPIO, false);
 	gpio_out(GIULIA_CNSS_WLAN_EN_GPIO, false);
@@ -520,12 +542,12 @@ power_up(void)
 
 	pcie_pause(pcie_pause_s, "power domains and clocks");
 	error = gdsc_on(GIULIA_GCC_PCIE0_GDSCR);
-	printf("pcie: gdsc core %s (%#x)\n", error ? "failed" : "on", rd(gcc, GIULIA_GCC_PCIE0_GDSCR));
+	pcie_log("pcie: gdsc core %s (%#x)\n", error ? "failed" : "on", rd(gcc, GIULIA_GCC_PCIE0_GDSCR));
 	if (error) {
 		return error;
 	}
 	error = gdsc_on(GIULIA_GCC_PCIE0_PHY_GDSCR);
-	printf("pcie: gdsc phy %s (%#x)\n", error ? "failed" : "on", rd(gcc, GIULIA_GCC_PCIE0_PHY_GDSCR));
+	pcie_log("pcie: gdsc phy %s (%#x)\n", error ? "failed" : "on", rd(gcc, GIULIA_GCC_PCIE0_PHY_GDSCR));
 	if (error) {
 		return error;
 	}
@@ -533,13 +555,13 @@ power_up(void)
 	if (error) {
 		return error;
 	}
-	printf("pcie: clocks voted (%#x)\n", rd(gcc, GIULIA_GCC_PCIE_VOTE));
+	pcie_log("pcie: clocks voted (%#x)\n", rd(gcc, GIULIA_GCC_PCIE_VOTE));
 
 	pcie_pause(pcie_pause_s, "resets, then the controller's glue");
 	reset_pulse(GIULIA_GCC_PCIE0_CORE_BCR);
 	reset_pulse(GIULIA_GCC_PCIE0_PHY_BCR);
 	parf_setup();
-	printf("pcie: resets pulsed, parf set up\n");
+	pcie_log("pcie: resets pulsed, parf set up\n");
 
 	pcie_pause(pcie_pause_s, "the PHY");
 	for (unsigned i = 0; i < sizeof(giulia_pcie_phy) / sizeof(giulia_pcie_phy[0]); i++) {
@@ -550,7 +572,7 @@ power_up(void)
 	}
 	wr(gcc, GIULIA_GCC_PCIE_VOTE, rd(gcc, GIULIA_GCC_PCIE_VOTE) | 0x10u); /* PIPE */
 	error = poll(phy, GIULIA_PCIE_PHY_STATUS, 1u << GIULIA_PCIE_PHY_STATUS_BIT, 1u << GIULIA_PCIE_PHY_STATUS_BIT, 100000);
-	printf("pcie: phy %s (%#x)\n", error ? "not ready" : "ready", rd(phy, GIULIA_PCIE_PHY_STATUS));
+	pcie_log("pcie: phy %s (%#x)\n", error ? "not ready" : "ready", rd(phy, GIULIA_PCIE_PHY_STATUS));
 	if (error) {
 		return error;
 	}
@@ -559,7 +581,7 @@ power_up(void)
 	pcie_pause(pcie_pause_s, "the card's enable");
 	gpio_out(GIULIA_CNSS_WLAN_EN_GPIO, true);
 	delay_us(100000);                       /* 100 ms from the enable to PERST (PCIE_T_PVPERL_MS) */
-	printf("pcie: wlan_en high; sw-ctrl pins read %u %u\n",
+	pcie_log("pcie: wlan_en high; sw-ctrl pins read %u %u\n",
 	    rd(tlmm, GIULIA_CNSS_SW_CTRL_GPIO * 0x1000 + 4) & 1, rd(tlmm, GIULIA_CNSS_WLAN_SW_GPIO * 0x1000 + 4) & 1);
 	root_port_setup();
 	delay_us(50000);
@@ -571,7 +593,7 @@ power_up(void)
 		uint32_t state = rd(parf, PARF_LTSSM) & 0x3f;
 
 		if (state != ltssm) {
-			printf("pcie: link training, state machine %#x after %u ms\n", state, i * 90);
+			pcie_log("pcie: link training, state machine %#x after %u ms\n", state, i * 90);
 			ltssm = state;
 		}
 		up = (rd(dbi, DBI_LINKCTRLSTATUS) & LINK_ACTIVE) != 0;
@@ -579,7 +601,7 @@ power_up(void)
 			delay_us(90000);
 		}
 	}
-	printf("pcie: link %s (state machine %#x, link status %#x, speed=%u width=%u)\n", up ? "up" : "still down",
+	pcie_log("pcie: link %s (state machine %#x, link status %#x, speed=%u width=%u)\n", up ? "up" : "still down",
 	    rd(parf, PARF_LTSSM) & 0x3f, rd(dbi, DBI_LINKCTRLSTATUS),
 	    (rd(dbi, DBI_LINKCTRLSTATUS) >> 16) & 0xf, (rd(dbi, DBI_LINKCTRLSTATUS) >> 20) & 0x3f);
 	if (up) {
@@ -593,11 +615,11 @@ pcie_thread(__unused void *arg, __unused wait_result_t wait)
 {
 	int error = 0;
 
-	printf("pcie: thread start, step %d pause %u s\n", pcie_step, pcie_pause_s);
+	pcie_log("pcie: thread start, step %d pause %u s\n", pcie_step, pcie_pause_s);
 	gcc = ml_io_map(0x100000, 0x1f4200);
 	tlmm = ml_io_map(GIULIA_TLMM_GPIO, GIULIA_TLMM_GPIO_SIZE);
 	if (!gcc || !tlmm) {
-		printf("pcie: gcc/tlmm map failed gcc=%p tlmm=%p\n", (void *)gcc, (void *)tlmm);
+		pcie_log("pcie: gcc/tlmm map failed gcc=%p tlmm=%p\n", (void *)gcc, (void *)tlmm);
 		goto out;
 	}
 	if (pcie_step == 1) {
@@ -610,7 +632,7 @@ pcie_thread(__unused void *arg, __unused wait_result_t wait)
 	dbi = ml_io_map(GIULIA_PCIE_DM_CORE, 0x2000);
 	sm = ml_io_map(GIULIA_PCIE_PCIE_SM, GIULIA_PCIE_PCIE_SM_SIZE);
 	if (!parf || !phy || !dbi || !sm) {
-		printf("pcie: map failed parf=%p phy=%p dbi=%p sm=%p\n",
+		pcie_log("pcie: map failed parf=%p phy=%p dbi=%p sm=%p\n",
 		    (void *)parf, (void *)phy, (void *)dbi, (void *)sm);
 		goto out;
 	}
@@ -623,10 +645,10 @@ pcie_thread(__unused void *arg, __unused wait_result_t wait)
 			survey_windows();
 		}
 	} else {
-		printf("pcie: step %d not implemented\n", pcie_step);
+		pcie_log("pcie: step %d not implemented\n", pcie_step);
 	}
 out:
-	printf("pcie: step %d finished rc=%d\n", pcie_step, error);
+	pcie_log("pcie: step %d finished rc=%d\n", pcie_step, error);
 	thread_terminate(current_thread());
 }
 
@@ -636,17 +658,17 @@ giulia_pcie_init(void)
 	uint32_t step = 0;
 	thread_t thread;
 
-	printf("pcie: init entered\n");
+	pcie_log("pcie: init entered\n");
 	if (!PE_parse_boot_argn("pcie_step", &step, sizeof(step)) || step == 0) {
-		printf("pcie: no pcie_step\n");
+		pcie_log("pcie: no pcie_step\n");
 		return;
 	}
-	printf("pcie: init step=%u\n", step);
+	pcie_log("pcie: init step=%u\n", step);
 	pcie_step = (int)step;
 	PE_parse_boot_argn("pcie_pause", &pcie_pause_s, sizeof(pcie_pause_s));
 	if (kernel_thread_start(pcie_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	} else {
-		printf("pcie: thread start FAILED\n");
+		pcie_log("pcie: thread start FAILED\n");
 	}
 }
