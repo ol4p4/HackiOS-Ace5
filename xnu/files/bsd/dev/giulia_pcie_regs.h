@@ -193,9 +193,23 @@ static const uint32_t giulia_pcie_sm_branch[] = {
 	0x4, 0x1c, 0x24, 0x2c, 0x0, 0x0, 0x0,
 };
 
-/* Linux drivers/clk/qcom/gcc-sm8650.c: PCIe0 branches, GDSCs and resets. */
-#define GIULIA_GCC_PCIE0_GDSCR        0x6b004u /* bit 0 on, bit 31 status */
+/* Linux drivers/clk/qcom/gcc-sm8650.c: PCIe0 branches, GDSCs and resets.
+ * Both PCIe GDSC nodes carry qcom,support-cfg-gdscr: the power state reads
+ * from the CFG GDSCR (gdscr+4), where BIT(16) = POWER_UP_COMPLETE and
+ * BIT(15) = POWER_DOWN_COMPLETE (the OnePlus sm8650 kernel's gdsc.c). */
+#define GIULIA_GCC_PCIE0_GDSCR        0x6b004u /* bit 0 = SW_COLLAPSE */
 #define GIULIA_GCC_PCIE0_PHY_GDSCR    0x6c000u
+/*
+ * The two PCIe GDSCs are VOTABLE: their collapse vote lives in the GCC's
+ * collapse register (dt: the GDSC nodes' qcom,collapse-vote cells point at
+ * syscon@15214c with bit 0 for the root complex and bit 3 for the PHY --
+ * the same GCC+0x5214c K90's mhi_pcie_power.c clears, bit 0/bit 2 there).
+ * 1 in the bit votes collapse; Android leaves both set.
+ */
+#define GIULIA_GCC_COLLAPSE_VOTE      0x5214cu
+#define GIULIA_GCC_PCIE0_GDSC_VOTE_BIT  0u
+#define GIULIA_GCC_PCIE0_PHY_GDSC_VOTE_BIT 3u
+#define GIULIA_GCC_CFG_GDSCR_POWER_UP_COMPLETE  (1u << 16)
 #define GIULIA_GCC_PCIE_VOTE          0x52008u /* bits 0-5: slv,mstr,ahb,aux,pipe,q2a */
 #define GIULIA_GCC_PCIE0_SLV_HALT     0x6b020u
 #define GIULIA_GCC_PCIE0_MSTR_HALT    0x6b02cu

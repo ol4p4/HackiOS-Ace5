@@ -140,26 +140,26 @@ gpio_out(unsigned pin, bool high)
 }
 
 static int
-gdsc_on(uint32_t offset, uint32_t vote_bit, uint32_t status_bit)
+gdsc_on(uint32_t offset, uint32_t vote_bit)
 {
 	/* The VOTABLE GDSC's collapse vote bit (GCC+0x5214c) must be cleared
 	 * first -- Android leaves both set and a bare GDSCR write is ignored.
 	 * Then Linux's gdsc_enable: clear SW_COLLAPSE (bit 0) and wait for the
-	 * power-up-complete bit in the CFG GDSCR (gdscr+4) -- the PWR_ON bit in
-	 * GDSCR itself does not latch on this SoC. */
+	 * CFG GDSCR's POWER_UP_COMPLETE (gdscr+4, BIT(16) -- the OnePlus
+	 * sm8650 kernel's gdsc_check_status for POLL_CFG_GDSCR gdscs). */
 	uint32_t value, cfg;
 
 	wr(gcc, GIULIA_GCC_COLLAPSE_VOTE, rd(gcc, GIULIA_GCC_COLLAPSE_VOTE) & ~vote_bit);
 	value = rd(gcc, offset);
 	wr(gcc, offset, value & ~1u);
-	for (unsigned i = 0; i < 2000; i++) {
+	for (unsigned i = 0; i < 4000; i++) {
 		cfg = rd(gcc, offset + 4);
-		if ((cfg & status_bit) != 0 || (rd(gcc, offset) & 0xC0000000u) == 0xC0000000u) {
+		if (cfg & GIULIA_GCC_CFG_GDSCR_POWER_UP_COMPLETE) {
 			pcie_log("pcie: power: gdsc at %#x on after %u00 us (gdscr %#x, cfg %#x)\n",
 			    offset, i, rd(gcc, offset), cfg);
 			return 0;
 		}
-		delay_us(50);
+		delay_us(100);
 	}
 	pcie_log("pcie: power: gdsc at %#x stuck (gdscr %#x, cfg %#x)\n", offset, rd(gcc, offset), cfg);
 	return ETIMEDOUT;
@@ -625,14 +625,12 @@ power_up(void)
 		pcie_log("pcie: power: GDSC stage skipped (pcie_gdsc=0)\n");
 		return 0;
 	}
-	error = gdsc_on(GIULIA_GCC_PCIE0_GDSCR, GIULIA_GCC_PCIE0_GDSC_VOTE_BIT,
-	    GIULIA_GCC_CFG_GDSCR_STATUS_BIT);
+	error = gdsc_on(GIULIA_GCC_PCIE0_GDSCR, GIULIA_GCC_PCIE0_GDSC_VOTE_BIT);
 	pcie_log("pcie: gdsc core %s (%#x)\n", error ? "failed" : "on", rd(gcc, GIULIA_GCC_PCIE0_GDSCR));
 	if (error) {
 		return error;
 	}
-	error = gdsc_on(GIULIA_GCC_PCIE0_PHY_GDSCR, GIULIA_GCC_PCIE0_PHY_GDSC_VOTE_BIT,
-	    GIULIA_GCC_CFG_GDSCR_STATUS_BIT_PHY);
+	error = gdsc_on(GIULIA_GCC_PCIE0_PHY_GDSCR, GIULIA_GCC_PCIE0_PHY_GDSC_VOTE_BIT);
 	pcie_log("pcie: gdsc phy %s (%#x)\n", error ? "failed" : "on", rd(gcc, GIULIA_GCC_PCIE0_PHY_GDSCR));
 	if (error) {
 		return error;
