@@ -2929,5 +2929,29 @@ With the TLMM fix in, one run per finding, each visible live through pcie_log:
 - A 200 ms timeout is also too short for a first vote; next round polls 400 ms
   and additionally accepts the command status word's own complete echo as a
   secondary completion signal.
+
+### PCIe M1, 2026-11-07 evening: the wedge isolated to the window mappings
+
+The A/B decomposition went one cell deeper and changed the picture again. Cell B
+(`pcie_step=3 pcie_supplies=0 pcie_gdsc=0`: PERST/WLAN_EN driven low, the four
+PCIe windows mapped, no reads at all) wedged the loader exactly like every other
+`pcie_step=3` run -- while step 1, which maps only GCC/TLMM, always survived.
+The remaining difference is the **Device mappings themselves**: mapping an
+unclocked DBI/PHY window invites speculative reads that external-abort the bus
+(seven wedged runs, all mapping the windows; every surviving run did not).
+
+Fix (`09386ad`): power_up creates the window mappings right after clocks_on
+confirms the four PCIe clocks are running; survey_step2 maps behind its
+windows_clocked() gate; the boot path never maps a PCIe window. Two more
+findings from the same round: the seven supplies voted HAS DONE IT again on a
+fresh boot (reproduced), and the SM sequences (branch 7 words at pcie_sm+0x1000,
+start 13 words at pcie_sm+0, START=1 at pcie_sm+0x1090) are now wired into
+power_up ahead of the link poll -- the vendor driver's state-machine start that
+the mainline pcie-qcom port lacks.
+
+Next round: one run of `--pcie 3` on a fresh boot. Expected path: supplies ->
+GDSC (collapse-vote clear + CFG BIT(16) poll) -> clocks -> window maps -> SM
+sequences -> PHY -> WLAN_EN -> root port -> PERST -> SM start + LTSSM_EN ->
+link poll. Every stage names itself in the log.
 before the risky stage.
 
