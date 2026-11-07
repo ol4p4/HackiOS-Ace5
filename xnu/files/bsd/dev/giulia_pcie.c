@@ -263,6 +263,16 @@ survey_step2(void)
 		pcie_log("pcie: step 2 done (nothing read; step 3 powers the card)\n");
 		return;
 	}
+	/* The domains are on and the clocks running: only now map the windows. */
+	parf = ml_io_map(GIULIA_PCIE_PARF, GIULIA_PCIE_PARF_SIZE);
+	phy = ml_io_map(GIULIA_PCIE_PHY, GIULIA_PCIE_PHY_SIZE);
+	dbi = ml_io_map(GIULIA_PCIE_DM_CORE, 0x2000);
+	sm = ml_io_map(GIULIA_PCIE_PCIE_SM, GIULIA_PCIE_PCIE_SM_SIZE);
+	if (!parf || !phy || !dbi || !sm) {
+		pcie_log("pcie: map failed parf=%p phy=%p dbi=%p sm=%p\n",
+		    (void *)parf, (void *)phy, (void *)dbi, (void *)sm);
+		return;
+	}
 	survey_windows();
 	pcie_log("pcie: step 2 done\n");
 }
@@ -641,6 +651,18 @@ power_up(void)
 	}
 	pcie_log("pcie: clocks voted (%#x)\n", rd(gcc, GIULIA_GCC_PCIE_VOTE));
 
+	/* The domains are on and the clocks running: only now create the PCIe
+	 * window mappings (see pcie_thread's note on speculative reads). */
+	parf = ml_io_map(GIULIA_PCIE_PARF, GIULIA_PCIE_PARF_SIZE);
+	phy = ml_io_map(GIULIA_PCIE_PHY, GIULIA_PCIE_PHY_SIZE);
+	dbi = ml_io_map(GIULIA_PCIE_DM_CORE, 0x2000);
+	sm = ml_io_map(GIULIA_PCIE_PCIE_SM, GIULIA_PCIE_PCIE_SM_SIZE);
+	if (!parf || !phy || !dbi || !sm) {
+		pcie_log("pcie: map failed parf=%p phy=%p dbi=%p sm=%p\n",
+		    (void *)parf, (void *)phy, (void *)dbi, (void *)sm);
+		return ENOMEM;
+	}
+
 	pcie_pause(pcie_pause_s, "resets, then the controller's glue");
 	reset_pulse(GIULIA_GCC_PCIE0_CORE_BCR);
 	reset_pulse(GIULIA_GCC_PCIE0_PHY_BCR);
@@ -672,6 +694,7 @@ power_up(void)
 
 	gpio_out(GIULIA_PCIE_PERST_GPIO, true);
 	delay_us(1000);
+	wr(sm, GIULIA_PCIE_SM_START_OFFSET, 1u);       /* qcom,pcie-sm-start-offset: start the machine */
 	wr(parf, PARF_LTSSM, rd(parf, PARF_LTSSM) | LTSSM_EN);
 	for (unsigned i = 0; i < 10 && !up; i++) {
 		uint32_t state = rd(parf, PARF_LTSSM) & 0x3f;
@@ -711,16 +734,11 @@ pcie_thread(__unused void *arg, __unused wait_result_t wait)
 		goto out;
 	}
 
-	parf = ml_io_map(GIULIA_PCIE_PARF, GIULIA_PCIE_PARF_SIZE);
-	phy = ml_io_map(GIULIA_PCIE_PHY, GIULIA_PCIE_PHY_SIZE);
-	dbi = ml_io_map(GIULIA_PCIE_DM_CORE, 0x2000);
-	sm = ml_io_map(GIULIA_PCIE_PCIE_SM, GIULIA_PCIE_PCIE_SM_SIZE);
-	if (!parf || !phy || !dbi || !sm) {
-		pcie_log("pcie: map failed parf=%p phy=%p dbi=%p sm=%p\n",
-		    (void *)parf, (void *)phy, (void *)dbi, (void *)sm);
-		goto out;
-	}
-
+	/* The PCIe windows (PARF/PHY/DBI/SM) are mapped ONLY when their clocks
+	 * and power are confirmed running -- never from the boot path. A Device
+	 * mapping of an unclocked window invites speculative reads that hang the
+	 * bus (every wedge so far mapped the windows; step 1, which does not,
+	 * always survived). power_up maps them right after clocks_on(). */
 	if (pcie_step == 2) {
 		survey_step2();
 	} else if (pcie_step == 3) {
@@ -731,7 +749,7 @@ pcie_thread(__unused void *arg, __unused wait_result_t wait)
 			goto out;
 		}
 		error = power_up();
-		if (error == 0) {
+		if (error == 0 && parf != 0) {
 			survey_windows();
 		}
 	} else {
