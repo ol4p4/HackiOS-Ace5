@@ -138,12 +138,29 @@ gpio_out(unsigned pin, bool high)
 }
 
 static int
-gdsc_on(uint32_t offset)
+gdsc_on(uint32_t offset, uint32_t vote_bit, uint32_t status_bit)
 {
-	uint32_t value = rd(gcc, offset);
+	/* The VOTABLE GDSC's collapse vote bit (GCC+0x5214c) must be cleared
+	 * first -- Android leaves both set and a bare GDSCR write is ignored.
+	 * Then Linux's gdsc_enable: clear SW_COLLAPSE (bit 0) and wait for the
+	 * power-up-complete bit in the CFG GDSCR (gdscr+4) -- the PWR_ON bit in
+	 * GDSCR itself does not latch on this SoC. */
+	uint32_t value, cfg;
 
-	wr(gcc, offset, value | 1u);
-	return poll(gcc, offset, 0x80000000u, 0x80000000u, 10000);
+	wr(gcc, GIULIA_GCC_COLLAPSE_VOTE, rd(gcc, GIULIA_GCC_COLLAPSE_VOTE) & ~vote_bit);
+	value = rd(gcc, offset);
+	wr(gcc, offset, value & ~1u);
+	for (unsigned i = 0; i < 2000; i++) {
+		cfg = rd(gcc, offset + 4);
+		if ((cfg & status_bit) != 0 || (rd(gcc, offset) & 0xC0000000u) == 0xC0000000u) {
+			pcie_log("pcie: power: gdsc at %#x on after %u00 us (gdscr %#x, cfg %#x)\n",
+			    offset, i, rd(gcc, offset), cfg);
+			return 0;
+		}
+		delay_us(50);
+	}
+	pcie_log("pcie: power: gdsc at %#x stuck (gdscr %#x, cfg %#x)\n", offset, rd(gcc, offset), cfg);
+	return ETIMEDOUT;
 }
 
 static int
@@ -279,6 +296,7 @@ survey_step2(void)
 #define TCS_CONTROL_TRIGGER     (1u << 24)
 #define MSGID_WRITE_WAITED      0x10108                 /* four bytes, an answer wanted, a write */
 #define RSC_LAYOUT_MAJOR        3                       /* (rsc_id >> 16) & 255 must be this */
+#define PCIE_TCS_COMMANDS       8                       /* command slots per ACTIVE TCS (slot 0 armed 0x7f) */
 
 /*
  * VRM set: the voltage at +0 in millivolts, the enable at +4, the mode at +8;
@@ -370,7 +388,7 @@ static bool
 rpmh_vote(const uint32_t *addresses, const uint32_t *values, unsigned count)
 {
 	uintptr_t base = rsc + 0xd00, t = 0;
-	uint32_t saved[9], irq, control, wait;
+	uint32_t saved[PCIE_TCS_COMMANDS * 4], irq, control;
 	uint32_t mask;
 	bool done = false;
 	unsigned slot, i;
@@ -410,47 +428,52 @@ rpmh_vote(const uint32_t *addresses, const uint32_t *values, unsigned count)
 	mask = 1u << slot;
 	irq = rd(rsc, RSC_IRQ_ENABLE);
 	control = rd(t, TCS_CONTROL);
-	wait = rd(t, TCS_WAIT);
-	for (i = 0; i < 3; i++) {
-		for (unsigned j = 0; j < 3; j++) {
-			saved[i * 3 + j] = rd(t, TCS_COMMAND(i) + j * 4);
+	for (i = 0; i < PCIE_TCS_COMMANDS; i++) {
+		for (unsigned j = 0; j < 4; j++) {
+			saved[i * 4 + j] = rd(t, TCS_COMMAND(i) + j * 4);
 		}
 	}
 	wr(rsc, RSC_IRQ_CLEAR, mask);
-	for (i = 0; i < count; i++) {
-		wr(t, TCS_COMMAND(i), MSGID_WRITE_WAITED);
-		wr(t, TCS_COMMAND(i) + 4, addresses[i]);
-		wr(t, TCS_COMMAND(i) + 8, values[i]);
+	/* Write ALL command slots of the TCS: ours first, the unused ones zeroed.
+	 * The armed slot keeps the firmware's boot vote in commands 2..6 (enable
+	 * bits stuck on from before); leaving those live makes the trigger run
+	 * stale commands to stale addresses and the transfer never completes. */
+	for (i = 0; i < PCIE_TCS_COMMANDS; i++) {
+		if (i < count) {
+			wr(t, TCS_COMMAND(i), MSGID_WRITE_WAITED);
+			wr(t, TCS_COMMAND(i) + 4, addresses[i]);
+			wr(t, TCS_COMMAND(i) + 8, values[i]);
+		} else {
+			wr(t, TCS_COMMAND(i), 0);
+			wr(t, TCS_COMMAND(i) + 4, 0);
+			wr(t, TCS_COMMAND(i) + 8, 0);
+		}
 	}
-	/* Linux ORs the new command bits into the armed slot's enable register
-	 * instead of overwriting it (__tcs_buffer_write); clobbering the armed
-	 * bits stalled every transfer in the 13:xx runs. */
-	mask |= rd(t, TCS_CMD_ENABLE);
 	wr(t, TCS_CMD_ENABLE, mask);
 	wr(rsc, RSC_IRQ_ENABLE, irq | mask);
 	wr(t, TCS_CONTROL, control & ~TCS_CONTROL_ENABLE);
 	wr(t, TCS_CONTROL, TCS_CONTROL_ENABLE);
 	wr(t, TCS_CONTROL, TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER);
-	for (i = 0; i < 2000 && (rd(rsc, RSC_IRQ_STATUS) & mask) == 0; i++) {
+	for (i = 0; i < 4000 && (rd(rsc, RSC_IRQ_STATUS) & mask) == 0; i++) {
 		delay_us(100);
 	}
-	done = i < 2000;
-	pcie_log("pcie: power: RPMh %s after %u00 us; the commands' status %#x, control %#x, enable %#x\n",
+	done = i < 4000;
+	pcie_log("pcie: power: RPMh %s after %u00 us; the commands' status %#x, control %#x, enable %#x, irq %#x\n",
 	    done ? "HAS DONE IT" : "HAS NOT SAID DONE", i, rd(t, TCS_COMMAND(0) + 12),
-	    rd(t, TCS_CONTROL), rd(t, TCS_CMD_ENABLE));
-	/* Give the slot back the way it was; on timeout do not overwrite in-flight slots. */
+	    rd(t, TCS_CONTROL), rd(t, TCS_CMD_ENABLE), rd(rsc, RSC_IRQ_STATUS));
+	/* Linux's tcs_tx_done reclaim: un-trigger, drop the enable mask, clear the
+	 * IRQ. The timeout path runs the same un-wedging sequence -- a slot left
+	 * armed with a dead transfer blocks every later vote (the 13:2x rounds). */
+	wr(t, TCS_CONTROL, TCS_CONTROL_ENABLE);
+	wr(t, TCS_CMD_ENABLE, 0);
+	wr(rsc, RSC_IRQ_CLEAR, mask);
+	wr(rsc, RSC_IRQ_ENABLE, irq);
 	if (done) {
-		wr(t, TCS_CONTROL, TCS_CONTROL_ENABLE);
-		wr(t, TCS_CMD_ENABLE, 0);
-		wr(t, TCS_WAIT, wait);
-		wr(rsc, RSC_IRQ_CLEAR, mask);
-		wr(rsc, RSC_IRQ_ENABLE, irq);
-		for (unsigned a = 0; a < 3; a++) {
-			for (unsigned j = 0; j < 3; j++) {
-				wr(t, TCS_COMMAND(a) + j * 4, saved[a * 3 + j]);
+		for (unsigned a = 0; a < PCIE_TCS_COMMANDS; a++) {
+			for (unsigned j = 0; j < 4; j++) {
+				wr(t, TCS_COMMAND(a) + j * 4, saved[a * 4 + j]);
 			}
 		}
-		wr(t, TCS_CONTROL, control);
 	}
 	return done;
 }
@@ -592,12 +615,14 @@ power_up(void)
 	}
 
 	pcie_pause(pcie_pause_s, "power domains and clocks");
-	error = gdsc_on(GIULIA_GCC_PCIE0_GDSCR);
+	error = gdsc_on(GIULIA_GCC_PCIE0_GDSCR, GIULIA_GCC_PCIE0_GDSC_VOTE_BIT,
+	    GIULIA_GCC_CFG_GDSCR_STATUS_BIT);
 	pcie_log("pcie: gdsc core %s (%#x)\n", error ? "failed" : "on", rd(gcc, GIULIA_GCC_PCIE0_GDSCR));
 	if (error) {
 		return error;
 	}
-	error = gdsc_on(GIULIA_GCC_PCIE0_PHY_GDSCR);
+	error = gdsc_on(GIULIA_GCC_PCIE0_PHY_GDSCR, GIULIA_GCC_PCIE0_PHY_GDSC_VOTE_BIT,
+	    GIULIA_GCC_CFG_GDSCR_STATUS_BIT_PHY);
 	pcie_log("pcie: gdsc phy %s (%#x)\n", error ? "failed" : "on", rd(gcc, GIULIA_GCC_PCIE0_PHY_GDSCR));
 	if (error) {
 		return error;
