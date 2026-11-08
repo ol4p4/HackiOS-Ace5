@@ -784,6 +784,37 @@ power_up(void)
 	pcie_log("pcie: link %s (parf %#x elbi %#x, link status %#x, speed=%u width=%u)\n", up ? "up" : "still down",
 	    rd(parf, PARF_LTSSM) & 0x3f, rd(elbi, ELBI_SYS_STTS), rd(dbi, DBI_LINKCTRLSTATUS),
 	    (rd(dbi, DBI_LINKCTRLSTATUS) >> 16) & 0xf, (rd(dbi, DBI_LINKCTRLSTATUS) >> 20) & 0x3f);
+	if (!up) {
+		/* The only window into the detect circuit: sweep the PARF test
+		 * bus the way the vendor's pcie_parf_dump does (SYS_CTRL bits
+		 * [23:16] select, 0xe4 reads; the DT counts 185 selectors) and
+		 * log the nonzero ones, plus the vendor's own debug-register
+		 * lists (qcom,parf-debug-reg, qcom,phy-debug-reg). */
+		static const uint32_t parf_dbg[] = {
+		    0x24u, 0x28u, 0x224u, 0x500u, 0x4d0u, 0x4d4u, 0x3c0u, 0x630u, 0x230u
+		};
+		static const uint32_t phy_dbg[] = {
+		    0x1ccu, 0x1d0u, 0x1d4u, 0x1d8u, 0x1dcu, 0x1e0u, 0x1e4u, 0x1f8u, 0xed0u, 0x16d0u
+		};
+		uint32_t sys = rd(parf, 0);
+
+		for (unsigned k = 0; k < sizeof(parf_dbg) / sizeof(parf_dbg[0]); k++) {
+			pcie_log("pcie: parf[%#x] = %#x\n", parf_dbg[k], rd(parf, parf_dbg[k]));
+		}
+		for (unsigned k = 0; k < sizeof(phy_dbg) / sizeof(phy_dbg[0]); k++) {
+			pcie_log("pcie: phy[%#x] = %#x\n", phy_dbg[k], rd(phy, phy_dbg[k]));
+		}
+		for (uint32_t sel = 0; sel <= 0xb9u; sel++) {
+			uint32_t bus;
+
+			wr(parf, 0, (sys & ~0xff0000u) | (sel << 16));
+			bus = rd(parf, 0xe4);
+			if (bus != 0) {
+				pcie_log("pcie: testbus[%u] = %#x\n", sel, bus);
+			}
+		}
+		wr(parf, 0, sys);
+	}
 	if (up) {
 		delay_us(100000);
 	}
