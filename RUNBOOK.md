@@ -3606,3 +3606,51 @@ check-regs.sh, find-regs.sh, regdb.sh, regdb2.sh (read-only source dumps);
 the wallpaper staging trio (stage-wallpaper.sh, convert-heic.sh,
 rewrite-wallpaper-caml.sh) and build-init.sh remain the canonical tools.
 
+### The a7xx generic-clear RGB chase, round 2: the clear was never broken (2026-11-08 21:40)
+
+Round 1 was wrong on both counts, and the device says so.
+
+**The register never moved.** The current DB is the msm driver's copy
+(`drivers/gpu/drm/msm/registers/adreno/a6xx.xml` in mainline Linux — reached
+through the GitHub contents API after `gitlab.freedesktop.org/mesa/registers`
+turned out to be login-walled for WebFetch *and* for `git clone`). There,
+0x88df..0x88e2 is `RB_RESOLVE_CLEAR_COLOR_DW0..3` — exactly where 25.0.7 writes
+`RB_BLIT_CLEAR_COLOR_DW0..3`. Every "new" register in the upstream clear path is
+the same offset under a new name: 0x88d7 `DST_INFO`→`SYSTEM_BUFFER_INFO`
+(bitfields identical), 0x88e3 `BLIT_INFO`→`RESOLVE_OPERATION` (identical),
+0x88d0 `UNKNOWN_88D0`→`RESOLVE_CNTL_0`. The only behavioural delta left in
+`tu7_generic_layer_clear` is the trailing event: `FD_BLIT` (25.0.7) vs
+`FD_CCU_RESOLVE` (main).
+
+**The measurement.** A probe in `turnip_test` clears image 2 with channels that
+cannot be confused and prints the bytes (`local/root-turnip-probe.apfs`, packed
+from `local/root-turnip` with `mkroot-manifest.py` + `mkapfs.py -z --plain fw`).
+Run `20261108-213834`: `TURNIP GATE: PASS (steps 1-10)`, zero
+PowerOff/panic/SIGSEGV —
+
+```
+turnip_test: probe 0: clear (0.25 0.50 0.75 0.00) reads back RGBA 64 128 191 0
+turnip_test: probe 1: clear (0.00 0.00 0.00 1.00) reads back RGBA 0 0 0 255
+turnip_test: probe 2: clear (1.00 0.00 0.00 0.00) reads back RGBA 255 0 0 0
+```
+
+RGB exactly, alpha exactly, alpha 0 included. **There is no a7xx
+generic-clear RGB bug on this driver**, and nothing in `tu7_generic_layer_clear`
+needs to change. Round 1's green→(0,0,0,255) was a bisect-era measurement
+artifact — the same session already documented one stale-frame read producing a
+false verification failure, and the committed step-10 code clears black in
+`clear2` (green only names `clear`, used by the unused `begin`). The green
+shader in step 10 stays as the gate's stale-present differentiator, not as a
+workaround for the clear.
+
+Kept: the probe (~70 lines, prints `turnip_test: probe N:`) as the standing
+check for any future clear/format change. New read-only tools:
+`local/wsl/probe-regs.sh`, `find-regs-api.sh`, `read-upstream-clear.sh`,
+`diff-clear-path.sh`, `diff-clear-dst.sh`, `check-clear-mask.sh`, `cmp-88e3.sh`,
+`check-fdl-view.sh`; plus `phone-wsl.sh` + `setup-wsl-adb.sh` to run phone.py
+from WSL against the Windows adb (phone.py itself must run on Windows python:
+it hands fastboot Windows paths).
+
+Next on the GPU line: WSI — an IOSurface-backed present through the shim — then
+the CA bridge, with the fluency lanes as the acceptance method.
+

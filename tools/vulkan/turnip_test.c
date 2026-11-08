@@ -1145,6 +1145,75 @@ main(void)
 		IOSurfaceUnlock(surface2, kIOSurfaceLockReadOnly, NULL);
 
 		printf("turnip_test: step 10: both presents landed, in order, and the compositor read them\n");
+
+		/* Round-2 probe: the a7xx generic clear loses RGB (green clears to
+		 * (0,0,0,255), grey to black). Clear with channels that cannot be
+		 * confused -- distinct values, and an alpha of 0 in the first and last
+		 * -- and print the raw bytes. Which lane survives says whether the
+		 * clear runs at all, writes alpha only, or misreads the packed value.
+		 *
+		 * 0.25/0.5/0.75/0.0  packed RGBA8 = 0x00C08040, DW1..3 = 0
+		 * 0/0/0/1            packed       = 0xFF000000
+		 * 1/0/0/0            packed       = 0x000000FF
+		 *
+		 * "clear works" reads (64 128 191 0), (0 0 0 255), (255 0 0 0).
+		 * "alpha only"  reads (0 0 0 0), (0 0 0 255), (0 0 0 0).
+		 * "four floats, DW0 -> alpha, clamped" reads the same as alpha-only
+		 * except the middle one, which stays (0 0 0 255). */
+		{
+			static const VkClearValue probes[3] = {
+			    { .color = { .float32 = { 0.25f, 0.5f, 0.75f, 0.0f } } },
+			    { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } },
+			    { .color = { .float32 = { 1.0f, 0.0f, 0.0f, 0.0f } } },
+			};
+
+			for (unsigned p = 0; p < 3; p++) {
+				VkCommandBuffer commands3 = VK_NULL_HANDLE;
+				VkFence fence3 = VK_NULL_HANDLE;
+				VkFenceCreateInfo fenceInfo3 = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+				VkRenderPassBeginInfo probeBegin = {
+				    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+				    .renderPass = pass,
+				    .framebuffer = framebuffer2,
+				    .renderArea = { .offset = { 0, 0 }, .extent = { 256, 256 } },
+				    .clearValueCount = 1,
+				    .pClearValues = &probes[p],
+				};
+				VkSubmitInfo probeSubmit = {
+				    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+				    .commandBufferCount = 1,
+				    .pCommandBuffers = &commands3,
+				};
+				uint8_t *probeBytes = NULL;
+				int done = VK_NOT_READY;
+
+				CHECK(10, "vkAllocateCommandBuffers(clear probe)", pAllocateCommandBuffers(device, &commandsInfo, &commands3));
+				CHECK(10, "vkCreateFence(clear probe)", pCreateFence(device, &fenceInfo3, NULL, &fence3));
+				CHECK(10, "vkBeginCommandBuffer(clear probe)", pBeginCommandBuffer(commands3,
+				    &(VkCommandBufferBeginInfo){ .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }));
+				pCmdBeginRenderPass(commands3, &probeBegin, VK_SUBPASS_CONTENTS_INLINE);
+				pCmdEndRenderPass(commands3);
+				pCmdCopyImageToBuffer(commands3, image2, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &region);
+				CHECK(10, "vkEndCommandBuffer(clear probe)", pEndCommandBuffer(commands3));
+				CHECK(10, "vkQueueSubmit(clear probe)", pQueueSubmit(queue, 1, &probeSubmit, fence3));
+				for (unsigned i = 0; i < 300 && done != VK_SUCCESS; i++) {
+					done = pGetFenceStatus(device, fence3);
+					if (done == VK_SUCCESS)
+						break;
+					usleep(10 * 1000);
+				}
+				if (done != VK_SUCCESS)
+					FAIL(10, "the clear probe's fence never signalled (3 s)", done);
+				CHECK(10, "vkMapMemory(clear probe)", pMapMemory(device, bufferMemory, 0, bufferSize, 0, (void **)&probeBytes));
+				printf("turnip_test: probe %u: clear (%.2f %.2f %.2f %.2f) reads back RGBA %u %u %u %u, mid %u %u %u %u\n",
+				    p, probes[p].color.float32[0], probes[p].color.float32[1],
+				    probes[p].color.float32[2], probes[p].color.float32[3],
+				    probeBytes[0], probeBytes[1], probeBytes[2], probeBytes[3],
+				    probeBytes[mid + 0], probeBytes[mid + 1], probeBytes[mid + 2], probeBytes[mid + 3]);
+				fflush(stdout);
+				pUnmapMemory(device, bufferMemory);
+			}
+		}
 	}
 
 	printf("turnip_test: TURNIP GATE: PASS (steps 1-10)\n");
