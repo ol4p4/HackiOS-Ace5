@@ -41,6 +41,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOSurface/IOSurfaceRef.h>
 #include <vulkan/vulkan.h>
@@ -1387,9 +1388,177 @@ main(void)
 			}
 		}
 		printf("turnip_test: step 11: the draw is in the compositor's surface, imported by its id, no copy\n");
+
+		/* Step 12 rides the same import as a present loop. Phase A: 32 frames,
+		 * each record -> submit -> wait -> read of the compositor's surface,
+		 * timed (a swapchain that waits every frame). Phase B: 32 more
+		 * submitted back to back and only the last fence waited (queue depth).
+		 * Each frame's clear carries its index in a channel -- red for phase A,
+		 * green for phase B -- so the surface itself says which frame landed
+		 * last: a dropped or reordered present fails the corner check. */
+		STEP(12, "a present loop: 32 timed frames into the imported surface, then 32 pipelined");
+		{
+			enum { FRAMES = 32 };
+			VkCommandBuffer ca[FRAMES], cb[FRAMES];
+			VkFence fa[FRAMES], fb[FRAMES];
+			double t12[FRAMES], pipelined;
+			struct timespec ta, tb;
+			VkCommandBufferAllocateInfo ai12 = {
+			    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+			    .commandPool = pool,
+			    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+			    .commandBufferCount = FRAMES,
+			};
+			VkFenceCreateInfo fi12 = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+
+			CHECK(12, "vkAllocateCommandBuffers(present loop A)", pAllocateCommandBuffers(device, &ai12, ca));
+			CHECK(12, "vkAllocateCommandBuffers(present loop B)", pAllocateCommandBuffers(device, &ai12, cb));
+			for (unsigned i = 0; i < FRAMES; i++) {
+				/* one index step = 8/255, exact in 8 bits */
+				VkClearValue cva = { .color = { .float32 = { (float)(i * 8) / 255.0f, 0.0f, 0.0f, 1.0f } } };
+				VkClearValue cvb = { .color = { .float32 = { 0.0f, (float)(i * 8) / 255.0f, 0.0f, 1.0f } } };
+				VkRenderPassBeginInfo ba = {
+				    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+				    .renderPass = pass,
+				    .framebuffer = fb3,
+				    .renderArea = { .offset = { 0, 0 }, .extent = { 256, 256 } },
+				    .clearValueCount = 1,
+				    .pClearValues = &cva,
+				};
+				VkRenderPassBeginInfo bb = ba;
+
+				bb.pClearValues = &cvb;
+				CHECK(12, "vkCreateFence(present loop)", pCreateFence(device, &fi12, NULL, &fa[i]));
+				CHECK(12, "vkCreateFence(present loop)", pCreateFence(device, &fi12, NULL, &fb[i]));
+				CHECK(12, "vkBeginCommandBuffer(present loop A)", pBeginCommandBuffer(ca[i],
+				    &(VkCommandBufferBeginInfo){ .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }));
+				pCmdBeginRenderPass(ca[i], &ba, VK_SUBPASS_CONTENTS_INLINE);
+				pCmdBindPipeline(ca[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+				pCmdDraw(ca[i], 3, 1, 0, 0);
+				pCmdEndRenderPass(ca[i]);
+				CHECK(12, "vkEndCommandBuffer(present loop A)", pEndCommandBuffer(ca[i]));
+
+				CHECK(12, "vkBeginCommandBuffer(present loop B)", pBeginCommandBuffer(cb[i],
+				    &(VkCommandBufferBeginInfo){ .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }));
+				pCmdBeginRenderPass(cb[i], &bb, VK_SUBPASS_CONTENTS_INLINE);
+				pCmdBindPipeline(cb[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+				pCmdDraw(cb[i], 3, 1, 0, 0);
+				pCmdEndRenderPass(cb[i]);
+				CHECK(12, "vkEndCommandBuffer(present loop B)", pEndCommandBuffer(cb[i]));
+			}
+
+			/* phase A: wait every frame, and read the surface each time */
+			for (unsigned i = 0; i < FRAMES; i++) {
+				VkSubmitInfo si = {
+				    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+				    .commandBufferCount = 1,
+				    .pCommandBuffers = &ca[i],
+				};
+				int done = VK_NOT_READY;
+				unsigned want = i * 8, got;
+				const uint8_t *px;
+
+				clock_gettime(CLOCK_MONOTONIC, &ta);
+				CHECK(12, "vkQueueSubmit(present loop A)", pQueueSubmit(queue, 1, &si, fa[i]));
+				for (unsigned k = 0; k < 3000 && done != VK_SUCCESS; k++) {
+					done = pGetFenceStatus(device, fa[i]);
+					if (done == VK_SUCCESS)
+						break;
+					usleep(1000);
+				}
+				clock_gettime(CLOCK_MONOTONIC, &tb);
+				if (done != VK_SUCCESS)
+					FAIL(12, "a present-loop fence never signalled (3 s)", done);
+				t12[i] = ((tb.tv_sec - ta.tv_sec) * 1e3) + ((tb.tv_nsec - ta.tv_nsec) / 1e6);
+
+				/* the port's rule: whoever had the GPU draw into a surface
+				 * says so (a write lock/unlock moves the seed), or the kernel
+				 * keeps this processor's stale cache lines of it. eagl.c does
+				 * the same; a WSI layer is where this belongs eventually. */
+				if (IOSurfaceLock(surface3, 0, NULL) == 0)
+					IOSurfaceUnlock(surface3, 0, NULL);
+				if (IOSurfaceLock(surface3, kIOSurfaceLockReadOnly, NULL) != 0)
+					FAIL(12, "IOSurfaceLock(present loop read)", VK_ERROR_MEMORY_MAP_FAILED);
+				px = IOSurfaceGetBaseAddress(surface3);
+				got = px[2];                      /* BGRA: red byte */
+				IOSurfaceUnlock(surface3, kIOSurfaceLockReadOnly, NULL);
+				if (got + 2 < want || got > want + 2) {
+					printf("turnip_test:   frame %u: surface red %u, expected %u\n", i, got, want);
+					fflush(stdout);
+					FAIL(12, "a present-loop frame did not land in the surface", VK_ERROR_UNKNOWN);
+				}
+			}
+
+			/* phase B: submit all, wait the last (the queue is in order) */
+			{
+				int done = VK_NOT_READY;
+				unsigned got, want = (FRAMES - 1) * 8;
+
+				clock_gettime(CLOCK_MONOTONIC, &ta);
+				for (unsigned i = 0; i < FRAMES; i++) {
+					VkSubmitInfo si = {
+					    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+					    .commandBufferCount = 1,
+					    .pCommandBuffers = &cb[i],
+					};
+					CHECK(12, "vkQueueSubmit(present loop B)", pQueueSubmit(queue, 1, &si, fb[i]));
+				}
+				for (unsigned k = 0; k < 3000 && done != VK_SUCCESS; k++) {
+					done = pGetFenceStatus(device, fb[FRAMES - 1]);
+					if (done == VK_SUCCESS)
+						break;
+					usleep(1000);
+				}
+				clock_gettime(CLOCK_MONOTONIC, &tb);
+				if (done != VK_SUCCESS)
+					FAIL(12, "the pipelined present's last fence never signalled (3 s)", done);
+				pipelined = ((tb.tv_sec - ta.tv_sec) * 1e3) + ((tb.tv_nsec - ta.tv_nsec) / 1e6);
+
+				if (IOSurfaceLock(surface3, 0, NULL) == 0)
+					IOSurfaceUnlock(surface3, 0, NULL);
+				if (IOSurfaceLock(surface3, kIOSurfaceLockReadOnly, NULL) != 0)
+					FAIL(12, "IOSurfaceLock(pipelined read)", VK_ERROR_MEMORY_MAP_FAILED);
+				{
+					const uint8_t *px = IOSurfaceGetBaseAddress(surface3);
+
+					got = px[1];                  /* BGRA: green byte */
+					IOSurfaceUnlock(surface3, kIOSurfaceLockReadOnly, NULL);
+				}
+				if (got + 2 < want || got > want + 2) {
+					printf("turnip_test:   the last pipelined frame: surface green %u, expected %u\n", got, want);
+					fflush(stdout);
+					FAIL(12, "the last pipelined frame is not the one in the surface", VK_ERROR_UNKNOWN);
+				}
+			}
+
+			/* min / median / max of phase A */
+			{
+				double sorted[FRAMES], sum = 0.0;
+
+				memcpy(sorted, t12, sizeof(t12));
+				for (unsigned i = 1; i < FRAMES; i++) {
+					double v = sorted[i];
+					unsigned j = i;
+
+					while (j > 0 && sorted[j - 1] > v) {
+						sorted[j] = sorted[j - 1];
+						j--;
+					}
+					sorted[j] = v;
+				}
+				for (unsigned i = 0; i < FRAMES; i++)
+					sum += t12[i];
+				printf("turnip_test:   %d frames, wait each: min %.2f ms, median %.2f, max %.2f, mean %.2f\n",
+				    FRAMES, sorted[0], sorted[FRAMES / 2], sorted[FRAMES - 1], sum / FRAMES);
+				printf("turnip_test:   %d frames pipelined: %.2f ms total, %.2f ms/frame\n",
+				    FRAMES, pipelined, pipelined / FRAMES);
+				fflush(stdout);
+			}
+		}
+		printf("turnip_test: step 12: the present loop ran, every frame landed in the surface in order\n");
 	}
 
-	printf("turnip_test: TURNIP GATE: PASS (steps 1-11)\n");
+	printf("turnip_test: TURNIP GATE: PASS (steps 1-12)\n");
 	result = 0;
 out:
 	if (device != VK_NULL_HANDLE) {

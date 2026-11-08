@@ -3696,3 +3696,37 @@ longer a copy, and a client can render straight into the drawable. Next: put a
 real client's drawable on this path (the Metal/CA layer), then the CA bridge with
 the fluency lanes as acceptance.
 
+### Step 12: the present loop — 0.10 ms/frame pipelined, and the seed rule (2026-11-08 22:49)
+
+32 frames into the same imported surface, each timed around submit → fence, with
+the surface read back every frame (each frame's clear carries its index in the
+red channel, so a dropped or reordered present fails); then 32 more submitted
+back to back with only the last fence waited, and the index in green:
+
+```
+turnip_test:   32 frames, wait each: min 1.36 ms, median 1.37, max 2.55, mean 1.41
+turnip_test:   32 frames pipelined: 3.09 ms total, 0.10 ms/frame
+turnip_test: TURNIP GATE: PASS (steps 1-12)
+```
+
+Run `20261108-224906`. 0.10 ms/frame is the cost of *presenting* once there is
+queue depth; 1.41 ms is the full round trip including the fence wait, the seed
+bump and the CPU read. Against 16.7 ms at 60 Hz the present path is free.
+
+**The seed rule, and why the first run failed.** Frame 1 read back frame 0's
+colour (`surface red 0, expected 8`). The pixels were right; the *cache* was not.
+`RedwoodGPU.cpp` (the submit path's comment) invalidates this processor's cached
+lines of an IOSurface when the surface's **seed** moves, and otherwise only once
+in `GPU_PUSH_AGAIN_MS` — so a loop that reads within one frame of the write sees
+the stale line. The way to say "the GPU has drawn into this surface" is a write
+lock/unlock pair (`IOSurfaceLock(surface, 0, NULL)` + unlock), exactly what
+`userland/src/eagl.c` does after its draws. Step 12 now bumps the seed before
+each read.
+
+This is a port-wide contract, not a test detail: **every client that has the GPU
+draw into an IOSurface must bump its seed**, or whoever reads (the display, the
+compositor, another process) can see the previous frame. Turnip's present path
+needs it too — the natural home is the WSI/import layer, since a client that
+imports a surface and submits into it is exactly "somebody who wrote one".
+Metal's path already gets it from `MiniIOSurfaceDrawn()`; GL's from eagl.c.
+
