@@ -3060,3 +3060,42 @@ Next round: one fresh-boot `--pcie 3` with the fixed gpio_out. Expect
 trains past Detect.Active once the card is actually out of reset with its
 refclk on.
 
+### PCIe M1, 2026-11-08 11:37: the pads drive for the first time — still Detect.Active, the software side is done
+
+One fresh-boot run of `--pcie 3` with the fixed `gpio_out`
+(`20261108-113747`, healthy return, GPU all green, desktop up). A note on
+method: the first attempt at this round (`20261108-112818`) was a re-enter on
+the round-2 loader session — `enter` failed, the run was launched anyway —
+and it hung at GPU stage 17 with a stackshot and zero pcie lines, the same
+shape as the 11-07 22:00 run. Not a verdict; the step-3 rounds really do
+need the full reboot to Android first, and the fresh re-run confirms it.
+
+The verdict lines:
+
+- **`perst released; perst in=1 wlan_en in=1`** — the fixed `gpio_out`
+  works; for the first time in this whole effort PERST is actually
+  deasserted and WLAN_EN actually high at the pads.
+- `refclk gate pre=0 post=0x1` — reproduced a third time.
+- The link poll: `state machine 0` → `0x1 after 90 ms`, stuck there through
+  the whole 10×90 ms window, `link status 0x10110008, speed=1 width=1`,
+  rc=60 — **identical to the run with the pads dead**.
+
+So the complete software ladder — supplies voted, GDSCs on, clocks on,
+resets + parf, PHY ready (0x41), refclk gate on, WLAN_EN high, PERST
+deasserted, SM start, LTSSM_EN — lands the machine in Detect.Active and no
+further. The card's termination never appears. The state is fully
+attributed now: yesterday's Detect.Quiet was the refclk gate; today's
+Detect.Active stall is the first state that requires the card itself to
+answer, and it does not.
+
+What is left is the electrical layer, cheapest probe first: (1) the seven
+rails' actual voltages — the log confirms smpc2 at 980 mV but says nothing
+about the rest; the vote path may have enabled rails without setting their
+voltages; (2) the refclk routing — the TCSR gate turns the clock on at the
+controller, but the pad/clkreq path to the chip (and whether the WCN's own
+xtal/ln_bb_clk needs a second gate) is unverified; (3) whether the soldered
+WCN7850's PCIe really hangs off pcie0's lanes as the DTB says — a host-side
+re-read of the cnss-kiwi node's ranges/phandles against what power_up
+drives. None of these is testable from the current prints; the next build
+should log every rail's requested voltage next to its confirmation.
+
