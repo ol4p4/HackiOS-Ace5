@@ -3492,3 +3492,47 @@ real client), then the CA bridge — SpringBoard's layers through Turnip —
 with the fluency lanes (fast drags for drops, slow drags for errors) as the
 acceptance method.
 
+### The wallpaper: assets staged, PosterBoard running, the home-screen shot still owed (2026-11-08 evening)
+
+The home screen has always been black because the wallpaper pipeline was
+empty end to end. Staged in this session, entirely from the /root/ios165
+extraction (no Mac, no sips):
+
+1. **The assets**: the stock WWDC_2022 wallpaper for this canvas
+   (375w-812h@3x) lives in
+   `/root/ios165/rootfs/Library/Wallpaper/Collections/iOS_16~iphone.wallpaperCollection/Wallpapers/…`
+   — three `.ca` bundles (Background/Floating/Foreground), each with
+   `main.caml` + `assetManifest.caml` + HEIC layers (Head/Head Mask/Leg/
+   Arm/Body), 2.5 MB all told. The local/system-metal tree carried only the
+   empty directory skeleton.
+2. **HEIC → PNG**: libheif-examples alone refuses ("Unsupported codec" —
+   no HEVC decoder in Ubuntu's build); `pip3 install
+   --break-system-packages pillow-heif` + `Image.frombytes(mode, size,
+   heif.data)` converts all five layers (scripts: local/wsl/
+   stage-wallpaper.sh, convert-heic.sh).
+3. **CAML rewrite**: the `src="…HEIC"` references → `.png`, including the
+   percent-encoded `Head%20Mask.HEIC` (decode the URI before looking for
+   the file; re-quote for the attribute) — local/wsl/rewrite-wallpaper-caml.sh.
+4. **The renderer**: iOS 16's wallpaper renderer is **PosterBoard**
+   (Applications/PosterBoard.app + LaunchAngels/com.apple.PosterBoard.plist;
+   `prepare-gpu-root.py --wallpaper` exists for exactly this). Two boot
+   plumbing changes were needed: init.c's LaunchAngels bind was an empty
+   stand-in by design — now it binds the image's own LaunchAngels when the
+   image carries one (committed); and the plist moved into **LaunchDaemons**
+   with `RunAtLoad`+`KeepAlive` (the Angel flavour never ran on this port;
+   the Daemon flavour does). The staged plist copy also drops
+   `_ExperimentalNonLaunching` and registers the
+   `com.apple.posterboardservices.services` Mach service.
+5. **The verdict so far** (log 20261108-200724): launchd spawned PosterBoard
+   as pid 12 under user/501, spawned `WallpaperKit.CollectionsPoster`
+   (the collection renderer) on demand, and **SpringBoard's
+   `posterboardservices` lookups stopped failing** (zero for the whole run,
+   after failing twice per run before). The wallpaper render path is live.
+   What is still owed: a screenshot of the home screen WITH the wallpaper —
+   the touch-scripted session navigated to the Safari refresh page (60.0 Hz,
+   15490 frames, on cadence — the fluency baseline incidentally confirmed)
+   before any shot. Next run: omit `--touch`, or pass `--shots`, and the
+   early screenshot should show the WWDC swirl; if SpringBoard still draws
+   black, the remaining suspect is PosterBoard's /var state (the store a
+   real restore creates), which an empty ramfs var does not have.
+
