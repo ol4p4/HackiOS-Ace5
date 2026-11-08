@@ -69,7 +69,7 @@ pcie_log(const char *format, ...)
 	printf("%s", line);
 }
 
-static uintptr_t parf, phy, dbi, sm, gcc, tlmm, rsc, cmd_db, tcsrcc;
+static uintptr_t parf, phy, dbi, sm, gcc, tlmm, rsc, cmd_db, tcsrcc, elbi;
 static int pcie_step;
 static unsigned pcie_pause_s;
 static int pcie_supplies = 1;   /* boot-arg pcie_supplies=0: skip the RPMh votes (A/B) */
@@ -591,6 +591,12 @@ parf_setup(void)
 #define LTSSM_EN                (1u << 8)
 #define DBI_LINKCTRLSTATUS      0x80
 #define LINK_ACTIVE             (1u << 29)
+/* The vendor's pre-training writes (pci-msm.c msm_pcie_enable_link / link_train). */
+#define PARF_CFG_BITS_3         0x2c4               /* BIT(0): fal10_veto/Qactive override */
+#define DBI_GEN3_GEN2_CTRL      0x80c               /* bits [12:8]: the controller's target speed */
+#define DBI_LANE_SKEW           0x714               /* BIT(5): dynamic width upscaling */
+#define ELBI_SYS_STTS           0x08                /* LTSSM [17:12], XMLH_LINK_UP BIT(10) */
+#define XMLH_LINK_UP            (1u << 10)
 
 static void
 root_port_setup(void)
@@ -706,6 +712,16 @@ power_up(void)
 	pcie_log("pcie: wlan_en high; sw-ctrl pins read %u %u\n",
 	    rd(tlmm, GIULIA_CNSS_SW_CTRL_GPIO * 0x1000 + 4) & 1, rd(tlmm, GIULIA_CNSS_WLAN_SW_GPIO * 0x1000 + 4) & 1);
 	root_port_setup();
+	/* The vendor driver's pre-training writes that our upstream-2_7_0 port
+	 * lacked (pci-msm.c msm_pcie_enable_link, before PERST release):
+	 * de-assert Qactive -- clear the fal10_veto override and set the
+	 * dynamic-width-upscale bit -- then the controller's own Gen1 target
+	 * and the lane-skew override bit. */
+	wr(parf, PARF_CFG_BITS_3, (rd(parf, PARF_CFG_BITS_3) & ~1u) | (1u << 8));
+	wr(dbi, DBI_GEN3_GEN2_CTRL, (rd(dbi, DBI_GEN3_GEN2_CTRL) & ~0x1f00u) | (1u << 8));
+	wr(dbi, DBI_LANE_SKEW, rd(dbi, DBI_LANE_SKEW) | (1u << 5));
+	pcie_log("pcie: vendor pre-train: cfg_bits_3 %#x gen3_gen2 %#x lane_skew %#x\n",
+	    rd(parf, PARF_CFG_BITS_3), rd(dbi, DBI_GEN3_GEN2_CTRL), rd(dbi, DBI_LANE_SKEW));
 	delay_us(50000);
 
 	gpio_out(GIULIA_PCIE_PERST_GPIO, true);
@@ -713,13 +729,20 @@ power_up(void)
 	pcie_log("pcie: perst released; perst in=%u wlan_en in=%u\n",
 	    rd(tlmm, GIULIA_PCIE_PERST_GPIO * 0x1000 + 4) & 1,
 	    rd(tlmm, GIULIA_CNSS_WLAN_EN_GPIO * 0x1000 + 4) & 1);
+	elbi = ml_io_map(GIULIA_PCIE_ELBI, GIULIA_PCIE_ELBI_SIZE);
+	if (elbi == 0) {
+		pcie_log("pcie: power: the ELBI page cannot be mapped\n");
+		return ENOMEM;
+	}
 	wr(sm, GIULIA_PCIE_SM_START_OFFSET, 1u);       /* qcom,pcie-sm-start-offset: start the machine */
 	wr(parf, PARF_LTSSM, rd(parf, PARF_LTSSM) | LTSSM_EN);
 	for (unsigned i = 0; i < 10 && !up; i++) {
 		uint32_t state = rd(parf, PARF_LTSSM) & 0x3f;
+		uint32_t el = rd(elbi, ELBI_SYS_STTS);
 
 		if (state != ltssm) {
-			pcie_log("pcie: link training, state machine %#x after %u ms\n", state, i * 90);
+			pcie_log("pcie: link training, parf state %#x elbi %#x after %u ms\n",
+			    state, el, i * 90);
 			ltssm = state;
 		}
 		up = (rd(dbi, DBI_LINKCTRLSTATUS) & LINK_ACTIVE) != 0;
@@ -727,8 +750,8 @@ power_up(void)
 			delay_us(90000);
 		}
 	}
-	pcie_log("pcie: link %s (state machine %#x, link status %#x, speed=%u width=%u)\n", up ? "up" : "still down",
-	    rd(parf, PARF_LTSSM) & 0x3f, rd(dbi, DBI_LINKCTRLSTATUS),
+	pcie_log("pcie: link %s (parf %#x elbi %#x, link status %#x, speed=%u width=%u)\n", up ? "up" : "still down",
+	    rd(parf, PARF_LTSSM) & 0x3f, rd(elbi, ELBI_SYS_STTS), rd(dbi, DBI_LINKCTRLSTATUS),
 	    (rd(dbi, DBI_LINKCTRLSTATUS) >> 16) & 0xf, (rd(dbi, DBI_LINKCTRLSTATUS) >> 20) & 0x3f);
 	if (up) {
 		delay_us(100000);

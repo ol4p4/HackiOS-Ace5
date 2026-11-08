@@ -3099,3 +3099,46 @@ re-read of the cnss-kiwi node's ranges/phandles against what power_up
 drives. None of these is testable from the current prints; the next build
 should log every rail's requested voltage next to its confirmation.
 
+### PCIe M1, 2026-11-08 afternoon (host-side): the rail-voltage suspect dies, the vendor driver's sequence is diffed
+
+The rail-voltage suspect is closed by the logs we already had: all seven
+rails confirmed with voltages (`smpc2 on at 980 mV: confirmed` …
+`smpi4 on at 938 mV: confirmed`) — the "only smpc2" reading was a truncated
+tail. The phone's own DTB independently agrees with every value
+(`qcom,vdd-wlan-*-config` = the same microvolts).
+
+The DTB re-read (host, authoritative for this board):
+
+- `qcom,wlan-rc-num = 0` — the WLAN is on pcie0; the root complex is right.
+- cnss-kiwi drives four GPIOs: wlan-en 16 (we drive), bt-en 17, sw-ctrl 18,
+  wlan-sw-ctrl 19 (we only read the last two). The vendor cnss2 driver
+  (`power.c`) drives **only wlan_en** at power-on; bt_en is touched only for
+  QCA6490 and sw_ctrl is read-only there — so our GPIO set now matches the
+  kernel behavior.
+- `reg` pair 7: `pcie_sm @ 0x1d07000` — our SM base matches the DT.
+- No `qcom,tcsr` table in the pcie node, so the vendor's `pcie_tcsr_init`
+  writes nothing on this board either.
+
+The vendor `pci-msm.c` (the driver this board's `qcom,pci-msm` compatible
+selects) diffed against our ladder: our parf_setup already covers
+DEVICE_TYPE=4, PHY_CTRL BIT(0) clear, DBI/ATU/SLV bases, MHI BYPASS bit,
+PM_CTRL BIT(5), WR_HALT BIT(31); the SM seq→branch→START matches the
+vendor's state-manager load. What we lacked, all before PERST release:
+
+1. **PARF_CFG_BITS_3 (0x2c4): clear BIT(0), set BIT(8)** — "Disable override
+   for fal10_veto logic to de-assert Qactive signal" + dynamic width
+   upscaling;
+2. **DBI 0x80c (GEN3_GEN2_CTRL) bits [12:8] = 1** — the controller's own
+   Gen1 target (we only wrote LNKCTL2 TLS);
+3. **DBI 0x714 (LANE_SKEW_OFF) BIT(5)** — width-upscale support.
+
+Plus a blind spot: the vendor judges the link on **ELBI_SYS_STTS** (ELBI at
+DBI+0xf20 per the DT, SYS_STTS at +0x08; LTSSM state bits [17:12],
+XMLH_LINK_UP BIT(10)), not on the PARF_LTSSM readback our poll uses. All
+four are in this round's build: the three writes (each logged with the
+readback) and the poll/final line now print the ELBI value next to the PARF
+state. Deliberately NOT this round: the vendor's full
+`PARF_SYS_CTRL = 0x365E` overwrite (our bit-29 clear from upstream
+pcie-qcom stays — one bundle per round; SYS_CTRL is the next candidate if
+this one fails).
+

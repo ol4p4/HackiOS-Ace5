@@ -67,6 +67,13 @@
 #define GIULIA_TCSRCC_SIZE          0xc0000u
 #define GIULIA_TCSRCC_PCIE0_CLKREF_EN 0xb1100u
 
+/* The ELBI window sits just past the DBI (dt reg pair 4: 0x60000f20, 0xa8
+ * long); ELBI_SYS_STTS carries the live LTSSM state at bits [17:12] and
+ * XMLH_LINK_UP at bit 10 -- the register pair the vendor driver actually
+ * polls (pci-msm.c msm_pcie_link_train), unlike the PARF_LTSSM readback. */
+#define GIULIA_PCIE_ELBI            0x60000f20u
+#define GIULIA_PCIE_ELBI_SIZE       0xa8u
+
 #define GIULIA_PCIE_SMMU_SID_BASE   0x1400u
 
 struct giulia_pcie_phy_step {
