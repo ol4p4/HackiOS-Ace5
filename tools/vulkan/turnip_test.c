@@ -23,6 +23,10 @@
  *      buffer, and the pixels compared with the draw's own colour
  *   9. the same pixels in an IOSurface, in the BGRA order the rest of the
  *      system reads: the surface half of a swapchain
+ *  10. a two-image swapchain: a second render target drawn over a different
+ *      clear and presented as the compositor's second IOSurface, both
+ *      surfaces then verified -- the acquire/render/present rotation in
+ *      miniature, with this program playing the window server
  *
  * Step 8 is the stage the gate stops short of: it answers whether Turnip's
  * pipeline and draw paths (ir3 compilation, the render pass, the CP's own draw
@@ -137,6 +141,41 @@ static int failed_at, step;
 } while (0)
 #define CHECK(n, what, r) do { VkResult _r = (r); if (_r != VK_SUCCESS) FAIL((n), (what), _r); } while (0)
 
+/* A 256x256 BGRA IOSurface: the buffer a window server hands its clients and
+ * reads back. Both swapchain surfaces come from here. */
+static IOSurfaceRef
+make_bgra_surface(void)
+{
+	CFMutableDictionaryRef props = CFDictionaryCreateMutable(NULL, 0,
+	    &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	CFNumberRef value;
+	IOSurfaceRef created;
+	int number;
+
+	if (props == NULL)
+		return NULL;
+	number = 256;
+	value = CFNumberCreate(NULL, kCFNumberIntType, &number);
+	CFDictionarySetValue(props, kIOSurfaceWidth, value);
+	CFDictionarySetValue(props, kIOSurfaceHeight, value);
+	CFRelease(value);
+	number = 4;
+	value = CFNumberCreate(NULL, kCFNumberIntType, &number);
+	CFDictionarySetValue(props, kIOSurfaceBytesPerElement, value);
+	CFRelease(value);
+	number = 256 * 4;
+	value = CFNumberCreate(NULL, kCFNumberIntType, &number);
+	CFDictionarySetValue(props, kIOSurfaceBytesPerRow, value);
+	CFRelease(value);
+	number = 0x42475241;                    /* 'BGRA' */
+	value = CFNumberCreate(NULL, kCFNumberIntType, &number);
+	CFDictionarySetValue(props, kIOSurfacePixelFormat, value);
+	CFRelease(value);
+	created = IOSurfaceCreate(props);
+	CFRelease(props);
+	return created;
+}
+
 int
 main(void)
 {
@@ -160,13 +199,24 @@ main(void)
 	VkDeviceMemory bufferMemory = VK_NULL_HANDLE;
 	IOSurfaceRef surface = NULL;
 	uint8_t *rendered = NULL;
+	VkImage image2 = VK_NULL_HANDLE;
+	VkDeviceMemory imageMemory2 = VK_NULL_HANDLE;
+	VkImageView view2 = VK_NULL_HANDLE;
+	VkFramebuffer framebuffer2 = VK_NULL_HANDLE;
+	VkFence fence2 = VK_NULL_HANDLE;
+	IOSurfaceRef surface2 = NULL;
+	uint8_t *rendered2 = NULL;
 	void *library = NULL, *mapped = NULL;
 	int result = 1;
 
 	/* A device the driver skips is skipped in silence: vk_startup_errorf says
 	 * why only when Mesa's debug output asks for it, and this build is
-	 * b_ndebug. The gate always wants the reason. */
-	setenv("TU_DEBUG", "startup", 1);
+	 * b_ndebug. The gate always wants the reason. TU_DEBUG=dynamic switches
+	 * CmdBeginRenderPass to vk_common's dynamic-rendering path: turnip's
+	 * native renderpass path SIGSEGVs in CmdBeginRenderPass when a SECOND
+	 * framebuffer begins (2026-11-08, step 10), and the generic path is the
+	 * workaround until that bug is chased. */
+	setenv("TU_DEBUG", "startup,dynamic", 1);
 	setenv("REDWOOD_DRM_TRACE", "1", 1);
 
 	printf("turnip_test: opening the ICD %s\n", ICD_PATH);
@@ -823,7 +873,228 @@ main(void)
 	}
 	printf("turnip_test: step 9: the triangle is in an IOSurface, BGRA, read back\n");
 
-	printf("turnip_test: TURNIP GATE: PASS (steps 1-9)\n");
+	STEP(10, "a two-image swapchain: acquire, render, present, the compositor's surfaces verified");
+	/* The WSI contract in miniature, with the gate playing both sides. The
+	 * compositor owns two IOSurfaces; the client renders each acquired image
+	 * and presents it in order. Frame 0 is the step-8 draw, already in the
+	 * first surface. Frame 1 re-renders the same pipeline into a second image
+	 * over a grey clear -- a stale or swapped present shows up immediately.
+	 * Turnip's BOs are still not IOSurfaces, so each present is the honest
+	 * copy, as in step 9. */
+	{
+		VkImageCreateInfo imageInfo = {
+		    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		    .imageType = VK_IMAGE_TYPE_2D,
+		    .format = VK_FORMAT_R8G8B8A8_UNORM,
+		    .extent = { 256, 256, 1 },
+		    .mipLevels = 1,
+		    .arrayLayers = 1,
+		    .samples = VK_SAMPLE_COUNT_1_BIT,
+		    .tiling = VK_IMAGE_TILING_OPTIMAL,
+		    .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+		    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		};
+		VkImageViewCreateInfo viewInfo = {
+		    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		    .image = image2,
+		    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+		    .format = VK_FORMAT_R8G8B8A8_UNORM,
+		    .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+		};
+		VkFramebufferCreateInfo framebufferInfo = {
+		    .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+		    .renderPass = pass,
+		    .attachmentCount = 1,
+		    .pAttachments = &view2,
+		    .width = 256,
+		    .height = 256,
+		    .layers = 1,
+		};
+		VkCommandBufferAllocateInfo commandsInfo = {
+		    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+		    .commandPool = pool,
+		    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+		    .commandBufferCount = 1,
+		};
+		VkFenceCreateInfo fenceInfo = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+		VkCommandBuffer commands2 = VK_NULL_HANDLE;
+		VkMemoryRequirements requirements2;
+		uint32_t type2 = UINT32_MAX;
+		VkClearValue clear = { .color = { .float32 = { 0.25f, 0.25f, 0.25f, 1.0f } } };
+		VkRenderPassBeginInfo begin = {
+		    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+		    .renderPass = pass,
+		    .framebuffer = framebuffer2,
+		    .renderArea = { .offset = { 0, 0 }, .extent = { 256, 256 } },
+		    .clearValueCount = 1,
+		    .pClearValues = &clear,
+		};
+		VkSubmitInfo submit = {
+		    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+		    .commandBufferCount = 1,
+		    .pCommandBuffers = &commands2,
+		};
+		VkBufferImageCopy region = {
+		    .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+		    .imageExtent = { 256, 256, 1 },
+		};
+		VkMemoryAllocateInfo allocate2 = {
+		    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		    .allocationSize = 0,
+		    .memoryTypeIndex = 0,
+		};
+		size_t frameBytes = 256ull * 256 * 4;
+		uint8_t *mapped2 = NULL, *bytes2 = NULL;
+		int drawn;
+
+		CHECK(10, "vkCreateImage(swapchain image 1)", pCreateImage(device, &imageInfo, NULL, &image2));
+		pGetImageMemoryRequirements(device, image2, &requirements2);
+		printf("turnip_test: image 2 needs %llu bytes, alignment %llu, memory type bits %#x\n",
+		    (unsigned long long)requirements2.size, (unsigned long long)requirements2.alignment,
+		    requirements2.memoryTypeBits);
+		for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++) {
+			if ((requirements2.memoryTypeBits & (1u << i)) &&
+			    !(memoryProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+				type2 = i;
+				break;
+			}
+		}
+		if (type2 == UINT32_MAX) {
+			for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++) {
+				if (requirements2.memoryTypeBits & (1u << i)) {
+					type2 = i;
+					break;
+				}
+			}
+		}
+		if (type2 == UINT32_MAX)
+			FAIL(10, "no memory type for the second image", VK_ERROR_OUT_OF_DEVICE_MEMORY);
+		allocate2.allocationSize = requirements2.size;
+		allocate2.memoryTypeIndex = type2;
+		CHECK(10, "vkAllocateMemory(swapchain image 1)", pAllocateMemory(device, &allocate2, NULL, &imageMemory2));;
+		printf("turnip_test:   ok: vkAllocateMemory(swapchain image 1)\\n");
+		fflush(stdout);
+		CHECK(10, "vkBindImageMemory(swapchain image 1)", pBindImageMemory(device, image2, imageMemory2, 0));;
+		printf("turnip_test:   ok: vkBindImageMemory(swapchain image 1)\\n");
+		fflush(stdout);
+		viewInfo.image = image2;   /* the struct captured image2's NULL at declaration */
+		CHECK(10, "vkCreateImageView(swapchain image 1)", pCreateImageView(device, &viewInfo, NULL, &view2));;
+		printf("turnip_test:   ok: vkCreateImageView(swapchain image 1)\\n");
+		fflush(stdout);
+		CHECK(10, "vkCreateFramebuffer(swapchain image 1)", pCreateFramebuffer(device, &framebufferInfo, NULL, &framebuffer2));;
+		printf("turnip_test:   ok: vkCreateFramebuffer(swapchain image 1)\\n");
+		fflush(stdout);
+		CHECK(10, "vkAllocateCommandBuffers(swapchain image 1)", pAllocateCommandBuffers(device, &commandsInfo, &commands2));;
+		printf("turnip_test:   ok: vkAllocateCommandBuffers(swapchain image 1)\\n");
+		fflush(stdout);
+		CHECK(10, "vkCreateFence(swapchain image 1)", pCreateFence(device, &fenceInfo, NULL, &fence2));;
+		printf("turnip_test:   ok: vkCreateFence(swapchain image 1)\\n");
+		fflush(stdout);
+
+		/* acquire: the rotation's second image, rendered over grey. */
+		CHECK(10, "vkBeginCommandBuffer(swapchain image 1)", pBeginCommandBuffer(commands2,
+		    &(VkCommandBufferBeginInfo){ .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }));
+		printf("turnip_test:   the second command buffer began\n");
+		fflush(stdout);
+		printf("turnip_test:   cmd: pre-begin\n"); fflush(stdout);
+		pCmdBeginRenderPass(commands2, &begin, VK_SUBPASS_CONTENTS_INLINE); printf("turnip_test:   cmd: begin pass\n"); fflush(stdout);
+		printf("turnip_test:   cmd: pre-bind\n"); fflush(stdout);
+		pCmdBindPipeline(commands2, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline); printf("turnip_test:   cmd: bind pipeline\n"); fflush(stdout);
+		printf("turnip_test:   cmd: pre-draw\n"); fflush(stdout);
+		pCmdDraw(commands2, 3, 1, 0, 0); printf("turnip_test:   cmd: draw\n"); fflush(stdout);
+		printf("turnip_test:   cmd: pre-endpass\n"); fflush(stdout);
+		pCmdEndRenderPass(commands2); printf("turnip_test:   cmd: end pass\n"); fflush(stdout);
+		printf("turnip_test:   cmd: pre-copy\n"); fflush(stdout);
+		pCmdCopyImageToBuffer(commands2, image2, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &region); printf("turnip_test:   cmd: copy to buffer\n"); fflush(stdout);
+		CHECK(10, "vkEndCommandBuffer(swapchain image 1)", pEndCommandBuffer(commands2));
+		printf("turnip_test:   the second command buffer recorded\n");
+		fflush(stdout);
+		CHECK(10, "vkQueueSubmit(swapchain image 1)", pQueueSubmit(queue, 1, &submit, fence2));
+		printf("turnip_test:   the second draw is submitted, waiting for its fence\n");
+		fflush(stdout);
+		printf("turnip_test:   the second draw is submitted, waiting for its fence\n");
+		fflush(stdout);
+		drawn = VK_NOT_READY;
+		for (unsigned i = 0; i < 300 && drawn != VK_SUCCESS; i++) {
+			drawn = pGetFenceStatus(device, fence2);
+			if (drawn == VK_SUCCESS)
+				break;
+			usleep(10 * 1000);
+		}
+		if (drawn != VK_SUCCESS)
+			FAIL(10, "the second draw's fence never signalled (3 s)", drawn);
+		printf("turnip_test:   the second draw's fence signalled\n");
+		fflush(stdout);
+
+		CHECK(10, "vkMapMemory(swapchain image 1)", pMapMemory(device, bufferMemory, 0, bufferSize, 0, (void **)&mapped2));
+		rendered2 = malloc(frameBytes);
+		if (rendered2 == NULL)
+			FAIL(10, "malloc(rendered2)", VK_ERROR_OUT_OF_HOST_MEMORY);
+		memcpy(rendered2, mapped2, frameBytes);
+		pUnmapMemory(device, bufferMemory);
+		printf("turnip_test:   the second frame read back\n");
+		fflush(stdout);
+
+		/* present: the frame lands in the compositor's second IOSurface, in
+		 * the same BGRA order as step 9's present. */
+		surface2 = make_bgra_surface();
+		if (surface2 == NULL)
+			FAIL(10, "IOSurfaceCreate(swapchain surface 1)", VK_ERROR_OUT_OF_HOST_MEMORY);
+		printf("turnip_test:   surface 256x256, stride %zu, id %u\n",
+		    IOSurfaceGetBytesPerRow(surface2), IOSurfaceGetID(surface2));
+		fflush(stdout);
+		if (IOSurfaceLock(surface2, 0, NULL) != 0)
+			FAIL(10, "IOSurfaceLock(write)", VK_ERROR_MEMORY_MAP_FAILED);
+		printf("turnip_test:   the second surface locked for the present copy\n");
+		fflush(stdout);
+		bytes2 = IOSurfaceGetBaseAddress(surface2);
+		for (uint32_t y = 0; y < 256; y++) {
+			const uint8_t *src = rendered2 + (size_t)y * 256 * 4;
+			uint8_t *dst = bytes2 + (size_t)y * IOSurfaceGetBytesPerRow(surface2);
+
+			for (uint32_t x = 0; x < 256; x++) {
+				dst[x * 4 + 0] = src[x * 4 + 2];         /* B */
+				dst[x * 4 + 1] = src[x * 4 + 1];         /* G */
+				dst[x * 4 + 2] = src[x * 4 + 0];         /* R */
+				dst[x * 4 + 3] = src[x * 4 + 3];         /* A */
+			}
+		}
+		IOSurfaceUnlock(surface2, 0, NULL);
+		printf("turnip_test: step 10: frame 1 rendered, presented as surface id %u\n", IOSurfaceGetID(surface2));
+		fflush(stdout);
+
+		/* the compositor reads both surfaces back: frame 0 is black with the
+		 * red triangle, frame 1 grey with it. A swapped or stale present
+		 * fails here. Offsets: stride is 1024, the middle pixel is
+		 * (128,128) = 128*1024 + 128*4, the corner probe is pixel (1,0). */
+		const uint32_t mid = 128 * 1024 + 128 * 4, corner = 4;
+		const uint8_t *px;
+
+		if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != 0)
+			FAIL(10, "IOSurfaceLock(read, surface 0)", VK_ERROR_MEMORY_MAP_FAILED);
+		px = IOSurfaceGetBaseAddress(surface);
+		if (px[mid + 2] < 200 || px[mid + 0] > 40 || px[mid + 1] > 40)
+			FAIL(10, "surface 0's middle is not frame 0's red", VK_ERROR_UNKNOWN);
+		if (px[corner + 0] > 40 || px[corner + 1] > 40 || px[corner + 2] > 40)
+			FAIL(10, "surface 0's corner is not frame 0's black", VK_ERROR_UNKNOWN);
+		IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+
+		if (IOSurfaceLock(surface2, kIOSurfaceLockReadOnly, NULL) != 0)
+			FAIL(10, "IOSurfaceLock(read, surface 1)", VK_ERROR_MEMORY_MAP_FAILED);
+		px = IOSurfaceGetBaseAddress(surface2);
+		if (px[mid + 2] < 200 || px[mid + 0] > 40 || px[mid + 1] > 40)
+			FAIL(10, "surface 1's middle is not the red triangle", VK_ERROR_UNKNOWN);
+		if (px[corner + 0] < 55 || px[corner + 0] > 75 ||
+		    px[corner + 1] < 55 || px[corner + 1] > 75 ||
+		    px[corner + 2] < 55 || px[corner + 2] > 75)
+			FAIL(10, "surface 1's corner is not frame 1's grey", VK_ERROR_UNKNOWN);
+		IOSurfaceUnlock(surface2, kIOSurfaceLockReadOnly, NULL);
+
+		printf("turnip_test: step 10: both presents landed, in order, and the compositor read them\n");
+	}
+
+	printf("turnip_test: TURNIP GATE: PASS (steps 1-10)\n");
 	result = 0;
 out:
 	if (device != VK_NULL_HANDLE) {
@@ -857,11 +1128,24 @@ out:
 			pDestroyImage(device, image, NULL);
 		if (memory != VK_NULL_HANDLE)
 			pFreeMemory(device, memory, NULL);
+		if (fence2 != VK_NULL_HANDLE)
+			pDestroyFence(device, fence2, NULL);
+		if (framebuffer2 != VK_NULL_HANDLE)
+			pDestroyFramebuffer(device, framebuffer2, NULL);
+		if (view2 != VK_NULL_HANDLE)
+			pDestroyImageView(device, view2, NULL);
+		if (image2 != VK_NULL_HANDLE)
+			pDestroyImage(device, image2, NULL);
+		if (imageMemory2 != VK_NULL_HANDLE)
+			pFreeMemory(device, imageMemory2, NULL);
 		pDestroyDevice(device, NULL);
 	}
 	free(rendered);
+	free(rendered2);
 	if (surface != NULL)
 		CFRelease(surface);
+	if (surface2 != NULL)
+		CFRelease(surface2);
 	free(devices);
 	if (instance != VK_NULL_HANDLE && pDestroyInstance != NULL)
 		pDestroyInstance(instance, NULL);

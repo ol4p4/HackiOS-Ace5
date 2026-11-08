@@ -3404,3 +3404,43 @@ the rendering step. Fluency work from there follows the user's method
 note: fast-drag lanes for dropped frames, slow-drag lanes for frame
 generation errors.
 
+### The Turnip gate, step 10 (two-image swapchain): built, bisected, one driver-level crash isolated — the dynamic-path run is staged (2026-11-08 afternoon, host-side)
+
+Step 10 extends `turnip_test.c` to the WSI contract in miniature: a second
+render target and a second IOSurface, frame 1 re-rendering the same pipeline
+over a grey clear, presented to the compositor's second surface, both
+surfaces verified (a stale or swapped present fails). During the bring-up,
+five device runs bisected one SIGSEGV (`turnip_test[35] Corpse`, then
+`[killed by signal 11]`):
+
+- `vkCreateImageView` on the second image crashed — **our bug**: the
+  viewInfo struct captured image2's NULL handle at declaration time; fixed
+  by assigning `viewInfo.image = image2` before the call. Creation chain
+  then ran clean.
+- A stray unconditional FAIL (an editing leftover) killed the run after the
+  present copy — removed.
+- **With the step-8 framebuffer the whole second frame works**: record,
+  submit, fence, read-back, surface copy — everything. The crash is exactly
+  `CmdBeginRenderPass` **with framebuffer2** — the second framebuffer
+  object. bisect: same pass/pipeline/commands2/grey clear with the step-8
+  framebuffer = full pass; swap in framebuffer2 = SIGSEGV.
+
+The source was read end to end for the difference
+(`tu_CmdBeginRenderPass2` → `tu_choose_gmem_layout` →
+`framebuffer->tiling[]` / `tu_emit_subpass_begin` → gmem load/clear blits
+through the attachment iviews): framebuffer creation fills all
+`TU_GMEM_LAYOUT_COUNT` tiling entries successfully, and the same code path
+serves framebuffer1's begin. The native-path bug is real but not found by
+reading; the empirically staged answer is `TU_DEBUG=dynamic`, which routes
+CmdBeginRenderPass through mesa's generic dynamic-rendering implementation
+— also the strategically right path for the CA bridge. The build with
+`TU_DEBUG=startup,dynamic` and the restored two-image design is packed and
+waiting for a free phone; steps 8-9 now ride the dynamic path too, so the
+run doubles as its validation.
+
+Method note from these runs: the bisect was done with per-call marker
+prints (the failure was silent SIGSEGV, corpse capture failed on this
+XNU). Three of the five runs were burned to heredoc/patch mangling
+(`\n` eaten in python heredocs) — the Edit tool, not scripted patching,
+against this CRLF worktree.
+
