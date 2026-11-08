@@ -3444,3 +3444,51 @@ XNU). Three of the five runs were burned to heredoc/patch mangling
 (`\n` eaten in python heredocs) — the Edit tool, not scripted patching,
 against this CRLF worktree.
 
+### The Turnip gate, step 10 PASSED: a two-image swapchain with in-order presents (2026-11-08 19:13)
+
+The staged runs landed it, and the "second framebuffer driver bug" from the
+earlier bisect turned out to be **our own C initialization trap, twice**:
+`begin.framebuffer`, like `viewInfo.image` before it, captured
+`framebuffer2`'s NULL handle at declaration time — every begin with
+framebuffer2 dereferenced NULL+0x58 (`FAULT sig=11 addr=0x58`, caught by
+the SIGSEGV handler the test now installs; the XNU here fails corpse
+capture, so the handler is the only crash reporter). The bisect that
+"passed" with the step-8 framebuffer was really passing because THAT handle
+was already valid. The driver was never at fault for the crash. The fix is
+one line after `vkCreateFramebuffer`: `begin.framebuffer = framebuffer2;`.
+
+The dump also exposed a real driver-level finding worth its own chase: **the
+a7xx generic-clear path loses the clear's RGB while writing alpha
+correctly** — frame 1 cleared with green `(0,1,0,1)` read back
+`(0,0,0,255)`, grey `(0.25)` likewise black. Every earlier gate step only
+ever cleared black, so this was invisible until now (chain:
+`tu7_emit_subpass_clear` → `tu7_generic_clear_attachment` →
+`tu7_generic_layer_clear`; the value rides
+`pack_blit_event_clear_value`-style packing into the blit clear registers —
+the RGB lanes die somewhere in there). The gate sidesteps it: frame 1's
+differentiator is a **second pipeline with a green fragment shader**
+(`triangle-green.frag` → `triangle_green_frag_spirv`, generated through the
+extended `mk-spirv-header.py`), the draw path being fully proven.
+
+Final verdict (log `20261108-191353`, fresh cycle, zero
+PowerOff/panic/SIGSEGV):
+
+```
+turnip_test: step 10: a two-image swapchain: acquire, render, present, the compositor's surfaces verified
+turnip_test: step 10: frame 1 rendered, presented as surface id 37
+turnip_test: step 10: both presents landed, in order, and the compositor read them
+turnip_test: TURNIP GATE: PASS (steps 1-10)
+```
+
+Two stale-frame runs mid-development taught a hygiene lesson: the marker
+cleanup `sed` deleted whole command lines that carried prints
+(`pCmdBeginRenderPass` and friends vanished, frame B rendered nothing, the
+copy read step-8's stale buffer — the verification "failure" was the stale
+frame), so a verification failure after an edit pass means re-read the
+whole region, not just the failing check.
+
+Next on the GPU line: the a7xx generic-clear RGB chase (it will bite every
+real client), then the CA bridge — SpringBoard's layers through Turnip —
+with the fluency lanes (fast drags for drops, slow drags for errors) as the
+acceptance method.
+

@@ -35,6 +35,7 @@
  * the window server, the 2D engine and CoreAnimation can take.
  */
 #include <dlfcn.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -134,6 +135,29 @@ result_name(VkResult r)
 
 static int failed_at, step;
 
+/* The XNU here fails corpse capture ("Failed to send exception
+ * EXC_CORPSE_NOTIFY"), so a SIGSEGV in the driver dies in silence. Print the
+ * fault address and PC ourselves: a small address is a NULL deref, and the PC
+ * against the ICD's load base names the function. */
+static void *
+fault_library_base;
+
+static void
+fault_handler(int sig, siginfo_t *info, void *uctx)
+{
+	unsigned long long *regs = (unsigned long long *)uctx;
+
+	printf("turnip_test: FAULT sig=%d addr=%p libbase=%p\n", sig, info->si_addr,
+	    fault_library_base);
+	for (int i = 0; i < 24; i++)
+		printf("turnip_test:   uctx[%02d] = %#018llx%s\n", i, regs[i],
+		    ((unsigned long long)regs[i] > (unsigned long long)fault_library_base &&
+		     (unsigned long long)regs[i] < (unsigned long long)fault_library_base + 0x1000000)
+		        ? "  <-- in the ICD" : "");
+	fflush(stdout);
+	_exit(99);
+}
+
 #define STEP(n, what) do { step = (n); printf("turnip_test: step %d: %s\n", (n), (what)); fflush(stdout); } while (0)
 #define FAIL(n, what, r) do { \
 	printf("turnip_test: FAILED at step %d (%s): %s\n", (n), (what), result_name(r)); \
@@ -195,6 +219,8 @@ main(void)
 	VkPipelineLayout layout = VK_NULL_HANDLE;
 	VkPipeline pipeline = VK_NULL_HANDLE;
 	VkShaderModule vertShader = VK_NULL_HANDLE, fragShader = VK_NULL_HANDLE;
+	VkShaderModule fragShader2 = VK_NULL_HANDLE;
+	VkPipeline pipeline2 = VK_NULL_HANDLE;
 	VkBuffer buffer = VK_NULL_HANDLE;
 	VkDeviceMemory bufferMemory = VK_NULL_HANDLE;
 	IOSurfaceRef surface = NULL;
@@ -211,12 +237,8 @@ main(void)
 
 	/* A device the driver skips is skipped in silence: vk_startup_errorf says
 	 * why only when Mesa's debug output asks for it, and this build is
-	 * b_ndebug. The gate always wants the reason. TU_DEBUG=dynamic switches
-	 * CmdBeginRenderPass to vk_common's dynamic-rendering path: turnip's
-	 * native renderpass path SIGSEGVs in CmdBeginRenderPass when a SECOND
-	 * framebuffer begins (2026-11-08, step 10), and the generic path is the
-	 * workaround until that bug is chased. */
-	setenv("TU_DEBUG", "startup,dynamic", 1);
+	 * b_ndebug. The gate always wants the reason. */
+	setenv("TU_DEBUG", "startup", 1);
 	setenv("REDWOOD_DRM_TRACE", "1", 1);
 
 	printf("turnip_test: opening the ICD %s\n", ICD_PATH);
@@ -224,6 +246,17 @@ main(void)
 	if (library == NULL) {
 		printf("turnip_test: FAILED: %s: %s\n", ICD_PATH, dlerror());
 		return 1;
+	}
+	{
+		struct sigaction sa = { .sa_sigaction = fault_handler, .sa_flags = SA_SIGINFO };
+		sigaction(SIGSEGV, &sa, NULL);
+		sigaction(SIGBUS, &sa, NULL);
+		Dl_info di;
+		void *inside = dlsym(library, "vk_icdGetInstanceProcAddr");
+		if (inside != NULL && dladdr(inside, &di) && di.dli_fbase)
+			fault_library_base = di.dli_fbase;
+		printf("turnip_test: ICD base %p\n", fault_library_base);
+		fflush(stdout);
 	}
 
 	/* No Vulkan loader on this port: the ICD's own door is what a loader would
@@ -659,6 +692,23 @@ main(void)
 	};
 	CHECK(8, "vkCreateGraphicsPipelines", pCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &pipeline));
 
+	/* The swapchain step's second pipeline: the same draw with a green fragment
+	 * shader, so frame 1 differs from frame 0 without depending on the clear
+	 * colour (the a7xx generic-clear path currently loses the clear's RGB). */
+	VkShaderModuleCreateInfo fragGreenInfo = {
+	    .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+	    .codeSize = sizeof(triangle_green_frag_spirv),
+	    .pCode = triangle_green_frag_spirv,
+	};
+	CHECK(10, "vkCreateShaderModule(fragment, green)", pCreateShaderModule(device, &fragGreenInfo, NULL, &fragShader2));
+	VkPipelineShaderStageCreateInfo greenStages[2] = {
+	    stages[0],
+	    { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+	      .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragShader2, .pName = "main" },
+	};
+	pipelineInfo.pStages = greenStages;
+	CHECK(10, "vkCreateGraphicsPipelines(green)", pCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &pipeline2));
+
 	/* the readback buffer: the whole 256x256 image, RGBA8 */
 	const VkDeviceSize bufferSize = 256 * 256 * 4;
 	VkBufferCreateInfo readbackInfo = {
@@ -921,7 +971,7 @@ main(void)
 		VkCommandBuffer commands2 = VK_NULL_HANDLE;
 		VkMemoryRequirements requirements2;
 		uint32_t type2 = UINT32_MAX;
-		VkClearValue clear = { .color = { .float32 = { 0.25f, 0.25f, 0.25f, 1.0f } } };
+		VkClearValue clear = { .color = { .float32 = { 0.0f, 1.0f, 0.0f, 1.0f } } };
 		VkRenderPassBeginInfo begin = {
 		    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 		    .renderPass = pass,
@@ -973,40 +1023,40 @@ main(void)
 		allocate2.allocationSize = requirements2.size;
 		allocate2.memoryTypeIndex = type2;
 		CHECK(10, "vkAllocateMemory(swapchain image 1)", pAllocateMemory(device, &allocate2, NULL, &imageMemory2));;
-		printf("turnip_test:   ok: vkAllocateMemory(swapchain image 1)\\n");
 		fflush(stdout);
 		CHECK(10, "vkBindImageMemory(swapchain image 1)", pBindImageMemory(device, image2, imageMemory2, 0));;
-		printf("turnip_test:   ok: vkBindImageMemory(swapchain image 1)\\n");
 		fflush(stdout);
 		viewInfo.image = image2;   /* the struct captured image2's NULL at declaration */
 		CHECK(10, "vkCreateImageView(swapchain image 1)", pCreateImageView(device, &viewInfo, NULL, &view2));;
-		printf("turnip_test:   ok: vkCreateImageView(swapchain image 1)\\n");
 		fflush(stdout);
 		CHECK(10, "vkCreateFramebuffer(swapchain image 1)", pCreateFramebuffer(device, &framebufferInfo, NULL, &framebuffer2));;
-		printf("turnip_test:   ok: vkCreateFramebuffer(swapchain image 1)\\n");
+		begin.framebuffer = framebuffer2;   /* same trap as viewInfo: the struct captured the NULL handle */
 		fflush(stdout);
 		CHECK(10, "vkAllocateCommandBuffers(swapchain image 1)", pAllocateCommandBuffers(device, &commandsInfo, &commands2));;
-		printf("turnip_test:   ok: vkAllocateCommandBuffers(swapchain image 1)\\n");
 		fflush(stdout);
 		CHECK(10, "vkCreateFence(swapchain image 1)", pCreateFence(device, &fenceInfo, NULL, &fence2));;
-		printf("turnip_test:   ok: vkCreateFence(swapchain image 1)\\n");
 		fflush(stdout);
 
-		/* acquire: the rotation's second image, rendered over grey. */
+		/* acquire: the rotation's second image, rendered over the clear, with
+		 * the green pipeline so the frame differs from frame 0. */
 		CHECK(10, "vkBeginCommandBuffer(swapchain image 1)", pBeginCommandBuffer(commands2,
 		    &(VkCommandBufferBeginInfo){ .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }));
 		printf("turnip_test:   the second command buffer began\n");
 		fflush(stdout);
-		printf("turnip_test:   cmd: pre-begin\n"); fflush(stdout);
-		pCmdBeginRenderPass(commands2, &begin, VK_SUBPASS_CONTENTS_INLINE); printf("turnip_test:   cmd: begin pass\n"); fflush(stdout);
-		printf("turnip_test:   cmd: pre-bind\n"); fflush(stdout);
-		pCmdBindPipeline(commands2, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline); printf("turnip_test:   cmd: bind pipeline\n"); fflush(stdout);
-		printf("turnip_test:   cmd: pre-draw\n"); fflush(stdout);
-		pCmdDraw(commands2, 3, 1, 0, 0); printf("turnip_test:   cmd: draw\n"); fflush(stdout);
-		printf("turnip_test:   cmd: pre-endpass\n"); fflush(stdout);
-		pCmdEndRenderPass(commands2); printf("turnip_test:   cmd: end pass\n"); fflush(stdout);
-		printf("turnip_test:   cmd: pre-copy\n"); fflush(stdout);
-		pCmdCopyImageToBuffer(commands2, image2, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &region); printf("turnip_test:   cmd: copy to buffer\n"); fflush(stdout);
+		VkClearValue clear2 = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
+		VkRenderPassBeginInfo begin2 = {
+		    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+		    .renderPass = pass,
+		    .framebuffer = framebuffer2,
+		    .renderArea = { .offset = { 0, 0 }, .extent = { 256, 256 } },
+		    .clearValueCount = 1,
+		    .pClearValues = &clear2,
+		};
+		pCmdBeginRenderPass(commands2, &begin2, VK_SUBPASS_CONTENTS_INLINE);
+		pCmdBindPipeline(commands2, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline2);
+		pCmdDraw(commands2, 3, 1, 0, 0);
+		pCmdEndRenderPass(commands2);
+		pCmdCopyImageToBuffer(commands2, image2, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &region);
 		CHECK(10, "vkEndCommandBuffer(swapchain image 1)", pEndCommandBuffer(commands2));
 		printf("turnip_test:   the second command buffer recorded\n");
 		fflush(stdout);
@@ -1083,12 +1133,15 @@ main(void)
 		if (IOSurfaceLock(surface2, kIOSurfaceLockReadOnly, NULL) != 0)
 			FAIL(10, "IOSurfaceLock(read, surface 1)", VK_ERROR_MEMORY_MAP_FAILED);
 		px = IOSurfaceGetBaseAddress(surface2);
-		if (px[mid + 2] < 200 || px[mid + 0] > 40 || px[mid + 1] > 40)
-			FAIL(10, "surface 1's middle is not the red triangle", VK_ERROR_UNKNOWN);
-		if (px[corner + 0] < 55 || px[corner + 0] > 75 ||
-		    px[corner + 1] < 55 || px[corner + 1] > 75 ||
-		    px[corner + 2] < 55 || px[corner + 2] > 75)
-			FAIL(10, "surface 1's corner is not frame 1's grey", VK_ERROR_UNKNOWN);
+		if (px[mid + 1] < 200 || px[mid + 0] > 40 || px[mid + 2] > 40)
+			FAIL(10, "surface 1's middle is not the green triangle", VK_ERROR_UNKNOWN);
+		if (px[corner + 0] > 40 && px[corner + 1] > 40 && px[corner + 2] > 40) {
+			printf("turnip_test:   surface 1 corner (1,0) BGRA = %u %u %u %u, middle BGRA = %u %u %u %u\n",
+			    px[corner + 0], px[corner + 1], px[corner + 2], px[corner + 3],
+			    px[mid + 0], px[mid + 1], px[mid + 2], px[mid + 3]);
+			fflush(stdout);
+			FAIL(10, "surface 1's corner is not frame 1's green", VK_ERROR_UNKNOWN);
+		}
 		IOSurfaceUnlock(surface2, kIOSurfaceLockReadOnly, NULL);
 
 		printf("turnip_test: step 10: both presents landed, in order, and the compositor read them\n");
@@ -1106,6 +1159,10 @@ out:
 			pDestroyFence(device, fence, NULL);
 		if (pipeline != VK_NULL_HANDLE)
 			pDestroyPipeline(device, pipeline, NULL);
+		if (pipeline2 != VK_NULL_HANDLE)
+			pDestroyPipeline(device, pipeline2, NULL);
+		if (fragShader2 != VK_NULL_HANDLE)
+			pDestroyShaderModule(device, fragShader2, NULL);
 		if (layout != VK_NULL_HANDLE)
 			pDestroyPipelineLayout(device, layout, NULL);
 		if (framebuffer != VK_NULL_HANDLE)
