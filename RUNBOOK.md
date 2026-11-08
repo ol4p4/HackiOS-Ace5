@@ -3269,6 +3269,33 @@ parf_setup wrote 0. Round 10 writes the DT's value. (Thyme's other deltas
 — the kona-specific GCC 0x8c004 refclk branch and the DBI 0x154 = 0x55555555
 VSEC write — are board data with no evidence on this SoC and stay out.)
 
+### PCIe M1, 2026-11-08 13:21: round 10 — the SLV size lands, the day's ten rounds close
+
+Round 10 (`20261108-132112`, fresh cycle, healthy return): `SLV
+ADDR_SPACE_SIZE` now carries the DT's 0x4000000 (was 0), and the verdict is
+unchanged — `parf 0x1 / elbi 0x1001`, Detect.Active, rc=60. Expected: the
+SLV window configures AXI address decode, not the LTSSM; it was a
+correctness fix against our own DT, not a candidate blocker.
+
+Where ten rounds leave the day: every software action any evidence source
+can justify is in the ladder with a readback — the seven WLAN rails with
+DT-matching voltages, both GDSCs, five RC clocks plus the pipe gate plus a
+running 100 MHz recharge clock, the TCSR refclk gate (0→1, four runs), a
+ready PHY, the complete vendor PARF set (SYS_CTRL 0x365e included), the
+CESTA/SM sequence, the DT's SLV size, the CLKREQ pad mux, PERST deasserted
+and WLAN_EN high at the pads. The card is alive (sw-ctrl 1 1) and asking
+for its clock (CLKREQ low). The LTSSM leaves Detect.Quiet exactly when the
+refclk gate turns on and goes no further.
+
+The two remaining unknowns are the ones no register write has addressed:
+whether the gated 100 MHz actually reaches the chip (the card's persistent
+CLKREQ request is the classic signature of a chip holding its interface
+down for a clock that never arrives), and the board's PERST trace. The next
+software probe, before any hardware conclusions: sweep the TCSR window for
+further PCIe0 clock-control words beyond 0xb1100 bit 0 (pad/generator
+enables the one gate doesn't cover), and check GCC for a
+reference-generator branch analogous to kona's 0x8c004.
+
 ### PCIe M1, 2026-11-08 12:48: the test bus is silent, but the card shows signs of life
 
 Round 7 (`20261108-124836`, fresh cycle, healthy return) ran the first
