@@ -3026,3 +3026,37 @@ node on host before touching code), and the card-side refclk delivery (the
 gate routes TCXO, but the connector's 100 MHz needs the pad/clkreq path
 too).
 
+### PCIe M1, 2026-11-08 11:18: both readbacks answer — the gate write is ours, and the pins never drove
+
+One more run of the same recipe (`20261108-111854`, back-to-back, healthy
+return again). The two readbacks settle both open questions at once:
+
+- **`the card's refclk gate pre=0 post=0x1`** — Android boots with the gate
+  off; the write in power_up is what turns it on. The refclk hypothesis is
+  now fully attributed: gate off → LTSSM Detect.Quiet, gate on → the card
+  shows up at Detect.Active. Reproduced across two runs.
+- **`perst released; perst in=0 wlan_en in=0`** — driving PERST/WLAN_EN high
+  leaves both pads reading 0. The card has never been enabled or released
+  from reset in any run so far; Detect.Active is exactly what a reset card
+  looks like to the host PHY.
+
+The pad readback led to the root cause: `gpio_out` assumed the old TLMM
+GPIO_CFG layout (function bits [1:0], OE bit 2, drive [8:6], pull [10:9]).
+Mainline pinctrl-sm8650.c says this generation is different: pull [1:0],
+**function [5:2]** (gpio = 0), drive [8:6], **output enable bit 9**. The old
+write `(cfg & ~0x7ff) | 0x4 | (6<<6)` cleared the real OE bit, set bit 2
+which is now the function field's LSB — function 1, not GPIO — and never
+enabled the output. The IN/OUT register bits (IN 0, OUT 1) were right all
+along, which is why the readbacks looked self-consistent while the pads
+stayed inputs.
+
+`gpio_out` is fixed to the sm8650 layout (`(cfg & ~0x3ff) | (6<<6) | BIT(9)`:
+gpio function, no pull, drive 6, OE on). The phone's own DTB independently
+carries `clock-controller@1f40000 / qcom,pineapple-tcsrcc` and
+`pcie_clkref_en`, so the TCSRCC address now has three agreeing sources.
+
+Next round: one fresh-boot `--pcie 3` with the fixed gpio_out. Expect
+`perst in=1 wlan_en in=1`; the interesting question is whether the link
+trains past Detect.Active once the card is actually out of reset with its
+refclk on.
+

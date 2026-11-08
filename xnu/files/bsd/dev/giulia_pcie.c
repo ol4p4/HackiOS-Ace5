@@ -130,13 +130,17 @@ poll(uintptr_t base, uint32_t offset, uint32_t mask, uint32_t want, unsigned tim
 static void
 gpio_out(unsigned pin, bool high)
 {
-	/* TLMM_GPIO_CFG: function 0-1, output enable bit 2, drive 6-8, pull 9-10.
-	 * TLMM_GPIO_IN_OUT bit 1 is the level. Latch it before enabling the output. */
+	/* TLMM sm8650 GPIO_CFG (pinctrl-sm8650.c): pull bits [1:0], function
+	 * bits [5:2] (gpio = 0), drive bits [8:6], output enable bit 9. The old
+	 * TLMM layout this code assumed (function [1:0], OE bit 2) never
+	 * enabled the output -- the pads stayed inputs and read 0, which is
+	 * exactly why PERST and WLAN_EN never reached the card. IN_OUT: IN
+	 * bit 0, OUT bit 1. Latch the level before enabling the output. */
 	uint32_t value = rd(tlmm, pin * 0x1000 + 4);
 
 	wr(tlmm, pin * 0x1000 + 4, high ? (value | 2u) : (value & ~2u));
 	value = rd(tlmm, pin * 0x1000);
-	wr(tlmm, pin * 0x1000, (value & ~0x7ffu) | 0x4u | (6u << 6));
+	wr(tlmm, pin * 0x1000, (value & ~0x3ffu) | (6u << 6) | (1u << 9));
 }
 
 static int
