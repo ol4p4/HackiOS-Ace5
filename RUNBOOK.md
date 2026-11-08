@@ -3296,6 +3296,51 @@ further PCIe0 clock-control words beyond 0xb1100 bit 0 (pad/generator
 enables the one gate doesn't cover), and check GCC for a
 reference-generator branch analogous to kona's 0x8c004.
 
+### PCIe M1, 2026-11-08 13:36-13:53: rounds 11-13 — the A/B settles the gate's role, and the PHY's status migrates when its ref arrives
+
+Round 11 (`20261108-133648`, `pcie_clkref=0`, first run of the new A/B arg)
+settled the standing question cleanly:
+
+- **Without the gate write the LTSSM never leaves Detect.Quiet** — `parf 0
+  / elbi 0x1` for the whole poll. The 0 → 0x1 move is the gate's, not a
+  confound of the gpio fix; the TCSR gate feeds the host PHY's reference
+  path. (The only gate-less run, yesterday 21:55, also had the broken
+  gpio_out — the two changes had always ridden together until now.)
+- The entry pin survey shows Android's handoff state: `wlan_en in=0`,
+  `clkreq in=1` — the radio is powered down at handoff (WLAN_EN low,
+  CLKREQ released) and the card only starts requesting its clock after our
+  enable sequence pulls it up. Both TCSR tables (OnePlus and mainline)
+  carry exactly one gate for pcie0 (no pad variant — only UFS has one), and
+  the phone's DTB wires the gate to no consumer at all: Android never
+  enables it across boots (pre=0, four runs) yet its Wi-Fi works.
+
+Rounds 12-13 (`20261108-134554`, `20261108-135331`) instrumented the clock
+domain and the PHY's status:
+
+- `clock halts: pipe 0 rchng 0` — the pipe branch's CLK_OFF is clear: PCLK
+  is running, the LTSSM is clocked. The dead-PCLK theory is out.
+- **The PHY status migrates: `phy ready (0x41)` right after the sequence,
+  then `0x86` by the PERST-release point and constant through the poll.**
+  The flip window contains only the TCSR gate write, wlan_en high, the
+  root-port setup and the pre-train writes — the natural reading is the
+  PHY's reference clock arriving (gate on) and the PHY moving to its
+  running state, i.e. healthy, not a drop.
+
+The model after thirteen rounds: gate on → the host PHY runs and the
+LTSSM genuinely cycles Detect.Active; the card is powered, PERST-released
+at the pad and holds CLKREQ low asking for its clock; pipe and recharge
+clocks run; every vendor write is in place with readbacks; and the
+receiver detect still never finds the card's termination. The suspicion
+now has exactly two leaves: the 100 MHz between the gate and the card's
+lanes (one gate, no further software-visible control on this SoC — and
+Android's own Wi-Fi works without the gate ever being set, which hints
+the card's refclk may not run through the host path at all), or the
+board's lane/PERST traces. Both are past what the register file can
+answer; the next probe is board-level or a fresh hypothesis about the
+chip's own power sequencing (thyme clears the WCN's
+WLAON_QFPROM_PWR_CTRL SHUTDOWN/VDD4BLOW bits — but only after its link is
+up).
+
 ### PCIe M1, 2026-11-08 12:48: the test bus is silent, but the card shows signs of life
 
 Round 7 (`20261108-124836`, fresh cycle, healthy return) ran the first

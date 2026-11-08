@@ -74,6 +74,12 @@ static int pcie_step;
 static unsigned pcie_pause_s;
 static int pcie_supplies = 1;   /* boot-arg pcie_supplies=0: skip the RPMh votes (A/B) */
 static int pcie_gdsc = 1;       /* boot-arg pcie_gdsc=0: skip the GDSC stage (A/B) */
+static int pcie_clkref = 1;     /* boot-arg pcie_clkref=0: skip the TCSR gate write
+                                 * (A/B) -- Android never enables this gate and
+                                 * its Wi-Fi works, so the gate may not be the
+                                 * card's refclk path at all; the 0 -> 0x1
+                                 * LTSSM move has been confounded with the
+                                 * gpio_out fix since the day both landed. */
 static volatile unsigned pcie_pause_event;
 
 static uint32_t
@@ -652,6 +658,23 @@ power_up(void)
 	int error;
 
 	pcie_log("pcie: step 3 power-up\n");
+	/* Pin survey at entry, before we touch anything: what Android's sleep
+	 * pinctrl left, and what the pads float to on this boot. */
+	{
+		static const struct { unsigned pin; const char *name; } survey[] = {
+		    { GIULIA_PCIE_PERST_GPIO, "perst" },
+		    { GIULIA_CNSS_WLAN_EN_GPIO, "wlan_en" },
+		    { GIULIA_PCIE_CLKREQ_GPIO, "clkreq" },
+		    { GIULIA_PCIE_WAKE_GPIO, "wake" },
+		    { GIULIA_CNSS_SW_CTRL_GPIO, "sw_ctrl" },
+		    { GIULIA_CNSS_WLAN_SW_GPIO, "wlan_sw" },
+		};
+		for (unsigned i = 0; i < sizeof(survey) / sizeof(survey[0]); i++) {
+			pcie_log("pcie: pin %-8s cfg=%#x in=%u\n", survey[i].name,
+			    rd(tlmm, survey[i].pin * 0x1000),
+			    rd(tlmm, survey[i].pin * 0x1000 + 4) & 1);
+		}
+	}
 	/* The card's CLKREQ# reaches the controller only through the pad
 	 * function: the vendor's active pinctrl (pcie0_clkreq_default) muxes
 	 * gpio95 to pcie0_clk_req_n, while Android's sleep state leaves it a
@@ -741,10 +764,16 @@ power_up(void)
 		pcie_log("pcie: power: the TCSR clock page cannot be mapped\n");
 		return ENOMEM;
 	}
-	uint32_t clkref = rd(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN);
+	uint32_t clkref;
+	if (!pcie_clkref) {
+		pcie_log("pcie: power: the TCSR gate skipped (pcie_clkref=0)\n");
+		goto clkref_done;
+	}
+	clkref = rd(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN);
 	wr(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN, clkref | 1u);
 	pcie_log("pcie: power: the card's refclk gate pre=%#x post=%#x\n", clkref,
 	    rd(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN));
+clkref_done:
 	gpio_out(GIULIA_CNSS_WLAN_EN_GPIO, true);
 	delay_us(100000);                       /* 100 ms from the enable to PERST (PCIE_T_PVPERL_MS) */
 	pcie_log("pcie: wlan_en high; sw-ctrl pins read %u %u\n",
@@ -770,11 +799,12 @@ power_up(void)
 
 	gpio_out(GIULIA_PCIE_PERST_GPIO, true);
 	delay_us(1000);
-	pcie_log("pcie: perst released; perst in=%u wlan_en in=%u clkreq in=%u wake in=%u\n",
+	pcie_log("pcie: perst released; perst in=%u wlan_en in=%u clkreq in=%u wake in=%u, phy status %#x\n",
 	    rd(tlmm, GIULIA_PCIE_PERST_GPIO * 0x1000 + 4) & 1,
 	    rd(tlmm, GIULIA_CNSS_WLAN_EN_GPIO * 0x1000 + 4) & 1,
 	    rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000 + 4) & 1,
-	    rd(tlmm, GIULIA_PCIE_WAKE_GPIO * 0x1000 + 4) & 1);
+	    rd(tlmm, GIULIA_PCIE_WAKE_GPIO * 0x1000 + 4) & 1,
+	    rd(phy, GIULIA_PCIE_PHY_STATUS));
 	elbi = ml_io_map(GIULIA_PCIE_ELBI, GIULIA_PCIE_ELBI_SIZE);
 	if (elbi == 0) {
 		pcie_log("pcie: power: the ELBI page cannot be mapped\n");
@@ -785,10 +815,11 @@ power_up(void)
 	for (unsigned i = 0; i < 90 && !up; i++) {
 		uint32_t state = rd(parf, PARF_LTSSM) & 0x3f;
 		uint32_t el = rd(elbi, ELBI_SYS_STTS);
+		uint32_t pst = rd(phy, GIULIA_PCIE_PHY_STATUS);
 
 		if (state != ltssm) {
-			pcie_log("pcie: link training, parf state %#x elbi %#x after %u ms\n",
-			    state, el, i * 10);
+			pcie_log("pcie: link training, parf state %#x elbi %#x phy %#x after %u ms\n",
+			    state, el, pst, i * 10);
 			ltssm = state;
 		}
 		up = (rd(dbi, DBI_LINKCTRLSTATUS) & LINK_ACTIVE) != 0;
@@ -800,6 +831,13 @@ power_up(void)
 	    rd(parf, PARF_LTSSM) & 0x3f, rd(elbi, ELBI_SYS_STTS), rd(dbi, DBI_LINKCTRLSTATUS),
 	    (rd(dbi, DBI_LINKCTRLSTATUS) >> 16) & 0xf, (rd(dbi, DBI_LINKCTRLSTATUS) >> 20) & 0x3f);
 	if (!up) {
+		/* Is the pipe clock actually running? Its branch is
+		 * BRANCH_HALT_SKIP, so the vote never checked; a dead PCLK
+		 * would freeze the LTSSM's detect no matter what the card
+		 * does. rchng and the PHY status ride along. */
+		pcie_log("pcie: clock halts: pipe %#x rchng %#x, phy status %#x\n",
+		    rd(gcc, GIULIA_GCC_PCIE0_PIPE_HALT), rd(gcc, GIULIA_GCC_PCIE0_RCHNG_HALT),
+		    rd(phy, GIULIA_PCIE_PHY_STATUS));
 		/* The only window into the detect circuit: sweep the PARF test
 		 * bus the way the vendor's pcie_parf_dump does (SYS_CTRL bits
 		 * [23:16] select, 0xe4 reads; the DT counts 185 selectors) and
@@ -895,6 +933,7 @@ giulia_pcie_init(void)
 	PE_parse_boot_argn("pcie_pause", &pcie_pause_s, sizeof(pcie_pause_s));
 	PE_parse_boot_argn("pcie_supplies", &pcie_supplies, sizeof(pcie_supplies));
 	PE_parse_boot_argn("pcie_gdsc", &pcie_gdsc, sizeof(pcie_gdsc));
+	PE_parse_boot_argn("pcie_clkref", &pcie_clkref, sizeof(pcie_clkref));
 	if (kernel_thread_start(pcie_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	} else {
