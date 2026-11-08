@@ -69,7 +69,7 @@ pcie_log(const char *format, ...)
 	printf("%s", line);
 }
 
-static uintptr_t parf, phy, dbi, sm, gcc, tlmm, rsc, cmd_db;
+static uintptr_t parf, phy, dbi, sm, gcc, tlmm, rsc, cmd_db, tcsrcc;
 static int pcie_step;
 static unsigned pcie_pause_s;
 static int pcie_supplies = 1;   /* boot-arg pcie_supplies=0: skip the RPMh votes (A/B) */
@@ -685,6 +685,16 @@ power_up(void)
 	delay_us(GIULIA_PCIE_EP_LATENCY_MS * 1000);
 
 	pcie_pause(pcie_pause_s, "the card's enable");
+	/* The card's reference clock: enable the TCSR clkref gate before the
+	 * card comes out of reset -- without its refclk the card never answers
+	 * and the LTSSM stays in 0. */
+	tcsrcc = ml_io_map(GIULIA_TCSRCC, GIULIA_TCSRCC_SIZE);
+	if (tcsrcc == 0) {
+		pcie_log("pcie: power: the TCSR clock page cannot be mapped\n");
+		return ENOMEM;
+	}
+	wr(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN, rd(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN) | 1u);
+	pcie_log("pcie: power: the card's refclk gate is on (%#x)\n", rd(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN));
 	gpio_out(GIULIA_CNSS_WLAN_EN_GPIO, true);
 	delay_us(100000);                       /* 100 ms from the enable to PERST (PCIE_T_PVPERL_MS) */
 	pcie_log("pcie: wlan_en high; sw-ctrl pins read %u %u\n",

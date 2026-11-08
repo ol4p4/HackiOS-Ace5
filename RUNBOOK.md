@@ -2955,3 +2955,40 @@ sequences -> PHY -> WLAN_EN -> root port -> PERST -> SM start + LTSSM_EN ->
 link poll. Every stage names itself in the log.
 before the risky stage.
 
+### PCIe M1, 2026-11-08 morning (host-side): the ladder reached the link poll clean, LTSSM stuck at 0; the refclk gate prepared
+
+The 21:55 run (build e66f28, the `09386ad` window-map fix in) is the round the
+"next round" paragraph asked for, and it changes the picture: the whole ladder
+ran without a wedge on a fresh boot — supplies HAS DONE IT, both GDSCs on,
+clocks voted, resets pulsed, parf set up, the PHY sequence, WLAN_EN high
+(`sw-ctrl pins read 0 0`), root port, PERST, SM start + LTSSM_EN — and the
+link poll reports `link training, state machine 0`, then
+`link still down (state machine 0, link status 0x10110008, speed=1 width=1)`,
+`step 3 finished rc=60`. The window-map fix held. The card simply never
+answers: the LTSSM never leaves state 0.
+
+The 22:00 run (build e66f40) carries no verdict: the kernel hung during the
+GPU probe (stackshot) before the pcie thread printed anything. A re-enter
+right after the 21:55 run, so the cross-boot CX/GDSC state is the prime
+suspect again — the next `--pcie 3` round must start from a full reboot to
+Android. The phone was not enumerable on USB at all on 11-08 morning (adb,
+fastboot and the Windows device list all empty); physical recovery pending,
+so the round has not run.
+
+The refclk hypothesis, built and address-verified but not yet measured: with
+the supplies and GDSCs on and the controller glue up, the remaining reason
+PERST does nothing is that the card has no reference clock — the TCSR gate
+`tcsr_pcie_0_clkref_en` (absolute 0x1ff1100, enable BIT(0)) is off. Two
+sources agree on the absolute address: the OnePlus sm8650 kernel
+(clock-controller@1f40000, +0xb1100) and mainline tcsrcc-sm8650.c (enable_reg
+0x31100 on the qcom,sm8650-tcsr syscon at 0x1fc0000). Mainline's halt_check
+is BRANCH_HALT_DELAY — write the bit and move on, no poll. `power_up` now
+maps TCSRCC and sets the gate right after the card's-enable pause, before
+WLAN_EN goes high, and prints the register value it read — a run can tell
+"Android already had it on" (the cross-boot state lesson) from our write.
+
+Build note: the bootstrap config's `check_all_exports` now fails
+deterministically (BUILD_EXIT=2, `exported name not in import list:
+IOService::…`), but the kernel proper links and the mach.autotest artifact
+carries the new code (verified by strings). Recorded, not yet chased.
+

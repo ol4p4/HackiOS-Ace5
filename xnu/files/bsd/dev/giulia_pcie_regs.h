@@ -54,6 +54,19 @@
 #define GIULIA_PCIE_PHY_STATUS_BIT  6u
 #define GIULIA_PCIE_PHY_PWRDOWN     0x240u
 #define GIULIA_PCIE_EP_LATENCY_MS   10u
+/*
+ * The card's reference clock gate: the TCSR clock controller holds
+ * tcsr_pcie_0_clkref_en at absolute 0x1ff1100, enable BIT(0) -- without it the
+ * card never sees its refclk and the LTSSM stays at 0. Two sources agree on
+ * the absolute address: the OnePlus sm8650 kernel (dt clock-controller@1f40000,
+ * +0xb1100) and mainline tcsrcc-sm8650.c (enable_reg 0x31100 on the
+ * qcom,sm8650-tcsr syscon at 0x1fc0000); mainline's halt_check is
+ * BRANCH_HALT_DELAY, i.e. write the bit and move on, no poll.
+ */
+#define GIULIA_TCSRCC               0x1f40000u
+#define GIULIA_TCSRCC_SIZE          0xc0000u
+#define GIULIA_TCSRCC_PCIE0_CLKREF_EN 0xb1100u
+
 #define GIULIA_PCIE_SMMU_SID_BASE   0x1400u
 
 struct giulia_pcie_phy_step {
