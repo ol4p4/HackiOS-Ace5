@@ -599,7 +599,11 @@ parf_setup(void)
 	wr(p, 0x354, 0);
 	wr(p, 0x634, GIULIA_PCIE_IATU);                         /* ATU_BASE_ADDR */
 	wr(p, 0x638, 0);
-	wr(p, 0x358, 0);                                        /* SLV_ADDR_SPACE_SIZE_V2 */
+	wr(p, 0x358, 0x04000000);                               /* SLV_ADDR_SPACE_SIZE: the DT's
+	                                                           qcom,slv-addr-space-size -- the vendor
+	                                                           writes it (0x358 = 0x4000000) and so
+	                                                           does thyme's working kona ladder; we
+	                                                           alone wrote 0. */
 	wr(p, 0x35c, 0x80000000);
 	wr(p, 0x000, rd(p, 0x000) & ~(1u << 29));               /* SYS_CTRL: MAC_PHY_POWERDOWN_IN_P2_D_MUX_EN */
 	wr(p, 0x174, rd(p, 0x174) | (1u << 4));                 /* MHI_CLOCK_RESET_CTRL: BYPASS */
@@ -648,6 +652,15 @@ power_up(void)
 	int error;
 
 	pcie_log("pcie: step 3 power-up\n");
+	/* The card's CLKREQ# reaches the controller only through the pad
+	 * function: the vendor's active pinctrl (pcie0_clkreq_default) muxes
+	 * gpio95 to pcie0_clk_req_n, while Android's sleep state leaves it a
+	 * GPIO. Function 1 on pin 95, pull-up, input (no output enable) --
+	 * sm8650 CFG: pull [1:0], function [5:2], OE bit 9. */
+	wr(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000,
+	    (rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000) & ~0x3ffu) | 0x7u);
+	pcie_log("pcie: clkreq pin muxed to pcie0_clk_req_n (cfg %#x)\n",
+	    rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000));
 	pcie_pause(pcie_pause_s, "PERST and the card's enable driven low");
 	gpio_out(GIULIA_PCIE_PERST_GPIO, false);
 	gpio_out(GIULIA_CNSS_WLAN_EN_GPIO, false);
@@ -757,9 +770,11 @@ power_up(void)
 
 	gpio_out(GIULIA_PCIE_PERST_GPIO, true);
 	delay_us(1000);
-	pcie_log("pcie: perst released; perst in=%u wlan_en in=%u\n",
+	pcie_log("pcie: perst released; perst in=%u wlan_en in=%u clkreq in=%u wake in=%u\n",
 	    rd(tlmm, GIULIA_PCIE_PERST_GPIO * 0x1000 + 4) & 1,
-	    rd(tlmm, GIULIA_CNSS_WLAN_EN_GPIO * 0x1000 + 4) & 1);
+	    rd(tlmm, GIULIA_CNSS_WLAN_EN_GPIO * 0x1000 + 4) & 1,
+	    rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000 + 4) & 1,
+	    rd(tlmm, GIULIA_PCIE_WAKE_GPIO * 0x1000 + 4) & 1);
 	elbi = ml_io_map(GIULIA_PCIE_ELBI, GIULIA_PCIE_ELBI_SIZE);
 	if (elbi == 0) {
 		pcie_log("pcie: power: the ELBI page cannot be mapped\n");

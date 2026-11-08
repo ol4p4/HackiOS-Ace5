@@ -3243,6 +3243,32 @@ What is left, cheapest first, is diagnostic rather than corrective:
    and whether the TCSR gate's 100 MHz actually reaches the chip — both
    board truths the DT asserts but nothing has measured.
 
+### PCIe M1, 2026-11-08 12:56 / 13:07: CLKREQ is low — the card is asking for its clock
+
+Round 8 (`20261108-125633`) added the pin nobody read: **`clkreq in=0`**.
+GPIO 95 (pcie0_clk_req_n, open-drain, pull-up per the DT's active pinctrl)
+sits LOW after PERST release — the card is asserting its clock request.
+With wake high and sw-ctrl 1 1, the chip is powered, out of reset and
+asking for its 100 MHz; the TCSR gate is on; and the receiver detect still
+never completes.
+
+Round 9 (`20261108-130757`) closed the routing hole the DT exposed: the
+active pinctrl muxes gpio95 to the `pcie0_clk_req_n` function (function 1,
+pull-up) while Android's sleep state leaves it a GPIO, and our ladder never
+touched the pin's function field. The mux write landed
+(`clkreq pin muxed to pcie0_clk_req_n (cfg 0x7)`), CLKREQ still reads low,
+the link still sits in Detect.Active — the pad now reaches the controller
+and that alone doesn't unstick it either.
+
+With the two remaining structural writes in sight from the family's only
+working ladder (thyme's `umi_pcie.c`, the complete SM8250/QCA6390
+implementation), round 10 fixes a deviation our own DT convicts:
+`qcom,slv-addr-space-size = 0x4000000` — the vendor writes it to
+PARF+0x358 and thyme writes 0x04000000 to the same register, but our
+parf_setup wrote 0. Round 10 writes the DT's value. (Thyme's other deltas
+— the kona-specific GCC 0x8c004 refclk branch and the DBI 0x154 = 0x55555555
+VSEC write — are board data with no evidence on this SoC and stay out.)
+
 ### PCIe M1, 2026-11-08 12:48: the test bus is silent, but the card shows signs of life
 
 Round 7 (`20261108-124836`, fresh cycle, healthy return) ran the first
