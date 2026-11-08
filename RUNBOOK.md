@@ -3142,3 +3142,33 @@ state. Deliberately NOT this round: the vendor's full
 pcie-qcom stays — one bundle per round; SYS_CTRL is the next candidate if
 this one fails).
 
+### PCIe M1, 2026-11-08 12:14: the vendor's pre-training writes land — still Detect.Active
+
+One fresh-boot run of `--pcie 3` (`20261108-121442`, healthy return, GPU all
+green). All three vendor writes landed and read back:
+
+- `vendor pre-train: cfg_bits_3 0x168 gen3_gen2 0x130190 lane_skew 0x8000020`
+  — BIT(0) cleared and BIT(8) set in CFG_BITS_3, the controller's Gen1
+  target in GEN3_GEN2_CTRL, the lane-skew override bit on;
+- `wlan_en high; sw-ctrl pins read 1 1` — the sw-ctrl pads now read high
+  (0 0 in every earlier round), consistent with the card side actually
+  being alive for the first time;
+- the ELBI double-read works: `parf state 0 elbi 0x1` → `parf 0x1 elbi
+  0x1001` after 90 ms, `link still down (parf 0x1 elbi 0x1001 …)`, rc=60.
+
+The vendor's own LTSSM name table (`msm_pcie_ltssm_str`) says 0x1 is
+LTSSM_DETECT_ACT on this exact hardware — the receiver detect never finds
+the card's termination even with the full pre-training write set in place.
+XMLH_LINK_UP (ELSI bit 10) never lights.
+
+The software-diff well against the vendor driver is nearly dry: the one
+structural write left is the full `PARF_SYS_CTRL = 0x365E` (our upstream
+port only clears MAC_PHY_POWERDOWN_IN_P2 bit 29; the vendor replaces the
+whole register on every enable — and 0x365E keeps bit 29 clear, so the two
+agree on the one bit we knew about). Round 5 adds that write plus a finer
+poll (10 ms × 90 = the same 900 ms window at 9× the temporal resolution, so
+a transient Polling excursion cannot hide between samples). If that round
+also sits in Detect.Active, the software register diff is exhausted and the
+remaining suspects are PHY-domain: the aux-clock mux switch (xo → ext
+source, vendor does it after phy_init) and the pipe-clock gating.
+

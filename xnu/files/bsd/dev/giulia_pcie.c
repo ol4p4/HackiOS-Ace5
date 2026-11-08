@@ -720,8 +720,14 @@ power_up(void)
 	wr(parf, PARF_CFG_BITS_3, (rd(parf, PARF_CFG_BITS_3) & ~1u) | (1u << 8));
 	wr(dbi, DBI_GEN3_GEN2_CTRL, (rd(dbi, DBI_GEN3_GEN2_CTRL) & ~0x1f00u) | (1u << 8));
 	wr(dbi, DBI_LANE_SKEW, rd(dbi, DBI_LANE_SKEW) | (1u << 5));
-	pcie_log("pcie: vendor pre-train: cfg_bits_3 %#x gen3_gen2 %#x lane_skew %#x\n",
-	    rd(parf, PARF_CFG_BITS_3), rd(dbi, DBI_GEN3_GEN2_CTRL), rd(dbi, DBI_LANE_SKEW));
+	/* The last structural write the vendor does before training and our
+	 * upstream port did not: the full SYS_CTRL value (pci-msm.c
+	 * enable_link). Our old write only cleared MAC_PHY_POWERDOWN_IN_P2;
+	 * this replaces whatever state Android left with the vendor's. */
+	pcie_log("pcie: vendor pre-train: cfg_bits_3 %#x gen3_gen2 %#x lane_skew %#x, sys_ctrl %#x -> 0x365e\n",
+	    rd(parf, PARF_CFG_BITS_3), rd(dbi, DBI_GEN3_GEN2_CTRL), rd(dbi, DBI_LANE_SKEW),
+	    rd(parf, 0));
+	wr(parf, 0, 0x365e);
 	delay_us(50000);
 
 	gpio_out(GIULIA_PCIE_PERST_GPIO, true);
@@ -736,18 +742,18 @@ power_up(void)
 	}
 	wr(sm, GIULIA_PCIE_SM_START_OFFSET, 1u);       /* qcom,pcie-sm-start-offset: start the machine */
 	wr(parf, PARF_LTSSM, rd(parf, PARF_LTSSM) | LTSSM_EN);
-	for (unsigned i = 0; i < 10 && !up; i++) {
+	for (unsigned i = 0; i < 90 && !up; i++) {
 		uint32_t state = rd(parf, PARF_LTSSM) & 0x3f;
 		uint32_t el = rd(elbi, ELBI_SYS_STTS);
 
 		if (state != ltssm) {
 			pcie_log("pcie: link training, parf state %#x elbi %#x after %u ms\n",
-			    state, el, i * 90);
+			    state, el, i * 10);
 			ltssm = state;
 		}
 		up = (rd(dbi, DBI_LINKCTRLSTATUS) & LINK_ACTIVE) != 0;
 		if (!up) {
-			delay_us(90000);
+			delay_us(10000);
 		}
 	}
 	pcie_log("pcie: link %s (parf %#x elbi %#x, link status %#x, speed=%u width=%u)\n", up ? "up" : "still down",
