@@ -3205,3 +3205,41 @@ without the recharge clock the receiver detect can never complete. Round 6
 enables both: the RCG config + branch vote with logged readbacks in
 clocks_on, and the pipe bit added to the vote word.
 
+### PCIe M1, 2026-11-08 12:37: the PHY clock domain is on — Detect.Active stands, the register playbook is exhausted
+
+Round 6 (`20261108-123753`, fresh full cycle, healthy return, GPU all
+green). The clock word now reads `0x423c023f` — the pipe bit (0x52008
+BIT(4)) is in the vote — and the recharge clock:
+
+- `rchng vote pre=0xe0a57f post=0xe0a57f, halt 0` — the branch was **already
+  voted** (Android left it on), so this was at most a rate problem; the RCG
+  is now configured for GPLL0_EVEN/3 = 100 MHz and the halt status reads 0
+  (running). The pipe gate is voted with the same bulk-enable order the QMP
+  driver uses (before calibration).
+
+The verdict is unchanged: `parf 0x1 / elbi 0x1001` from 40 ms on, stuck in
+LTSSM_DETECT_ACT through the whole window, rc=60.
+
+At this point every item on the software checklist is in place and carries a
+readback: seven supplies with DT-matching voltages, both GDSCs, the five RC
+clocks plus pipe plus a running 100 MHz rchng, the TCSR refclk gate (pre=0 →
+post=1, three runs), a ready PHY, the CESTA/SM sequence with START, the
+complete vendor PARF write set (SYS_CTRL 0x365e included), PERST deasserted
+and WLAN_EN high at the pads. The register-level diff against the vendor
+driver is exhausted; the 0 → 0x1 transition at refclk time remains the only
+state the software ever moved.
+
+What is left, cheapest first, is diagnostic rather than corrective:
+
+1. **The PARF test bus** — the DT gives `qcom,num-parf-testbus-sel = 0xb9`
+   and `qcom,parf-debug-reg`, and the vendor's `pcie_parf_dump` sweeps
+   PARF_SYS_CTRL's testbus selector (bits [23:16]) reading PARF_TEST_BUS:
+   the only window that can SHOW what the detect circuit and the PHY think
+   is happening instead of guessing from state registers.
+2. The aux-clock mux switch (xo → ext source) the vendor does after
+   phy_init.
+3. Re-examining the one thing nobody can verify from software: whether
+   GPIO 94's pad is actually wired to the WCN's PERST pin on this board,
+   and whether the TCSR gate's 100 MHz actually reaches the chip — both
+   board truths the DT asserts but nothing has measured.
+
