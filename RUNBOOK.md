@@ -3545,3 +3545,64 @@ what remains for wallpaper work is only choice/polish (picking a different
 image means swapping the staged PNG layers and re-running
 rewrite-wallpaper-caml.sh).
 
+### The a7xx generic-clear RGB chase, round 1 (2026-11-08 night, host-side — paused for handoff)
+
+The bug: `TU_DEBUG=startup` native path, renderpass clear of green `(0,1,0,1)`
+on RGBA8_UNORM renders `(0,0,0,255)` — **alpha survives, RGB forced to 0**
+(grey 0.25 likewise). Every earlier gate step cleared black, so it was
+invisible until step 10's green frame.
+
+What was read (mesa 25.0.7 tree, /root/HackiOS-Ace5/xnu-deps/build/mesa/
+mesa-25.0.7, all host-side):
+
+- Chain: `tu_emit_subpass_begin_gmem` (a7xx has_generic_clear → skips the
+  gmem clears) → `tu7_emit_subpass_clear` (tu_cmd_buffer.cc:4670) →
+  `tu7_generic_clear_attachment` (tu_clear_blit.cc:4515) →
+  `tu7_generic_layer_clear` (tu_clear_blit.cc:2012): packs the value, writes
+  **4 dwords to `REG_A6XX_RB_BLIT_CLEAR_COLOR_DW0..3`**, then
+  `event_blit_setup(BLIT_EVENT_CLEAR)` + `event_blit_run<A7XX>`.
+- `pack_blit_event_clear_value` for RGBA8_UNORM: `PACK_F(r8g8b8a8_unorm)` —
+  all four channels byte-packed into DW0 (green → `0xFF00FF00`), DW1..3 = 0.
+- Register DB (a6xx.xml): the block is 0x88df..0x88e2, dense and by design
+  (0x88dc BLIT_FLAG_DST reg64, 0x88de FLAG_DST_PITCH, 0x88e3 RB_BLIT_INFO,
+  0x88e4 RB_BLIT_CLEAR_MODE A7XX-only, 0x88e5 RB_CCU_CNTL2). Not a
+  transcription error.
+
+**The upstream comparison (gitlab.freedesktop.org raw fetches WORK from this
+host — WebFetch):** mesa main's `tu7_generic_layer_clear` writes the clear
+color to **`REG_A6XX_RB_RESOLVE_CLEAR_COLOR_DW0..3`** — a register that does
+not exist in 25.0.7's register DB at all (added later), with a new packing
+helper `tu_pack_float32_for_color` (per-channel by format size into the low
+64 bits — for RGBA8 the byte layout matches ours, so the packing is
+equivalent; **the register is the difference**). Upstream also changed
+`event_blit_run<A7XX>`'s signature (fdl_view via `tu_image_view_fdl_view`).
+`r2d_clear_value` uses yet another block (`RB_A2D_CLEAR_COLOR_DW0`).
+
+Hypothesis: on A7XX the generic/BLIT-event clear reads its color from the
+RESOLVE_CLEAR block (moved/renamed), and 25.0.7 writes the old a6xx
+BLIT_CLEAR block — the hardware clears with whatever stale value sits there
+(the observed alpha=255 needs one more datum: check what the
+RESOLVE_CLEAR/BLIT_CLEAR overlap holds at clear time, or just try the fix).
+
+Next session's plan (cheapest first):
+1. Fetch the CURRENT registers DB for the A7XX clear-color block: the
+   registers moved out of the mesa repo (a6xx.xml 404s at
+   src/freedreno/registers/adreno/ in main) into the separate
+   `mesa/registers` repo — the repo ROOT hits a login wall, but raw file
+   URLs may still work: try
+   `https://gitlab.freedesktop.org/mesa/registers/-/raw/main/adreno/a7xx.xml`
+   and compare `RB_RESOLVE_CLEAR_COLOR_DW0..3` offsets against our
+   0x88df..0x88e2.
+2. Patch our 25.0.7 `tu7_generic_layer_clear` to write the A7XX block (and
+   adopt `tu_pack_float32_for_color` if the layout differs per-DW), rebuild
+   mesa (local/wsl/build-mesa.sh), repack the ICD into
+   local/root-turnip/lib + local/root-daily/lib, run the step-10 gate.
+3. If green lands: the bug is closed; also re-test the wallpaper-path
+   greys. If not: instrument `event_blit_run<A7XX>` / compare with freedreno
+   (GL) a7xx clear handling in the same tree.
+
+Scripts left behind: local/wsl/read-clear.sh, read-clear2.sh,
+check-regs.sh, find-regs.sh, regdb.sh, regdb2.sh (read-only source dumps);
+the wallpaper staging trio (stage-wallpaper.sh, convert-heic.sh,
+rewrite-wallpaper-caml.sh) and build-init.sh remain the canonical tools.
+
