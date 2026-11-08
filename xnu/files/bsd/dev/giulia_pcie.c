@@ -693,8 +693,10 @@ power_up(void)
 		pcie_log("pcie: power: the TCSR clock page cannot be mapped\n");
 		return ENOMEM;
 	}
-	wr(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN, rd(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN) | 1u);
-	pcie_log("pcie: power: the card's refclk gate is on (%#x)\n", rd(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN));
+	uint32_t clkref = rd(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN);
+	wr(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN, clkref | 1u);
+	pcie_log("pcie: power: the card's refclk gate pre=%#x post=%#x\n", clkref,
+	    rd(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN));
 	gpio_out(GIULIA_CNSS_WLAN_EN_GPIO, true);
 	delay_us(100000);                       /* 100 ms from the enable to PERST (PCIE_T_PVPERL_MS) */
 	pcie_log("pcie: wlan_en high; sw-ctrl pins read %u %u\n",
@@ -704,6 +706,9 @@ power_up(void)
 
 	gpio_out(GIULIA_PCIE_PERST_GPIO, true);
 	delay_us(1000);
+	pcie_log("pcie: perst released; perst in=%u wlan_en in=%u\n",
+	    rd(tlmm, GIULIA_PCIE_PERST_GPIO * 0x1000 + 4) & 1,
+	    rd(tlmm, GIULIA_CNSS_WLAN_EN_GPIO * 0x1000 + 4) & 1);
 	wr(sm, GIULIA_PCIE_SM_START_OFFSET, 1u);       /* qcom,pcie-sm-start-offset: start the machine */
 	wr(parf, PARF_LTSSM, rd(parf, PARF_LTSSM) | LTSSM_EN);
 	for (unsigned i = 0; i < 10 && !up; i++) {

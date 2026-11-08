@@ -2992,3 +2992,37 @@ deterministically (BUILD_EXIT=2, `exported name not in import list:
 IOService::…`), but the kernel proper links and the mach.autotest artifact
 carries the new code (verified by strings). Recorded, not yet chased.
 
+### PCIe M1, 2026-11-08 11:03: the refclk gate moves the LTSSM off zero — Detect.Active, not a link yet
+
+One fresh-boot run of `--pcie 3` (cmdline identical to the 21:55 recipe,
+mach.autotest with the refclk build; healthy return, no wedge, the GPU probe
+ran all 20 stages green and the desktop came up). The fresh ladder: supplies
+HAS DONE IT → both GDSCs → clocks → resets + parf → `phy ready (0x41)` →
+**`the card's refclk gate is on (0x1)`** → wlan_en high → root port → PERST →
+SM start + LTSSM_EN → poll. The verdict line:
+
+- yesterday (no refclk code, fresh boot): `state machine 0`, dead — the
+  LTSSM never left Detect.Quiet;
+- today: `state machine 0` → **`state machine 0x1` after 90 ms**, and it sat
+  there for the whole 10×90 ms poll (`link still down (state machine 0x1,
+  link status 0x10110008, speed=1 width=1)`, rc=60).
+
+State 0x1 is Detect.Active: the host PHY is cycling receiver detection and
+never finds the card's termination — the card is electrically alive at the
+wires but its receiver never shows up. The refclk gate is the one variable
+that moved the state machine, so the gate write landed. Attribution caveat:
+the line prints only the post-write value, so "Android had it on already" is
+not excluded by this run alone — the next build prints the pre-write value
+(0 or 1) to settle it.
+
+Next round's probes (logging only, no behavior change, already in the tree):
+the refclk gate's pre-write value, and the PERST/WLAN_EN pin readback right
+after PERST is released (`perst in=N wlan_en in=N` — GPIO 94 / GPIO 16, the
+IN register bit 0; the step-3 path never printed pin states before). If the
+gate was 0 and the pins read back driven, the remaining suspects for a
+Detect.Active stall are, cheapest first: the PERST source itself (is TLMM
+GPIO 94 what the card's slot actually sees — confirm against the cnss-kiwi
+node on host before touching code), and the card-side refclk delivery (the
+gate routes TCXO, but the connector's 100 MHz needs the pad/clkreq path
+too).
+
