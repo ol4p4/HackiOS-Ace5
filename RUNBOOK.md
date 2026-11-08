@@ -3243,6 +3243,38 @@ What is left, cheapest first, is diagnostic rather than corrective:
    and whether the TCSR gate's 100 MHz actually reaches the chip — both
    board truths the DT asserts but nothing has measured.
 
+### PCIe M1, 2026-11-08 12:48: the test bus is silent, but the card shows signs of life
+
+Round 7 (`20261108-124836`, fresh cycle, healthy return) ran the first
+instrument: the full PARF test-bus sweep (185 selectors, SYS_CTRL [23:16] →
+0xe4) plus the vendor's debug-register snapshots. Two findings:
+
+- **Every one of the 185 test-bus selectors reads 0** in the Detect.Active
+  state — the bus carries nothing. Either the detect circuitry genuinely
+  has no activity to show, or the bus needs a condition we don't meet; a
+  before/after delta sweep (power_up entry vs the failed poll) is the
+  cheap way to tell those apart next round.
+- The debug snapshots are on the record for future comparison:
+  `parf[0x24]=0x80000400` (PHY_CTRL: our bit-0 clear took, bit 10 and 31
+  set), `parf[0x28]=0x4802` (PHY_STATUS), `parf[0x230]=0xb00`,
+  `parf[0x4d0]=0x1a`, `parf[0x4d4]=0x2f20`, `parf[0x630]=0x3030`, and the
+  PHY window `0x1d0..0x1f8 = a3 38 57 73 01 82 01`.
+- **`wlan_en high; sw-ctrl pins read 1 1`** — GPIO 18/19
+  (`mpm_wake_set_gpios` per the cnss-kiwi node: card-side lines we never
+  drive) read high for the first time. They read 0 0 in every round before
+  the pads actually drove. The flip correlates with the card being enabled
+  and released from reset: the card is alive, its rails are on, and it is
+  driving something.
+
+So the picture sharpens: enabled card, alive card, host side fully
+configured per the vendor's own sequence — and the lanes still never
+complete receiver detection. The remaining unknowns are exactly the two
+board truths plus one pin nobody reads: **CLKREQ (GPIO 95)** — the card's
+own open-drain clock-request line, whose level after PERST release would
+say whether the chip's PCIe interface is powered enough to drive it. Next
+round adds one log line (perst/wlan_en/clkreq/wake/sw-ctrl pin levels in
+the same readback) before any further theory.
+
 ### PCIe M1, 2026-11-08 12:56 / 13:07: CLKREQ is low — the card is asking for its clock
 
 Round 8 (`20261108-125633`) added the pin nobody read: **`clkreq in=0`**.
@@ -3341,35 +3373,34 @@ chip's own power sequencing (thyme clears the WCN's
 WLAON_QFPROM_PWR_CTRL SHUTDOWN/VDD4BLOW bits — but only after its link is
 up).
 
-### PCIe M1, 2026-11-08 12:48: the test bus is silent, but the card shows signs of life
+### The Turnip gate: step 9 passed — the triangle reaches an IOSurface in BGRA (2026-11-08 14:29)
 
-Round 7 (`20261108-124836`, fresh cycle, healthy return) ran the first
-instrument: the full PARF test-bus sweep (185 selectors, SYS_CTRL [23:16] →
-0xe4) plus the vendor's debug-register snapshots. Two findings:
+Back on the GPU line after the PCIe rounds. The step-9 image had been
+packed and waiting since 2026-11-02 (`local/root-turnip.apfs`, the 11-02
+recipe: `--seconds 300 --root-image local/root-turnip.apfs --touch
+--gpu-probe 20 --gpu-direct --gpu-keep`, no extra boot args, today's
+kernel — the pcie driver is inert without `pcie_step`). One fresh cycle:
 
-- **Every one of the 185 test-bus selectors reads 0** in the Detect.Active
-  state — the bus carries nothing. Either the detect circuitry genuinely
-  has no activity to show, or the bus needs a condition we don't meet; a
-  before/after delta sweep (power_up entry vs the failed poll) is the
-  cheap way to tell those apart next round.
-- The debug snapshots are on the record for future comparison:
-  `parf[0x24]=0x80000400` (PHY_CTRL: our bit-0 clear took, bit 10 and 31
-  set), `parf[0x28]=0x4802` (PHY_STATUS), `parf[0x230]=0xb00`,
-  `parf[0x4d0]=0x1a`, `parf[0x4d4]=0x2f20`, `parf[0x630]=0x3030`, and the
-  PHY window `0x1d0..0x1f8 = a3 38 57 73 01 82 01`.
-- **`wlan_en high; sw-ctrl pins read 1 1`** — GPIO 18/19
-  (`mpm_wake_set_gpios` per the cnss-kiwi node: card-side lines we never
-  drive) read high for the first time. They read 0 0 in every round before
-  the pads actually drove. The flip correlates with the card being enabled
-  and released from reset: the card is alive, its rails are on, and it is
-  driving something.
+```
+turnip_test: step 8:   corner (0 0 0 255), middle (255 0 0 255)
+turnip_test: step 9: the same pixels in an IOSurface (BGRA), read back from it
+turnip_test:   surface 256x256, stride 1024, id 36
+turnip_test:   surface corner (0 0 0 255), middle (0 0 255 255)
+turnip_test: TURNIP GATE: PASS (steps 1-9)
+```
 
-So the picture sharpens: enabled card, alive card, host side fully
-configured per the vendor's own sequence — and the lanes still never
-complete receiver detection. The remaining unknowns are exactly the two
-board truths plus one pin nobody reads: **CLKREQ (GPIO 95)** — the card's
-own open-drain clock-request line, whose level after PERST release would
-say whether the chip's PCIe interface is powered enough to drive it. Next
-round adds one log line (perst/wlan_en/clkreq/wake/sw-ctrl pin levels in
-the same readback) before any further theory.
+The RGBA red pixel lands in the surface as BGRA `(0 0 255 255)` — exactly
+the byte order the window server, the 2D engine and CoreAnimation read.
+The Vulkan real-driver gate is now green end to end: ICD → instance →
+device → memory → image → submit → draw → IOSurface. Zero PowerOff,
+panic or SIGSEGV in the run (`20261108-142924`).
+
+Next on the GPU line: **WSI/swapchain** — an IOSurface-backed present for
+a real Vulkan client (vkCreateSwapchainEXT-style through our shim), then
+the CoreAnimation bridge so SpringBoard's layers render through Turnip.
+The K90 transplant list (fd-bo import size, linear import pitch
+tolerance, last-level padding, submit merging) ports on first symptom at
+the rendering step. Fluency work from there follows the user's method
+note: fast-drag lanes for dropped frames, slow-drag lanes for frame
+generation errors.
 
