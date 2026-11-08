@@ -1216,7 +1216,180 @@ main(void)
 		}
 	}
 
-	printf("turnip_test: TURNIP GATE: PASS (steps 1-10)\n");
+	STEP(11, "an IOSurface imported as a Vulkan image: the draw lands in the compositor's memory, no copy");
+	/* The step the GPU line turns on: the compositor's surface IS the render
+	 * target. The kernel's RedwoodGPU already hands out an IOSurface's pages as
+	 * a GPU buffer (kRedwoodSurface, 0x7e), and this port's "fd" is the surface
+	 * id (drmPrimeFDToHandle in the shim). So: a linear VkImage with an
+	 * external-memory handle, memory imported by that id, render into it, then
+	 * read the IOSurface directly -- no vkCmdCopyImageToBuffer, no frame copy.
+	 * A linear import also exercises the K90 transplant items (pitch tolerance,
+	 * last-level padding) for the first time. */
+	{
+		IOSurfaceRef surface3 = make_bgra_surface();
+		VkExternalMemoryImageCreateInfo external = {
+		    .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+		    .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+		};
+		VkImageCreateInfo imageInfo3 = {
+		    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		    .pNext = &external,
+		    .imageType = VK_IMAGE_TYPE_2D,
+		    /* the compositor's surfaces are BGRA in memory: the CPU-copy
+		     * presents swapped R/B by hand, a zero-copy import must declare
+		     * the surface's real order or the swap lands in the pixels */
+		    .format = VK_FORMAT_B8G8R8A8_UNORM,
+		    .extent = { 256, 256, 1 },
+		    .mipLevels = 1,
+		    .arrayLayers = 1,
+		    .samples = VK_SAMPLE_COUNT_1_BIT,
+		    .tiling = VK_IMAGE_TILING_LINEAR,
+		    .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+		    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		};
+		VkImage image3 = VK_NULL_HANDLE;
+		VkDeviceMemory memory3 = VK_NULL_HANDLE;
+		VkImageView view3 = VK_NULL_HANDLE;
+		VkFramebuffer fb3 = VK_NULL_HANDLE;
+		VkCommandBuffer cmd3 = VK_NULL_HANDLE;
+		VkFence fence3 = VK_NULL_HANDLE;
+		VkMemoryRequirements req3 = { 0 };
+		uint32_t type3 = UINT32_MAX;
+		VkImportMemoryFdInfoKHR import = { 0 };
+		VkMemoryAllocateInfo allocate3 = { 0 };
+		int done3 = VK_NOT_READY;
+
+		if (surface3 == NULL)
+			FAIL(11, "IOSurfaceCreate(import target)", VK_ERROR_OUT_OF_HOST_MEMORY);
+		printf("turnip_test:   surface 256x256, stride %zu, id %u (the import target)\n",
+		    IOSurfaceGetBytesPerRow(surface3), IOSurfaceGetID(surface3));
+		fflush(stdout);
+
+		CHECK(11, "vkCreateImage(imported surface)", pCreateImage(device, &imageInfo3, NULL, &image3));
+		pGetImageMemoryRequirements(device, image3, &req3);
+		printf("turnip_test:   the imported image needs %llu bytes, alignment %llu, type bits %#x\n",
+		    (unsigned long long)req3.size, (unsigned long long)req3.alignment, req3.memoryTypeBits);
+		for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++) {
+			if ((req3.memoryTypeBits & (1u << i)) &&
+			    !(memoryProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+				type3 = i;
+				break;
+			}
+		}
+		if (type3 == UINT32_MAX) {
+			/* every heap on this driver is host-visible system memory */
+			for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++) {
+				if (req3.memoryTypeBits & (1u << i)) {
+					type3 = i;
+					break;
+				}
+			}
+		}
+		if (type3 == UINT32_MAX)
+			FAIL(11, "no memory type for the imported image", VK_ERROR_OUT_OF_DEVICE_MEMORY);
+		import.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+		import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+		import.fd = (int)IOSurfaceGetID(surface3);
+		allocate3.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocate3.pNext = &import;
+		allocate3.allocationSize = req3.size;
+		allocate3.memoryTypeIndex = type3;
+		CHECK(11, "vkAllocateMemory(import the surface's memory)", pAllocateMemory(device, &allocate3, NULL, &memory3));
+		fflush(stdout);
+		CHECK(11, "vkBindImageMemory(imported surface)", pBindImageMemory(device, image3, memory3, 0));
+		fflush(stdout);
+
+		VkImageViewCreateInfo viewInfo3 = {
+		    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		    .image = image3,
+		    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+		    .format = VK_FORMAT_B8G8R8A8_UNORM,
+		    .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+		};
+		CHECK(11, "vkCreateImageView(imported surface)", pCreateImageView(device, &viewInfo3, NULL, &view3));
+		VkFramebufferCreateInfo fbInfo3 = {
+		    .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+		    .renderPass = pass,
+		    .attachmentCount = 1,
+		    .pAttachments = &view3,
+		    .width = 256,
+		    .height = 256,
+		    .layers = 1,
+		};
+		CHECK(11, "vkCreateFramebuffer(imported surface)", pCreateFramebuffer(device, &fbInfo3, NULL, &fb3));
+		fflush(stdout);
+
+		VkCommandBufferAllocateInfo cmdInfo3 = {
+		    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+		    .commandPool = pool,
+		    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+		    .commandBufferCount = 1,
+		};
+		CHECK(11, "vkAllocateCommandBuffers(imported surface)", pAllocateCommandBuffers(device, &cmdInfo3, &cmd3));
+		VkFenceCreateInfo fenceInfo3 = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+		CHECK(11, "vkCreateFence(imported surface)", pCreateFence(device, &fenceInfo3, NULL, &fence3));
+
+		VkClearValue clear3 = { .color = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } } };
+		VkRenderPassBeginInfo begin3 = {
+		    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+		    .renderPass = pass,
+		    .framebuffer = fb3,
+		    .renderArea = { .offset = { 0, 0 }, .extent = { 256, 256 } },
+		    .clearValueCount = 1,
+		    .pClearValues = &clear3,
+		};
+		CHECK(11, "vkBeginCommandBuffer(imported surface)", pBeginCommandBuffer(cmd3,
+		    &(VkCommandBufferBeginInfo){ .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }));
+		pCmdBeginRenderPass(cmd3, &begin3, VK_SUBPASS_CONTENTS_INLINE);
+		pCmdBindPipeline(cmd3, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+		pCmdDraw(cmd3, 3, 1, 0, 0);
+		pCmdEndRenderPass(cmd3);
+		CHECK(11, "vkEndCommandBuffer(imported surface)", pEndCommandBuffer(cmd3));
+		VkSubmitInfo submit3 = {
+		    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+		    .commandBufferCount = 1,
+		    .pCommandBuffers = &cmd3,
+		};
+		CHECK(11, "vkQueueSubmit(imported surface)", pQueueSubmit(queue, 1, &submit3, fence3));
+		for (unsigned i = 0; i < 300 && done3 != VK_SUCCESS; i++) {
+			done3 = pGetFenceStatus(device, fence3);
+			if (done3 == VK_SUCCESS)
+				break;
+			usleep(10 * 1000);
+		}
+		if (done3 != VK_SUCCESS)
+			FAIL(11, "the imported-surface draw's fence never signalled (3 s)", done3);
+
+		/* No copy: read the compositor's own surface, which the GPU wrote. */
+		if (IOSurfaceLock(surface3, kIOSurfaceLockReadOnly, NULL) != 0)
+			FAIL(11, "IOSurfaceLock(read, imported surface)", VK_ERROR_MEMORY_MAP_FAILED);
+		{
+			const uint8_t *bytes3 = IOSurfaceGetBaseAddress(surface3);
+			size_t stride3 = IOSurfaceGetBytesPerRow(surface3);
+			const uint8_t *corner3 = bytes3 + 4;                     /* pixel (1,0), outside the triangle */
+			const uint8_t *middle3 = bytes3 + (size_t)128 * stride3 + 128 * 4;
+
+			printf("turnip_test:   the surface the GPU wrote: corner BGRA %u %u %u %u, middle BGRA %u %u %u %u\n",
+			    corner3[0], corner3[1], corner3[2], corner3[3],
+			    middle3[0], middle3[1], middle3[2], middle3[3]);
+			fflush(stdout);
+			IOSurfaceUnlock(surface3, kIOSurfaceLockReadOnly, NULL);
+			if (!(middle3[2] > 200 && middle3[1] < 40 && middle3[0] < 40)) {
+				printf("turnip_test: FAILED at step 11: the imported surface's middle is not the draw's colour\n");
+				failed_at = 11;
+				goto out;
+			}
+			if (corner3[0] > 40 || corner3[1] > 40 || corner3[2] > 40) {
+				printf("turnip_test: FAILED at step 11: the imported surface's corner is not the clear colour\n");
+				failed_at = 11;
+				goto out;
+			}
+		}
+		printf("turnip_test: step 11: the draw is in the compositor's surface, imported by its id, no copy\n");
+	}
+
+	printf("turnip_test: TURNIP GATE: PASS (steps 1-11)\n");
 	result = 0;
 out:
 	if (device != VK_NULL_HANDLE) {

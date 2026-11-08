@@ -1,0 +1,40 @@
+diff --git a/src/freedreno/vulkan/tu_knl_drm_msm.cc b/src/freedreno/vulkan/tu_knl_drm_msm.cc
+--- a/src/freedreno/vulkan/tu_knl_drm_msm.cc
++++ b/src/freedreno/vulkan/tu_knl_drm_msm.cc
+@@ -681,8 +681,20 @@
+                    int prime_fd)
+ {
+    /* lseek() to get the real size */
++#ifdef __APPLE__
++   /* prime_fd is an IOSurface's id here, not a dmabuf, so lseek() says nothing.
++    * The shim's redwood_drm_surface() asks the kernel what the surface would be
++    * as a buffer: its size, where the pixels start and how long a row is. */
++   struct redwood_drm_surface surface = { .surface = (uint32_t) prime_fd };
++   if (redwood_drm_surface(dev->fd, &surface) != 0)
++      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++   if (surface.offset + (uint64_t) surface.row_bytes * surface.height > (uint64_t) surface.size)
++      return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++   off_t real_size = (off_t) surface.size;
++#else
+    off_t real_size = lseek(prime_fd, 0, SEEK_END);
+    lseek(prime_fd, 0, SEEK_SET);
++#endif
+    if (real_size < 0 || (uint64_t) real_size < size)
+       return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+ 
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -3066,8 +3066,11 @@
+       result = tu_bo_init_dmabuf(device, &mem->bo,
+                                  pAllocateInfo->allocationSize, fd_info->fd);
+       if (result == VK_SUCCESS) {
+-         /* take ownership and close the fd */
++#ifndef __APPLE__
++         /* take ownership and close the fd; on this port the "fd" is an
++          * IOSurface id (see the shim), so there is nothing to close */
+          close(fd_info->fd);
++#endif
+       }
+    } else if (mem->vk.ahardware_buffer) {
+ #if DETECT_OS_ANDROID

@@ -3654,3 +3654,45 @@ it hands fastboot Windows paths).
 Next on the GPU line: WSI — an IOSurface-backed present through the shim — then
 the CA bridge, with the fluency lanes as the acceptance method.
 
+### The Turnip gate, step 11: an IOSurface imported as a Vulkan image — the draw lands in the compositor's memory, no copy (2026-11-08 22:14)
+
+The zero-copy milestone. Step 11 creates a **linear** `VkImage` with
+`VkExternalMemoryImageCreateInfo` (`DMA_BUF` handle type), imports the surface's
+memory with `VkImportMemoryFdInfoKHR` whose `fd` is the **IOSurface id**, binds
+it, draws the step-8 triangle, and then reads the IOSurface directly — no
+`vkCmdCopyImageToBuffer`, no frame copy:
+
+```
+turnip_test:   the imported image needs 262144 bytes, alignment 64, type bits 0x3
+turnip_test:   the surface the GPU wrote: corner BGRA 0 0 0 255, middle BGRA 0 0 255 255
+turnip_test: step 11: the draw is in the compositor's surface, imported by its id, no copy
+turnip_test: TURNIP GATE: PASS (steps 1-11)
+```
+
+Run `20261108-221456`, zero PowerOff/panic/SIGSEGV. The kernel side already had
+the primitive (`kRedwoodSurface`, 0x7e — an IOSurface's pages as a GPU buffer),
+and the shim already exported it (`drmPrimeFDToHandle` with the surface id as the
+"fd"). Two port-specific walls came out on the way:
+
+1. **`msm_bo_init_dmabuf` lseek()s the prime_fd for its real size** — with a
+   surface id that fails, and the import returns `VK_ERROR_INVALID_EXTERNAL_HANDLE`
+   before anything else runs. `tools/mesa/turnip-darwin-surface-import.patch`
+   patches it under `__APPLE__` to ask the shim's `redwood_drm_surface()` for the
+   buffer's `size/offset/row_bytes/height` (the kernel answers for the surface's
+   pixels) and sanity-checks them; the same patch skips the `close(fd)` on import
+   success, because this "fd" is an id and the close would hit an unrelated
+   descriptor.
+2. **The surface is BGRA in memory.** The CPU-copy present swaps R/B by hand, so
+   the zero-copy import must declare `VK_FORMAT_B8G8R8A8_UNORM`; with
+   `R8G8B8A8_UNORM` the first run read middle BGRA `255 0 0 255` (red in B) and
+   failed the check — the pixels were right, the declaration was not.
+
+Memory-type selection needed a fallback too: every heap on this driver is
+host-visible system memory, so the usual "prefer device-local" loop finds
+nothing (`type bits 0x3`).
+
+What it unlocks: the compositor's surface IS the render target. Present is no
+longer a copy, and a client can render straight into the drawable. Next: put a
+real client's drawable on this path (the Metal/CA layer), then the CA bridge with
+the fluency lanes as acceptance.
+
