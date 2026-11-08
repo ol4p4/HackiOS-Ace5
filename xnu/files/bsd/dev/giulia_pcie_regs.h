@@ -231,6 +231,10 @@ static const uint32_t giulia_pcie_sm_branch[] = {
 #define GIULIA_GCC_PCIE0_PHY_GDSC_VOTE_BIT 3u
 #define GIULIA_GCC_CFG_GDSCR_POWER_UP_COMPLETE  (1u << 16)
 #define GIULIA_GCC_PCIE_VOTE          0x52008u /* bits 0-5: slv,mstr,ahb,aux,pipe,q2a */
+#define GIULIA_GCC_RCHNG_VOTE         0x52000u /* bit 22: the pcie0 phy rchng branch */
+#define GIULIA_GCC_PCIE0_RCHNG_HALT   0x6b054u
+#define GIULIA_GCC_PCIE0_RCHNG_CMD    0x6b058u
+#define GIULIA_GCC_PCIE0_RCHNG_CFG    0x6b06cu /* src gpll0_even(6) div 3 = 100 MHz */
 #define GIULIA_GCC_PCIE0_SLV_HALT     0x6b020u
 #define GIULIA_GCC_PCIE0_MSTR_HALT    0x6b02cu
 #define GIULIA_GCC_PCIE0_AHB_HALT     0x6b038u

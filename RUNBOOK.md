@@ -3172,3 +3172,36 @@ also sits in Detect.Active, the software register diff is exhausted and the
 remaining suspects are PHY-domain: the aux-clock mux switch (xo → ext
 source, vendor does it after phy_init) and the pipe-clock gating.
 
+### PCIe M1, 2026-11-08 12:23: SYS_CTRL lands, the register diff is dry — the PHY clock domain is the next suspect
+
+Round 5 (`20261108-122323`, healthy return): `sys_ctrl 0x361c -> 0x365e`
+landed — Android leaves 0x361c, the vendor value additionally sets bits 1
+and 6 — and the finer 10 ms poll shows no hidden transient: `parf 0` /
+`elbi 0x1` at 0 ms, `0x1`/`0x1001` from 40 ms on, no Polling excursion, no
+XMLH_LINK_UP. Every register write the vendor driver performs before
+training is now in our ladder and the LTSSM still sits in
+LTSSM_DETECT_ACT (the vendor's own name table confirms the encoding).
+
+The register diff against `pci-msm.c` is exhausted. What the vendor never
+writes but the *kernel clock tree* does — via the QMP PHY driver — is the
+PHY's own clock domain. Mainline sm8650's `pcie0_phy` node demands five
+clocks: aux, cfg_ahb, **ref (`<&tcsr TCSR_PCIE_0_CLKREF_EN>` — our refclk
+gate, already equivalent)**, **rchng at 100 MHz**, and **pipe**. Two of
+those five were never in our ladder:
+
+- **GCC_PCIE_0_PHY_RCHNG_CLK** — the recharge domain that runs the receiver
+  detect circuit: RCG at 0x6b058 (`GPLL0_EVEN / 3 = 100 MHz`, cfg 0x602),
+  branch vote 0x52000 BIT(22);
+- **GCC_PCIE_0_PIPE_CLK** — the PHY→controller PCLK gate, our own vote
+  register's bit 4 at 0x52008, deliberately excluded so far ("all but
+  PIPE"; mainline marks the branch BRANCH_HALT_SKIP — it only ticks once
+  the PHY is out of reset, and the kernel's bulk-enable order turns it on
+  before calibration).
+
+The mechanism story fits every observation so far: the refclk gate turns
+the PHY's PLL on, the pipe clock starts ticking, and the LTSSM leaves
+Detect.Quiet for Detect.Active at exactly that moment (rounds 1-3) — but
+without the recharge clock the receiver detect can never complete. Round 6
+enables both: the RCG config + branch vote with logged readbacks in
+clocks_on, and the pipe bit added to the vote word.
+

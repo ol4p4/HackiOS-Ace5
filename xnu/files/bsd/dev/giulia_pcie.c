@@ -178,14 +178,39 @@ clocks_on(void)
 		GIULIA_GCC_PCIE0_Q2A_HALT,
 	};
 	uint32_t vote = rd(gcc, GIULIA_GCC_PCIE_VOTE);
+	uint32_t rchng;
+	int error;
 
-	wr(gcc, GIULIA_GCC_PCIE_VOTE, vote | 0x2fu); /* all but PIPE */
+	/* PIPE too: the kernel's own order enables the whole PHY clock bulk
+	 * before the PHY is calibrated, and the branch is BRANCH_HALT_SKIP
+	 * precisely because it only ticks once the PHY is out of reset. */
+	wr(gcc, GIULIA_GCC_PCIE_VOTE, vote | 0x3fu);
 	for (unsigned i = 0; i < sizeof(halt) / sizeof(halt[0]); i++) {
-		int error = poll(gcc, halt[i], 0x80000000u, 0, 10000);
+		error = poll(gcc, halt[i], 0x80000000u, 0, 10000);
 		if (error) {
 			return error;
 		}
 	}
+
+	/* The PHY's recharge clock: GPLL0_EVEN / 3 = 100 MHz (gcc-sm8650.c
+	 * ftbl_gcc_pcie_0_phy_rchng_clk_src), branch vote 0x52000 BIT(22).
+	 * The QMP PHY driver turns it on with its clock bulk; without the
+	 * recharge domain the receiver detect never completes and the LTSSM
+	 * sits in Detect.Active. */
+	rchng = rd(gcc, GIULIA_GCC_RCHNG_VOTE);
+	wr(gcc, GIULIA_GCC_PCIE0_RCHNG_CFG, 0x602u);
+	wr(gcc, GIULIA_GCC_PCIE0_RCHNG_CMD, 1u);
+	error = poll(gcc, GIULIA_GCC_PCIE0_RCHNG_CMD, 1u, 0, 10000);
+	if (error) {
+		return error;
+	}
+	wr(gcc, GIULIA_GCC_RCHNG_VOTE, rchng | (1u << 22));
+	error = poll(gcc, GIULIA_GCC_PCIE0_RCHNG_HALT, 0x80000000u, 0, 10000);
+	if (error) {
+		return error;
+	}
+	pcie_log("pcie: rchng vote pre=%#x post=%#x, halt %#x\n", rchng,
+	    rd(gcc, GIULIA_GCC_RCHNG_VOTE), rd(gcc, GIULIA_GCC_PCIE0_RCHNG_HALT));
 	return 0;
 }
 
