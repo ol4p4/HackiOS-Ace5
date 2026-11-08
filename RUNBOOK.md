@@ -3536,3 +3536,12 @@ extraction (no Mac, no sips):
    black, the remaining suspect is PosterBoard's /var state (the store a
    real restore creates), which an empty ramfs var does not have.
 
+**CONFIRMED on device by the user** (2026-11-08 evening): the WWDC 2022
+wallpaper renders on the home screen. The wallpaper pipeline is complete —
+assets, PNG layers, CAML references, PosterBoard as a LaunchDaemon, the
+SpringBoard handshake — and the desktop shows the stock iOS 16 wallpaper
+where it showed black since the port began. The screenshot chase is moot;
+what remains for wallpaper work is only choice/polish (picking a different
+image means swapping the staged PNG layers and re-running
+rewrite-wallpaper-caml.sh).
+
