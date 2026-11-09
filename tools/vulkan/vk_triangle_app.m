@@ -83,6 +83,11 @@
 typedef PFN_vkVoidFunction (*icd_gipa_t)(VkInstance instance, const char *name);
 
 enum { RWVK_LAYER_W = 1125, RWVK_LAYER_H = 2436, RWVK_ENTRIES = 8 };
+
+/* Which road the composite's source takes. 1: sample the imported LINEAR image
+ * directly -- the zero-copy question this boot answers. 0: copy it once into a
+ * tiled image (step 15's working road). */
+#define RWVK_SAMPLE_LINEAR 1
 enum { RWVK_LAYER_FRAMES = 3, RWVK_APP_PERIOD_MS = 500 };
 
 /* The BGRA bytes the attachment is expected to end up holding. */
@@ -303,6 +308,7 @@ static PFN_vkEnumeratePhysicalDevices pEnumeratePhysicalDevices;
 static PFN_vkGetPhysicalDeviceProperties pGetPhysicalDeviceProperties;
 static PFN_vkGetPhysicalDeviceQueueFamilyProperties pGetQueueFamilyProperties;
 static PFN_vkGetPhysicalDeviceMemoryProperties pGetPhysicalDeviceMemoryProperties;
+static PFN_vkGetPhysicalDeviceFormatProperties pGetPhysicalDeviceFormatProperties;
 static PFN_vkCreateDevice pCreateDevice;
 static PFN_vkDestroyDevice pDestroyDevice;
 static PFN_vkGetDeviceQueue pGetDeviceQueue;
@@ -426,6 +432,7 @@ rwvk_open(struct rwvk *v)
 	RWVK_GIPA(v->instance, "vkGetPhysicalDeviceProperties", pGetPhysicalDeviceProperties);
 	RWVK_GIPA(v->instance, "vkGetPhysicalDeviceQueueFamilyProperties", pGetQueueFamilyProperties);
 	RWVK_GIPA(v->instance, "vkGetPhysicalDeviceMemoryProperties", pGetPhysicalDeviceMemoryProperties);
+	RWVK_GIPA(v->instance, "vkGetPhysicalDeviceFormatProperties", pGetPhysicalDeviceFormatProperties);
 	RWVK_GIPA(v->instance, "vkCreateDevice", pCreateDevice);
 
 	if (pEnumeratePhysicalDevices(v->instance, &count, NULL) != VK_SUCCESS || count == 0) {
@@ -954,6 +961,17 @@ rwvk_make_source(struct rwvk *v)
 	};
 
 	rwvk_step("source: create the checker surface");
+	{
+		VkFormatProperties format;
+		pGetPhysicalDeviceFormatProperties(v->physical, VK_FORMAT_B8G8R8A8_UNORM, &format);
+		rwvk_say("vktriangle: source: B8G8R8A8 linear tiling %#x (sampled %s), "
+		    "optimal tiling %#x (sampled %s)", format.linearTilingFeatures,
+		    (format.linearTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)
+		        ? "yes" : "NO",
+		    format.optimalTilingFeatures,
+		    (format.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)
+		        ? "yes" : "NO");
+	}
 	/* The surface, filled with the checker and announced (the seed rule). */
 	props = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
 	    &kCFTypeDictionaryValueCallBacks);
@@ -1012,7 +1030,7 @@ rwvk_make_source(struct rwvk *v)
 	    .arrayLayers = 1,
 	    .samples = VK_SAMPLE_COUNT_1_BIT,
 	    .tiling = VK_IMAGE_TILING_LINEAR,
-	    .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+	    .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 	    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 	    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
 	};
@@ -1049,6 +1067,7 @@ rwvk_make_source(struct rwvk *v)
 	}
 
 	rwvk_step("source: create the tiled image");
+#if !RWVK_SAMPLE_LINEAR
 	/* The tiled image the sampler reads. */
 	tiledInfo = linearInfo;
 	tiledInfo.pNext = NULL;
@@ -1109,7 +1128,41 @@ rwvk_make_source(struct rwvk *v)
 	pResetFences(v->device, 1, &v->fence);
 
 	rwvk_step("source: view, descriptor set, update");
-	viewInfo.image = v->source_tiled;
+#else
+	/* The zero-copy road: the imported linear image straight to sampled. No
+	 * tiled copy, so what the sampler reads IS the surface's memory. */
+	rwvk_step("source: linear image straight to SHADER_READ_ONLY (no copy)");
+	{
+		VkImageMemoryBarrier straight = {
+		    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+		    .srcAccessMask = 0,
+		    .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+		    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		    .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		    .image = v->source_linear,
+		    .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+		};
+
+		if (pResetCommandBuffer(v->commands, 0) != VK_SUCCESS ||
+		    pBeginCommandBuffer(v->commands, &(VkCommandBufferBeginInfo){
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }) != VK_SUCCESS)
+			return -1;
+		pCmdPipelineBarrier(v->commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1,
+		    &straight);
+		if (pEndCommandBuffer(v->commands) != VK_SUCCESS)
+			return -1;
+		if (pQueueSubmit(v->queue, 1, &submit, v->fence) != VK_SUCCESS ||
+		    pWaitForFences(v->device, 1, &v->fence, VK_TRUE, 3000000000ull) != VK_SUCCESS) {
+			rwvk_say("vktriangle: FAILED: the linear image never became sampled");
+			return -1;
+		}
+		pResetFences(v->device, 1, &v->fence);
+	}
+#endif
+	viewInfo.image = RWVK_SAMPLE_LINEAR ? v->source_linear : v->source_tiled;
 	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 	viewInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
 	viewInfo.subresourceRange = (VkImageSubresourceRange){
@@ -1134,10 +1187,12 @@ rwvk_make_source(struct rwvk *v)
 	imageInfo.imageView = v->source_view;
 	write.dstSet = v->descriptor_set;
 	pUpdateDescriptorSets(v->device, 1, &write, 0, NULL);
-	rwvk_say("vktriangle: source: surface id %u, %ux%u %#x, imported linear, copied "
-	    "once into a tiled image, sampled through a nearest sampler",
+	rwvk_say("vktriangle: source: surface id %u, %ux%u %#x, imported linear, %s, "
+	    "sampled through a nearest sampler",
 	    (unsigned)IOSurfaceGetID(surface), size, size,
-	    (unsigned)IOSurfaceGetPixelFormat(surface));
+	    (unsigned)IOSurfaceGetPixelFormat(surface),
+	    RWVK_SAMPLE_LINEAR ? "sampled where it lies (no copy)"
+	                       : "copied once into a tiled image");
 	return 0;
 }
 
