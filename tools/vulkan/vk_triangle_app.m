@@ -271,6 +271,13 @@ struct rwvk {
 	unsigned frames, failures;
 };
 
+/* The process's one Vulkan context, its Metal device and the queue the present
+ * rides. Declared here because rwvk_frame uses the queue: the drawable's own
+ * -present is not enough on this port (the first on-panel run stayed black). */
+static struct rwvk rwvk_vulkan;
+static id<MTLDevice> rwvk_metal;
+static id<MTLCommandQueue> rwvk_metal_queue;
+
 static PFN_vkGetInstanceProcAddr rwvk_gipa_instance;
 static PFN_vkGetDeviceProcAddr rwvk_gdpa_device;
 
@@ -893,12 +900,25 @@ rwvk_frame(struct rwvk *v, CAMetalLayer *layer, int loud)
 		if (IOSurfaceLock(surface, 0, NULL) == 0)
 			IOSurfaceUnlock(surface, 0, NULL);
 
-		/* Presentation goes through no device: the drawable's surface is
-		 * registered in the layer's CAImageQueue and the window server takes
-		 * it from there (src/triangle_app.m). */
+		/* Presentation. The drawable's own -present is not enough on this
+		 * port: the first on-panel run left the window black while the
+		 * surface held the right pixels (screenshot 20261109-202913). Metal's
+		 * path is Apple's -[MTLCommandBuffer presentDrawable:] and a commit:
+		 * the present is a scheduled handler that -commit delivers
+		 * (src/triangle_app.m says the same). The buffer carries no encoder,
+		 * so the driver's -commit has nothing to draw. */
 		if (loud)
-			rwvk_step("-[CAMetalDrawable present]");
-		[(id<MTLDrawable>)drawable present];
+			rwvk_step("-[MTLCommandBuffer presentDrawable:] + commit");
+		id<MTLCommandBuffer> commit = [rwvk_metal_queue commandBuffer];
+		if (commit == nil) {
+			v->failures++;
+			rwvk_say("vktriangle: frame %u: the queue gave no command buffer",
+			    v->frames);
+			return -1;
+		}
+		[commit presentDrawable:drawable];
+		[commit commit];
+		[commit waitUntilCompleted];
 
 		/* Read back through the surface, the same pages the panel reads. */
 		if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) == 0) {
@@ -970,9 +990,6 @@ rwvk_close(struct rwvk *v)
 
 /* --------------------------------------------------------------------------- the application */
 
-static struct rwvk rwvk_vulkan;
-static id<MTLDevice> rwvk_metal;
-
 @interface RWVKView : UIView
 @end
 
@@ -1023,12 +1040,15 @@ static unsigned rwvk_app_frames;
 	rwvk_layer = layer;
 	layer.device = rwvk_metal;
 	layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-	layer.framebufferOnly = NO;
-	layer.contentsScale = [UIScreen mainScreen].scale;
-	layer.drawableSize = CGSizeMake(RWVK_LAYER_W, RWVK_LAYER_H);
-	rwvk_say("vktriangle: app: the window is up, layer %s, %.0fx%.0f at scale %.1f",
-	    class_getName(object_getClass(layer)), layer.drawableSize.width,
-	    layer.drawableSize.height, layer.contentsScale);
+	/* drawableSize, contentsScale and framebufferOnly are left exactly as
+	 * src/triangle_app.m leaves them: CA works the drawable out as the layer's
+	 * size x its content scale, and on this port that is 375x812 for this
+	 * window (docs/ACE5.md, "20261023-145230"). Forcing 1125x2436 here is what
+	 * kept the second on-panel run black while every readback was right. */
+	rwvk_say("vktriangle: app: the window is up, layer %s, bounds %.0fx%.0f at scale "
+	    "%.1f (drawableSize %.0fx%.0f, CA's to choose)", class_getName(object_getClass(layer)),
+	    layer.bounds.size.width, layer.bounds.size.height, layer.contentsScale,
+	    layer.drawableSize.width, layer.drawableSize.height);
 	rwvk_timer = [NSTimer scheduledTimerWithTimeInterval:RWVK_APP_PERIOD_MS / 1000.0
 	    repeats:YES block:^(NSTimer *timer) {
 		int loud = rwvk_app_frames < 3 || (rwvk_app_frames % 10) == 0;
@@ -1059,6 +1079,11 @@ static unsigned rwvk_app_frames;
 		rwvk_say("vktriangle: FAILED: no Metal device, so no drawable to draw into");
 		return YES;
 	}
+	rwvk_metal_queue = [rwvk_metal newCommandQueue];
+	if (rwvk_metal_queue == nil) {
+		rwvk_say("vktriangle: FAILED: the device gave no command queue, so no present");
+		return YES;
+	}
 	if (rwvk_open(&rwvk_vulkan) != 0)
 		return YES;
 	self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
@@ -1086,6 +1111,11 @@ rwvk_layer_mode(void)
 	rwvk_metal = rwvk_make_device();
 	if (rwvk_metal == nil) {
 		rwvk_say("vktriangle: FAILED: no Metal device");
+		return 1;
+	}
+	rwvk_metal_queue = [rwvk_metal newCommandQueue];
+	if (rwvk_metal_queue == nil) {
+		rwvk_say("vktriangle: FAILED: the device gave no command queue, so no present");
 		return 1;
 	}
 	if (rwvk_open(&rwvk_vulkan) != 0)
