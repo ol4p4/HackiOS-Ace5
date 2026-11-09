@@ -65,6 +65,11 @@ if args.app:
 if (args.components / 'libvulkan_freedreno.dylib').exists():
     copies += [(args.components / 'libvulkan_freedreno.dylib', Path('lib/libvulkan_freedreno.dylib')),
                (args.components / 'turnip_test', Path('bin/turnip_test'))]
+# The step-13 program (tools/vulkan/vk_triangle_app.m): a Vulkan frame in a real
+# CoreAnimation drawable. --layer mode runs from the job list; the app mode lives
+# in RedwoodVK.app in the system image (staged there, not here).
+if (args.components / 'vk_triangle_app').exists():
+    copies += [(args.components / 'vk_triangle_app', Path('bin/vk_triangle_app'))]
 required = [src for src, _ in copies] + [args.base / 'etc/rc', args.base / 'lib/libredwood.dylib']
 if args.compositor_threading:
     required.append(args.base / 'LaunchDaemons/com.apple.backboardd.plist')

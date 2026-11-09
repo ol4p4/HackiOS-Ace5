@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	What RedwoodVK.app is signed with. The same three src/triangle_app.entitlements
+	carries, and for the same reason: nothing in this port needs a signature to
+	run, but entitlements are read out of one, and an application started for
+	SpringBoard is asked about its bundle identity and its (absent) container.
+-->
+<plist version="1.0">
+<dict>
+	<key>application-identifier</key>
+	<string>com.redwood.vk</string>
+	<key>com.apple.private.security.no-container</key>
+	<true/>
+	<key>platform-application</key>
+	<true/>
+</dict>
+</plist>

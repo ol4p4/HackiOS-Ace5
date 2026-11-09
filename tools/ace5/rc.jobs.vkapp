@@ -1,0 +1,28 @@
+# Commands run by the launchd job com.redwood.demo for the step-13 boot
+# (Turnip's Vulkan frame in a real CoreAnimation drawable).
+#
+# WHAT THIS BOOT IS FOR. turnip_test passed steps 1-12 without ever touching the
+# window server: every surface was one the gate made itself and read back in the
+# same process. Step 13 is the real link -- a drawable CoreAnimation owns, drawn
+# into by Turnip, taken to the panel by the image queue. Two processes ask it,
+# because a boot is expensive and they fail separately:
+#
+#   1  vk_triangle_app --layer   no UIKit: a bare CAMetalLayer of the panel's
+#                                size, three frames, the surface imported by its
+#                                id, drawn, seed-bumped, presented, read back.
+#                                Answers every question except the panel, and its
+#                                output is certainly in the log.
+#   2  RedwoodVK.app             the application, launched by SpringBoard after
+#                                the unlock, drawing a frame every half second.
+#                                This is the one a screenshot can prove: green
+#                                (or cyan) with a red triangle, colours the Metal
+#                                application never draws.
+#
+# The gate still runs first, so one boot answers both "steps 1-12 still pass"
+# and "step 13": a regression in either is visible in the same log.
+/redwood/bin/rwtouch wait 60
+/redwood/bin/turnip_test
+/redwood/bin/vk_triangle_app --layer
+/redwood/bin/rwtouch wait 10 notify com.redwood.unlock wait 5
+/redwood/bin/battery_test open redwoodvk://
+/redwood/bin/rwtouch wait 600

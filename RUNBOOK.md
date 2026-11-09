@@ -3730,3 +3730,84 @@ needs it too — the natural home is the WSI/import layer, since a client that
 imports a surface and submits into it is exactly "somebody who wrote one".
 Metal's path already gets it from `MiniIOSurfaceDrawn()`; GL's from eagl.c.
 
+### Step 13: a Vulkan frame in a CoreAnimation drawable (built 2026-11-09; the run is owed)
+
+Steps 1–12 never touched the window server: every surface was one the gate made
+itself and every frame was read back in the same process. The one link nobody
+has measured is the real one — a drawable CoreAnimation owns, drawn into by
+Turnip, taken to the panel by the image queue. Step 13 is that link, in
+`tools/vulkan/vk_triangle_app.m`, and it reuses only proven halves:
+
+| link | already measured by |
+|---|---|
+| `CAMetalLayer nextDrawable` | `triangle_app --layer`, on this port |
+| the drawable's IOSurface | `triangle_app`: `_CAMetalDrawablePrivate` +0x40, validated against +0x48/+0x50 |
+| surface id → `VkImage` import | `turnip_test` step 11 (`turnip-darwin-surface-import.patch`) |
+| the draw | `turnip_test` steps 8/11 (ir3, the CP) |
+| the seed bump | `turnip_test` step 12's rule — `IOSurfaceLock(surface,0,NULL)` + unlock |
+| presentation | `-[CAMetalDrawable present]`: the surface is registered in the layer's CAImageQueue, no device in the path |
+
+The picture is **green (or cyan) with a red triangle**, in BGRA. The Metal
+application draws blue with an orange triangle, so a screenshot cannot confuse
+the two: this program's colours appear nowhere else on this port.
+
+Two modes in one binary, because a boot is expensive and they fail separately:
+`--layer` (no UIKit: a bare CAMetalLayer of the panel's size, three frames,
+every check except the panel; output is certainly in the log because the job
+list runs it) and the application (UIApplicationMain, a window whose view's
+layer is a CAMetalLayer, a frame every half second, so a screenshot can be taken
+whenever).
+
+**What was built and packed (2026-11-09, host side only — no phone run yet):**
+
+- `tools/vulkan/vk_triangle_app.m` + `vk_triangle_app.plist` / `.entitlements`;
+  built by `local/wsl/build-vk-app.sh` into `local/components/vk_triangle_app`
+  and `local/root-turnip/bin/vk_triangle_app` (90,744 bytes, arm64 Mach-O).
+- `tools/ace5/rc.jobs.vkapp`: the gate first (`turnip_test`, so a regression in
+  steps 1–12 is visible in the same log), then `vk_triangle_app --layer`, then
+  unlock and `battery_test open redwoodvk://`, then wait.
+- Small root `local/root-turnip-vk.apfs` (13,037,568 bytes, sha256
+  `a10b0441…`, apfsck clean, 120/120 entries read back) — the job above and the
+  binary in `/redwood/bin`.
+- System image `local/system-metal-vk.apfs`: `local/system-metal` is the empty
+  directory skeleton (its files are symlinks into the iOS extraction and it is
+  not a packable tree), so the tree is built by
+  `tools/ace5/prepare-gpu-system.py --ios /root/ios165 --stage0
+  userland/obj/stage0 --triangle local/root-turnip/bin/triangle_app --output
+  /root/system-vk`, then `Applications/RedwoodVK.app` (binary + Info.plist +
+  PkgInfo, unsigned) is copied in, and it is packed with
+  `python3 tools/apfs/mkapfs.py -z -o local/system-metal-vk.apfs
+  System=/root/system-vk,manifest=/root/ios165/system.manifest` and checked with
+  `tools/apfs/check-image.sh local/system-metal-vk.apfs
+  System=/root/system-vk,manifest=/root/ios165/system.manifest`.
+  Result: 2,492,272,640 bytes, sha256 `35279ac5…`, apfsck clean, 62,427/62,427
+  entries read back (the port's 62,423 plus RedwoodVK.app's three files and its
+  directory).
+
+**The run (owed):**
+
+```
+reboot → enter --stage kernel → ramdisk --image local/system-metal-vk.apfs
+→ run --seconds 600 --bootcpu 1 --live-log --root-image local/root-turnip-vk.apfs
+      --gpu-probe 20 --gpu-direct --gpu-keep
+```
+
+**Acceptance, all of it in one log and two screenshots:**
+
+- `turnip_test: TURNIP GATE: PASS (steps 1-12)` still there;
+- `vktriangle: surface <id> imported: …` once per drawable in rotation;
+- `vktriangle: frame N: corner BGRA 0 255 0 255, middle BGRA 0 0 255 255` (or
+  cyan for the corner when the clear alternates every eight frames);
+- `vktriangle: LAYER MODE: PASS`;
+- the applications' frames continue with `failures 0`;
+- two screenshots taken ≥1 s apart: green/cyan background with a red triangle
+  in the window, and the background colour differs between them (the clear
+  alternates every eight frames) — a still frame is told from a live present.
+
+**If it fails, the failure names the link:** `nextDrawable gave nil` (the Metal
+device or the drawable pool), `the drawable's IOSurface could not be reached`
+(the private layout moved), `vkAllocateMemory importing surface N` (the import
+path), `the fence never signalled` (the GPU), or every readback wrong but the
+present called (the image queue / CA).
+
+
