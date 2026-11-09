@@ -3767,7 +3767,7 @@ whenever).
   steps 1–12 is visible in the same log), then `vk_triangle_app --layer`, then
   unlock and `battery_test open redwoodvk://`, then wait.
 - Small root `local/root-turnip-vk.apfs` (13,037,568 bytes, sha256
-  `a10b0441…`, apfsck clean, 120/120 entries read back) — the job above and the
+  `b7aaa7d3…`, apfsck clean, 120/120 entries read back) — the job above and the
   binary in `/redwood/bin`.
 - System image `local/system-metal-vk.apfs`: `local/system-metal` is the empty
   directory skeleton (its files are symlinks into the iOS extraction and it is
@@ -3780,7 +3780,7 @@ whenever).
   System=/root/system-vk,manifest=/root/ios165/system.manifest` and checked with
   `tools/apfs/check-image.sh local/system-metal-vk.apfs
   System=/root/system-vk,manifest=/root/ios165/system.manifest`.
-  Result: 2,492,272,640 bytes, sha256 `35279ac5…`, apfsck clean, 62,427/62,427
+  Result: 2,492,272,640 bytes, sha256 `d0672a60…`, apfsck clean, 62,427/62,427
   entries read back (the port's 62,423 plus RedwoodVK.app's three files and its
   directory).
 
@@ -3803,6 +3803,24 @@ reboot → enter --stage kernel → ramdisk --image local/system-metal-vk.apfs
 - two screenshots taken ≥1 s apart: green/cyan background with a red triangle
   in the window, and the background colour differs between them (the clear
   alternates every eight frames) — a still frame is told from a live present.
+
+**First device run, 2026-11-09 19:36 (log 20261109-193626-run): half of step 13
+is now measured on hardware.** The gate stayed `PASS (steps 1-12)`, and
+`--layer` **passed**: a real `CAMetalDrawable` handed surface ids 39 and 40
+(1125×2436, stride 4608, `0x42475241`), Turnip imported each by its id, drew,
+the seed bumped, the present was called, and the readback was exact —
+`corner BGRA 0 255 0 255, middle BGRA 0 0 255 255`, `LAYER MODE: PASS`, zero
+failures. The drawable rotation (39 → 40 → 39) also shows the layer recycles
+two surfaces exactly as CA's image queue does.
+
+The application died on its first frame, and the reason is a one-line Apple
+habit: `-[CALayer setDevice:]` **unrecognized selector**. A UIViewController's
+default view is a plain UIView whose layer is a CALayer; `RWVKView`'s
+`+layerClass` was never asked because `loadView` was not overridden, so
+`self.view.layer` was never a CAMetalLayer. `loadView` now makes the RWVKView
+(commit `ddc2c90`), the binary was rebuilt, and both images were repacked and
+re-verified against it. **The on-panel frame is still owed**: the picture the
+screenshot of that run shows is the home screen, not the triangle.
 
 **If it fails, the failure names the link:** `nextDrawable gave nil` (the Metal
 device or the drawable pool), `the drawable's IOSurface could not be reached`
