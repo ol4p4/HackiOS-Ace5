@@ -3859,4 +3859,56 @@ device or the drawable pool), `the drawable's IOSurface could not be reached`
 path), `the fence never signalled` (the GPU), or every readback wrong but the
 present called (the image queue / CA).
 
+### Step 14: the port's WSI layer, and the first pacing numbers (2026-11-09 21:07)
+
+The drawable half of a swapchain is no longer app code. `tools/vulkan/
+wsi_redwood.h`/`.m` owns the four things that belong to the window system —
+`nextDrawable`, the IOSurface by id (validated against the texture and the
+device), **the seed bump**, and the present (`presentDrawable:` + `commit`) —
+and `vk_triangle_app` is its first client; the Vulkan import stays with the
+client because it needs that client's VkDevice.
+
+The app now presents **240 frames back to back at startup** (no timer) and
+reports the frame cost and the interval between presents. One boot
+(log 20261109-210755, images root `4d9790e7…` / system `11021803…`) gave both
+sides of the answer:
+
+```
+vktriangle: BENCH layer: 120 of 120 frames, 0 failure(s)
+vktriangle: BENCH present interval (ms): min 1.445, median 1.649, mean 1.624, max 2.418
+vktriangle: BENCH layer: 615.8 fps over the window (1.6 ms/frame)
+
+vktriangle: BENCH app: 240 of 240 frames, 0 failure(s)
+vktriangle: BENCH frame (draw+readback, us): min 553.750, median 16675.625,
+            mean 18024.162, max 418595.417
+vktriangle: BENCH present interval (ms): min 0.554, median 16.676, mean 18.093,
+            max 418.596
+vktriangle: BENCH app: 55.3 fps over the window (18.1 ms/frame)
+```
+
+Read it this way:
+
+- **With a window, the loop is display-locked.** The median interval between
+  presents is **16.676 ms** — 59.97 Hz, the panel's 60 Hz — and the median
+  frame cost equals it (16.675 ms): `waitUntilCompleted` is where the display
+  wait lands. The path does not outrun the display, which is what a compositor
+  needs.
+- **Without a window, nothing paces it.** 1.6 ms/frame, 615.8 fps: the present
+  itself costs about a millisecond, and the 16.7 ms of the app is the display
+  link, not this port's CPU or GPU.
+- **One 418.6 ms stall at startup** (max interval) drags the mean to 18.1 ms /
+  55.3 fps; the median is untouched, so it is the launch hitch, not a
+  steady-state loss. Worth one look later; not chased now.
+- 240 presents, zero failures: the drawable pool never ran dry, which is the
+  proof that presents complete and are recycled.
+
+The screenshot after the bench (`20261109-211002`) still shows cyan with the
+red triangle: the picture stays up while the loop paces.
+
+**What this sets up.** The cadence a CA bridge must inherit is this 16.676 ms
+median, and the cost it has to fit inside is the 1.6 ms present. The next step
+on this line is a `VkSwapchainKHR` in the ICD over the same import (the loader
+has no WSI today: the instance was created with no extensions), or the CA
+bridge with the fluency lanes as acceptance.
+
 
