@@ -992,6 +992,15 @@ static unsigned rwvk_app_frames;
 
 @implementation RWVKController
 
+/* The view's class IS the program: a UIViewController's default view is a plain
+ * UIView with a CALayer, and -setDevice: on that is an unrecognized selector
+ * (measured on the first run: RedwoodVK[39] died in startFrames). RWVKView's
+ * +layerClass is what makes self.view.layer a CAMetalLayer. */
+- (void)loadView
+{
+	self.view = [[RWVKView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+}
+
 - (void)viewDidLoad
 {
 	[super viewDidLoad];
