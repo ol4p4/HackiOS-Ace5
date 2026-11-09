@@ -64,10 +64,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <mach/mach_time.h>
 
 #include <vulkan/vulkan.h>
 
 #include "triangle_spirv.h"
+#include "wsi_redwood.h"
 
 /* The ICD this port builds, and the two Metal constants triangle_app uses (they
  * are not exported, so they are reached by their distance from one that is). */
@@ -75,13 +77,6 @@
 #define RWVK_BUNDLE "/redwood/lib/RedwoodMetal.bundle"
 #define RWVK_MTL_CREATE_DEVICE_UNSLID 0x181a34b3cUL
 #define RWVK_MTL_ADD_DEVICE_UNSLID    0x181a1875cUL
-
-/* _CAMetalDrawablePrivate, the two fields this file validates before it believes
- * the third (src/triangle_app.m carries the encoding and docs/metal.md 10.46 the
- * instructions). A layout that moved makes the measurement absent, not wrong. */
-#define RWVK_PRIV_SURFACE 0x40
-#define RWVK_PRIV_TEXTURE 0x48
-#define RWVK_PRIV_DEVICE  0x50
 
 /* The ICD's own door (vulkan/vk_icd.h has it, not vulkan.h). */
 typedef PFN_vkVoidFunction (*icd_gipa_t)(VkInstance instance, const char *name);
@@ -198,48 +193,8 @@ rwvk_make_device(void)
 	return [system retain];
 }
 
-/* ----------------------------------------------------- the IOSurface behind the drawable */
-
-/*
- * The drawable's own IOSurface, through CAMetalDrawable's one ivar and validated
- * exactly as src/triangle_app.m does it: the structure is believed only after the
- * texture and the device it holds turn out to be the two this program already has.
- * The driver's texture answers nil to -iosurface (redwoodmetal.m), so there is no
- * way to ask Metal.
- */
-static IOSurfaceRef
-rwvk_surface_of_drawable(id drawable, id texture, id device)
-{
-	unsigned count = 0;
-	Ivar *ivars = class_copyIvarList(object_getClass(drawable), &count);
-	IOSurfaceRef surface = NULL;
-
-	for (unsigned i = 0; i < count && surface == NULL; i++) {
-		const char *type = ivar_getTypeEncoding(ivars[i]);
-		char *private;
-
-		if (type == NULL || strstr(type, "_CAMetalDrawablePrivate") == NULL)
-			continue;
-		private = *(char **)((char *)drawable + ivar_getOffset(ivars[i]));
-		if (private == NULL)
-			continue;
-		if (*(id *)(private + RWVK_PRIV_TEXTURE) != texture) {
-			rwvk_say("vktriangle: surface: %s holds a structure whose texture at "
-			    "+%#x is not this drawable's, so its layout has moved",
-			    ivar_getName(ivars[i]), RWVK_PRIV_TEXTURE);
-			continue;
-		}
-		if (*(id *)(private + RWVK_PRIV_DEVICE) != device) {
-			rwvk_say("vktriangle: surface: %s holds the right texture at +%#x and "
-			    "the wrong device at +%#x, so the layout is half right",
-			    ivar_getName(ivars[i]), RWVK_PRIV_TEXTURE, RWVK_PRIV_DEVICE);
-			continue;
-		}
-		surface = *(IOSurfaceRef *)(private + RWVK_PRIV_SURFACE);
-	}
-	free(ivars);
-	return surface;
-}
+/* The drawable half -- nextDrawable, the surface by id, the seed bump, the
+ * present -- lives in wsi_redwood.m; this program is its first client. */
 
 /* --------------------------------------------------------------------------- the Vulkan side */
 
@@ -275,6 +230,7 @@ struct rwvk {
  * rides. Declared here because rwvk_frame uses the queue: the drawable's own
  * -present is not enough on this port (the first on-panel run stayed black). */
 static struct rwvk rwvk_vulkan;
+static struct rw_wsi *rwvk_wsi;
 static id<MTLDevice> rwvk_metal;
 static id<MTLCommandQueue> rwvk_metal_queue;
 
@@ -797,46 +753,28 @@ rwvk_entry_for(struct rwvk *v, IOSurfaceRef surface, uint32_t width, uint32_t he
  * (two views of the same pages), the present is what puts it on the panel.
  */
 static int
-rwvk_frame(struct rwvk *v, CAMetalLayer *layer, int loud)
+rwvk_frame(struct rwvk *v, int loud)
 {
 	@autoreleasepool {
+		struct rw_wsi_image image;
+		char why[192];
+
 		if (loud)
-			rwvk_step("nextDrawable");
-		id<CAMetalDrawable> drawable = [layer nextDrawable];
-		if (drawable == nil) {
+			rwvk_step("rw_wsi_acquire (nextDrawable + the surface by id)");
+		if (rw_wsi_acquire(rwvk_wsi, &image, why, sizeof(why)) != 0) {
 			v->failures++;
-			rwvk_say("vktriangle: frame %u: nextDrawable gave nil (pool of %lu "
-			    "still in flight?)", v->frames + 1,
-			    (unsigned long)[layer maximumDrawableCount]);
+			rwvk_say("vktriangle: frame %u: %s", v->frames + 1, why);
 			return -1;
 		}
-		id<MTLTexture> texture = [drawable texture];
-		if (texture == nil) {
-			v->failures++;
-			rwvk_say("vktriangle: frame %u: the drawable's texture is nil",
-			    v->frames + 1);
-			return -1;
-		}
-		uint32_t width = (uint32_t)[texture width];
-		uint32_t height = (uint32_t)[texture height];
-		IOSurfaceRef surface = rwvk_surface_of_drawable(drawable, texture,
-		    layer.device);
+		IOSurfaceRef surface = image.surface;
+		uint32_t width = image.width;
+		uint32_t height = image.height;
 
 		v->frames++;
-		if (surface == NULL) {
-			v->failures++;
-			rwvk_say("vktriangle: frame %u: the drawable's IOSurface could not be "
-			    "reached", v->frames);
-			return -1;
-		}
 		if (loud)
-			rwvk_say("vktriangle: frame %u: drawable %s, texture %s, %ux%u, "
-			    "surface id %u, stride %zu, format %#x", v->frames,
-			    class_getName(object_getClass(drawable)),
-			    class_getName(object_getClass(texture)), width, height,
-			    (unsigned)IOSurfaceGetID(surface),
-			    IOSurfaceGetBytesPerRow(surface),
-			    (unsigned)IOSurfaceGetPixelFormat(surface));
+			rwvk_say("vktriangle: frame %u: surface id %u, %ux%u, stride %zu, "
+			    "format %#x", v->frames, image.sid, width, height,
+			    image.stride, image.pixel_format);
 		if (width == 0 || height == 0) {
 			v->failures++;
 			return -1;
@@ -894,31 +832,15 @@ rwvk_frame(struct rwvk *v, CAMetalLayer *layer, int loud)
 		}
 		pResetFences(v->device, 1, &v->fence);
 
-		/* THE SEED RULE (turnip_test step 12): the kernel invalidates this
-		 * processor's cached lines of a surface only when its seed moves, so
-		 * whoever wrote must say so or readers see the previous frame. */
-		if (IOSurfaceLock(surface, 0, NULL) == 0)
-			IOSurfaceUnlock(surface, 0, NULL);
-
-		/* Presentation. The drawable's own -present is not enough on this
-		 * port: the first on-panel run left the window black while the
-		 * surface held the right pixels (screenshot 20261109-202913). Metal's
-		 * path is Apple's -[MTLCommandBuffer presentDrawable:] and a commit:
-		 * the present is a scheduled handler that -commit delivers
-		 * (src/triangle_app.m says the same). The buffer carries no encoder,
-		 * so the driver's -commit has nothing to draw. */
+		/* The WSI half: the seed rule and the present live in wsi_redwood,
+		 * not here -- they belong to the window system, not to a client. */
 		if (loud)
-			rwvk_step("-[MTLCommandBuffer presentDrawable:] + commit");
-		id<MTLCommandBuffer> commit = [rwvk_metal_queue commandBuffer];
-		if (commit == nil) {
+			rwvk_step("rw_wsi_present (seed bump + presentDrawable + commit)");
+		if (rw_wsi_present(rwvk_wsi, &image, why, sizeof(why)) != 0) {
 			v->failures++;
-			rwvk_say("vktriangle: frame %u: the queue gave no command buffer",
-			    v->frames);
+			rwvk_say("vktriangle: frame %u: %s", v->frames, why);
 			return -1;
 		}
-		[commit presentDrawable:drawable];
-		[commit commit];
-		[commit waitUntilCompleted];
 
 		/* Read back through the surface, the same pages the panel reads. */
 		if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) == 0) {
@@ -1007,6 +929,85 @@ static CAMetalLayer *rwvk_layer;
 static NSTimer *rwvk_timer;
 static unsigned rwvk_app_frames;
 
+/* --------------------------------------------------------------------------- pacing */
+
+static int
+rwvk_compare_double(const void *a, const void *b)
+{
+	double x = *(const double *)a, y = *(const double *)b;
+
+	return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static void
+rwvk_stats(const char *name, double *values, unsigned count)
+{
+	double sum = 0;
+
+	if (count == 0)
+		return;
+	qsort(values, count, sizeof(*values), rwvk_compare_double);
+	for (unsigned i = 0; i < count; i++)
+		sum += values[i];
+	rwvk_say("vktriangle: BENCH %s: min %.3f, median %.3f, mean %.3f, max %.3f",
+	    name, values[0], values[count / 2], sum / count, values[count - 1]);
+}
+
+/*
+ * Present as fast as the window system takes frames, and say how fast that is.
+ * No timer: the loop is acquire -> draw -> present, back to back, so the
+ * interval between one present and the next is CA's own cadence (a display
+ * link throttles it; nothing here sleeps). The failure that matters is a nil
+ * nextDrawable part-way through -- the pool of drawables does not come back
+ * when presents are not completing -- and it is reported by frame number.
+ */
+static void
+rwvk_bench(struct rwvk *v, const char *where, unsigned frames)
+{
+	mach_timebase_info_data_t timebase;
+	double *frame_us = calloc(frames, sizeof(double));
+	double *gap_ms = calloc(frames, sizeof(double));
+	unsigned n = 0, counted = 0;
+	uint64_t previous = 0;
+
+	if (frame_us == NULL || gap_ms == NULL) {
+		free(frame_us);
+		free(gap_ms);
+		return;
+	}
+	mach_timebase_info(&timebase);
+	for (; n < frames; n++) {
+		uint64_t start = mach_absolute_time();
+		int failed = rwvk_frame(v, n < 3) != 0;
+		uint64_t end = mach_absolute_time();
+
+		if (failed)
+			break;
+		frame_us[counted] = (double)(end - start) * timebase.numer / timebase.denom / 1000.0;
+		if (previous != 0)
+			gap_ms[counted] = (double)(end - previous) * timebase.numer /
+			    timebase.denom / 1000000.0;
+		else
+			gap_ms[counted] = 0.0;
+		previous = end;
+		counted++;
+	}
+	rwvk_say("vktriangle: BENCH %s: %u of %u frames, %u failure(s)", where, counted,
+	    frames, v->failures);
+	rwvk_stats("frame (draw+readback, us)", frame_us, counted);
+	rwvk_stats("present interval (ms, 0 = first)", gap_ms + 1, counted > 1 ? counted - 1 : 0);
+	if (counted > 1) {
+		double elapsed = 0;
+
+		for (unsigned i = 1; i < counted; i++)
+			elapsed += gap_ms[i];
+		rwvk_say("vktriangle: BENCH %s: %.1f fps over the window (%.1f ms/frame)",
+		    where, (counted - 1) * 1000.0 / elapsed, elapsed / (counted - 1));
+	}
+	free(frame_us);
+	free(gap_ms);
+}
+
 @implementation RWVKController
 
 /* The view's class IS the program: a UIViewController's default view is a plain
@@ -1049,12 +1050,24 @@ static unsigned rwvk_app_frames;
 	    "%.1f (drawableSize %.0fx%.0f, CA's to choose)", class_getName(object_getClass(layer)),
 	    layer.bounds.size.width, layer.bounds.size.height, layer.contentsScale,
 	    layer.drawableSize.width, layer.drawableSize.height);
+	{
+		char why[192];
+
+		if (rw_wsi_open(&rwvk_wsi, layer, rwvk_metal, rwvk_metal_queue, why,
+		    sizeof(why)) != 0) {
+			rwvk_say("vktriangle: FAILED: %s", why);
+			return;
+		}
+	}
+	/* The first pacing measurement: present back to back, no timer, then the
+	 * half-second loop that leaves the picture on the panel. */
+	rwvk_bench(&rwvk_vulkan, "app", 240);
 	rwvk_timer = [NSTimer scheduledTimerWithTimeInterval:RWVK_APP_PERIOD_MS / 1000.0
 	    repeats:YES block:^(NSTimer *timer) {
 		int loud = rwvk_app_frames < 3 || (rwvk_app_frames % 10) == 0;
 
 		rwvk_app_frames++;
-		rwvk_frame(&rwvk_vulkan, rwvk_layer, loud);
+		rwvk_frame(&rwvk_vulkan, loud);
 		if (loud)
 			rwvk_say("vktriangle: app: frame %u done, %u failure(s) so far",
 			    rwvk_app_frames, rwvk_vulkan.failures);
@@ -1129,13 +1142,27 @@ rwvk_layer_mode(void)
 	layer.drawableSize = CGSizeMake(RWVK_LAYER_W, RWVK_LAYER_H);
 	rwvk_say("vktriangle: layer mode: a bare CAMetalLayer, %.0fx%.0f",
 	    layer.drawableSize.width, layer.drawableSize.height);
+	{
+		char why[192];
+
+		if (rw_wsi_open(&rwvk_wsi, layer, rwvk_metal, rwvk_metal_queue, why,
+		    sizeof(why)) != 0) {
+			rwvk_say("vktriangle: FAILED: %s", why);
+			return 1;
+		}
+	}
 	for (unsigned i = 0; i < RWVK_LAYER_FRAMES; i++)
-		failures += rwvk_frame(&rwvk_vulkan, layer, 1) != 0;
+		failures += rwvk_frame(&rwvk_vulkan, 1) != 0;
+	/* The same loop as the app's, in a process with no window: the gap to
+	 * compare against, when the app's cadence is read. */
+	rwvk_bench(&rwvk_vulkan, "layer", 120);
 
 	rwvk_say("vktriangle: layer mode: %u frame(s), %u failure(s): %s",
 	    rwvk_vulkan.frames, rwvk_vulkan.failures,
-	    rwvk_vulkan.failures == 0 && rwvk_vulkan.frames == RWVK_LAYER_FRAMES
+	    rwvk_vulkan.failures == 0 && rwvk_vulkan.frames >= RWVK_LAYER_FRAMES
 	        ? "PASS" : "FAIL");
+	rw_wsi_close(rwvk_wsi);
+	rwvk_wsi = NULL;
 	rwvk_close(&rwvk_vulkan);
 	return failures != 0 || rwvk_vulkan.failures != 0;
 }
