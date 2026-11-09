@@ -3822,6 +3822,37 @@ default view is a plain UIView whose layer is a CALayer; `RWVKView`'s
 re-verified against it. **The on-panel frame is still owed**: the picture the
 screenshot of that run shows is the home screen, not the triangle.
 
+**Third run, 2026-11-09 20:48 (log 20261109-204858): the panel shows the Vulkan
+frame. Step 13 is complete.** Gate `PASS (steps 1-12)`, `LAYER MODE: PASS`, then
+the application: frames 1–91 and on, `0 failure(s)`, each frame's readback exact.
+Two screenshots four seconds apart are the acceptance the log cannot give:
+`20261109-205051-screen.png` is **cyan with a red triangle**, and
+`20261109-205111-screen.png` is **green with a red triangle** — the clear
+alternates every eight frames, so the second picture is a second present, not a
+still. The whole chain is now measured on hardware end to end: CAMetalLayer
+drawable → IOSurface by id → Turnip import → ir3 draw → seed bump →
+`-[MTLCommandBuffer presentDrawable:]` → CAImageQueue → window server → panel.
+
+Two things had to change after the black-window runs, and both are now in
+`vk_triangle_app.m` (commit `3f11fec`):
+
+1. **Present rides a command buffer.** `-[CAMetalDrawable present]` alone left
+   the window black even though the surface held the right pixels; Apple's
+   `-[MTLCommandBuffer presentDrawable:]` followed by `-commit` is the path
+   `src/triangle_app.m` uses, and the present is a scheduled handler that
+   `-commit` delivers.
+2. **The drawable's size is CA's to choose.** The app had forced
+   `layer.drawableSize = 1125x2436` at `contentsScale` 3; the Metal application
+   that reached the panel never touches either. Left alone, CA hands the first
+   frames a 1125×2436 drawable and, once UIKit has laid the window out,
+   **375×812** (stride 1536) — exactly the size docs/ACE5.md records for the
+   Metal app. Both sizes import and draw; the one the compositor takes is
+   CA's.
+
+Final images for this step: small root `local/root-turnip-vk.apfs`
+(sha256 `09e01854…`) and system `local/system-metal-vk.apfs`
+(sha256 `5a10bb1f…`), both apfsck clean with every entry read back.
+
 **If it fails, the failure names the link:** `nextDrawable gave nil` (the Metal
 device or the drawable pool), `the drawable's IOSurface could not be reached`
 (the private layout moved), `vkAllocateMemory importing surface N` (the import
