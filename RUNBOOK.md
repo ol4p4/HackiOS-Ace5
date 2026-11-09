@@ -3953,4 +3953,27 @@ proves the import and the sampler, not linear sampling. Whether a LINEAR image
 can be sampled directly is the next question on this road, and it is the one
 that decides how close a zero-copy CA bridge can get.
 
+**The answer, same evening (2026-11-09 22:05): yes, LINEAR is sampled where it
+lies.** `vkGetPhysicalDeviceFormatProperties(B8G8R8A8_UNORM)` answers
+`linearTilingFeatures 0x1fd83` with `SAMPLED_IMAGE` set, and with
+`RWVK_SAMPLE_LINEAR=1` the app drops the tiled copy and puts the imported
+surface straight into `SHADER_READ_ONLY_OPTIMAL`. Run `20261109-220543`:
+
+```
+vktriangle: source: B8G8R8A8 linear tiling 0x1fd83 (sampled yes), optimal tiling 0x1fd83 (sampled yes)
+vktriangle: source: surface id 39, 256x256 0x42475241, imported linear,
+            sampled where it lies (no copy), sampled through a nearest sampler
+vktriangle: frame 1: sampled grid blue 28016, yellow 28012, other 0
+vktriangle: LAYER MODE: PASS
+vktriangle: BENCH app: 240 of 240 frames, 0 failure(s), 58.7 fps (17.0 ms/frame)
+```
+
+The counts are identical to the tiled road's, so the copy bought nothing:
+**reading an IOSurface zero-copy through Turnip is a measured fact on this
+driver**, and that is the read half of a CA bridge settled. The tiled road stays
+compiled in (`RWVK_SAMPLE_LINEAR=0`) as the comparison. The screenshot
+(`20261109-220747`) shows the checker on the panel.
+
+Images: small root `1984d6e7…`, system `bbdc449f…`.
+
 
