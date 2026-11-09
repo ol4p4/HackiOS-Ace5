@@ -69,6 +69,7 @@
 #include <vulkan/vulkan.h>
 
 #include "triangle_spirv.h"
+#include "composite_spirv.h"
 #include "wsi_redwood.h"
 
 /* The ICD this port builds, and the two Metal constants triangle_app uses (they
@@ -224,6 +225,22 @@ struct rwvk {
 	struct rwvk_entry entries[RWVK_ENTRIES];
 	unsigned entries_used;
 	unsigned frames, failures;
+
+	/* The source half of the composite (step 15): an IOSurface this program
+	 * fills, imported as a linear VkImage, copied once into a tiled image, and
+	 * sampled from there. The import is the bridge's read side: the pixels
+	 * come from surface memory, not from a buffer this program owns. */
+	IOSurfaceRef source_surface;
+	VkImage source_linear;
+	VkDeviceMemory source_linear_memory;
+	VkImage source_tiled;
+	VkDeviceMemory source_tiled_memory;
+	VkImageView source_view;
+	VkSampler sampler;
+	VkDescriptorSetLayout set_layout;
+	VkDescriptorPool descriptor_pool;
+	VkDescriptorSet descriptor_set;
+	unsigned source_width, source_height;
 };
 
 /* The process's one Vulkan context, its Metal device and the queue the present
@@ -289,6 +306,17 @@ static PFN_vkCmdBindPipeline pCmdBindPipeline;
 static PFN_vkCmdDraw pCmdDraw;
 static PFN_vkCmdSetViewport pCmdSetViewport;
 static PFN_vkCmdSetScissor pCmdSetScissor;
+static PFN_vkCmdBindDescriptorSets pCmdBindDescriptorSets;
+static PFN_vkCmdPipelineBarrier pCmdPipelineBarrier;
+static PFN_vkCmdCopyImage pCmdCopyImage;
+static PFN_vkCreateSampler pCreateSampler;
+static PFN_vkDestroySampler pDestroySampler;
+static PFN_vkCreateDescriptorSetLayout pCreateDescriptorSetLayout;
+static PFN_vkDestroyDescriptorSetLayout pDestroyDescriptorSetLayout;
+static PFN_vkCreateDescriptorPool pCreateDescriptorPool;
+static PFN_vkDestroyDescriptorPool pDestroyDescriptorPool;
+static PFN_vkAllocateDescriptorSets pAllocateDescriptorSets;
+static PFN_vkUpdateDescriptorSets pUpdateDescriptorSets;
 
 /* The clear colour changes every eight frames, so two screenshots taken apart
  * are two different pictures and a still frame is told from a live present. */
@@ -466,6 +494,17 @@ rwvk_open(struct rwvk *v)
 	RWVK_GDPA(v->device, "vkCmdDraw", pCmdDraw);
 	RWVK_GDPA(v->device, "vkCmdSetViewport", pCmdSetViewport);
 	RWVK_GDPA(v->device, "vkCmdSetScissor", pCmdSetScissor);
+	RWVK_GDPA(v->device, "vkCmdBindDescriptorSets", pCmdBindDescriptorSets);
+	RWVK_GDPA(v->device, "vkCmdPipelineBarrier", pCmdPipelineBarrier);
+	RWVK_GDPA(v->device, "vkCmdCopyImage", pCmdCopyImage);
+	RWVK_GDPA(v->device, "vkCreateSampler", pCreateSampler);
+	RWVK_GDPA(v->device, "vkDestroySampler", pDestroySampler);
+	RWVK_GDPA(v->device, "vkCreateDescriptorSetLayout", pCreateDescriptorSetLayout);
+	RWVK_GDPA(v->device, "vkDestroyDescriptorSetLayout", pDestroyDescriptorSetLayout);
+	RWVK_GDPA(v->device, "vkCreateDescriptorPool", pCreateDescriptorPool);
+	RWVK_GDPA(v->device, "vkDestroyDescriptorPool", pDestroyDescriptorPool);
+	RWVK_GDPA(v->device, "vkAllocateDescriptorSets", pAllocateDescriptorSets);
+	RWVK_GDPA(v->device, "vkUpdateDescriptorSets", pUpdateDescriptorSets);
 
 	pGetDeviceQueue(v->device, v->family, 0, &v->queue);
 	pGetPhysicalDeviceMemoryProperties(v->physical, &v->memory);
@@ -529,13 +568,13 @@ rwvk_open(struct rwvk *v)
 
 	VkShaderModuleCreateInfo vertexInfo = {
 	    .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-	    .codeSize = sizeof(triangle_vert_spirv),
-	    .pCode = triangle_vert_spirv,
+	    .codeSize = sizeof(composite_vert_spirv),
+	    .pCode = composite_vert_spirv,
 	};
 	VkShaderModuleCreateInfo fragmentInfo = {
 	    .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-	    .codeSize = sizeof(triangle_frag_spirv),
-	    .pCode = triangle_frag_spirv,
+	    .codeSize = sizeof(composite_frag_spirv),
+	    .pCode = composite_frag_spirv,
 	};
 	if (pCreateShaderModule(v->device, &vertexInfo, NULL, &v->vertex) != VK_SUCCESS ||
 	    pCreateShaderModule(v->device, &fragmentInfo, NULL, &v->fragment) != VK_SUCCESS) {
@@ -593,8 +632,41 @@ rwvk_open(struct rwvk *v)
 	    .attachmentCount = 1,
 	    .pAttachments = &blendAttachment,
 	};
+	/* The single descriptor the composite samples through: a combined image
+	 * sampler in set 0, binding 0, read by the fragment stage. */
+	VkSamplerCreateInfo samplerInfo = {
+	    .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+	    .magFilter = VK_FILTER_NEAREST,
+	    .minFilter = VK_FILTER_NEAREST,
+	    .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+	    .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+	    .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+	    .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+	    .maxLod = 0.0f,
+	};
+	if (pCreateSampler(v->device, &samplerInfo, NULL, &v->sampler) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: vkCreateSampler");
+		return -1;
+	}
+	VkDescriptorSetLayoutBinding sourceBinding = {
+	    .binding = 0,
+	    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+	    .descriptorCount = 1,
+	    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+	};
+	VkDescriptorSetLayoutCreateInfo setInfo = {
+	    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+	    .bindingCount = 1,
+	    .pBindings = &sourceBinding,
+	};
+	if (pCreateDescriptorSetLayout(v->device, &setInfo, NULL, &v->set_layout) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: vkCreateDescriptorSetLayout");
+		return -1;
+	}
 	VkPipelineLayoutCreateInfo layoutInfo = {
 	    .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+	    .setLayoutCount = 1,
+	    .pSetLayouts = &v->set_layout,
 	};
 	if (pCreatePipelineLayout(v->device, &layoutInfo, NULL, &v->layout) != VK_SUCCESS) {
 		rwvk_say("vktriangle: FAILED: vkCreatePipelineLayout");
@@ -621,8 +693,8 @@ rwvk_open(struct rwvk *v)
 		rwvk_say("vktriangle: FAILED: vkCreateGraphicsPipelines %d", result);
 		return -1;
 	}
-	rwvk_say("vktriangle: Vulkan up: %s, our B8G8R8A8 pass, the red-triangle pipeline",
-	    "Turnip");
+	rwvk_say("vktriangle: Vulkan up: %s, our B8G8R8A8 pass, the sampled-source "
+	    "composite pipeline", "Turnip");
 	return 0;
 }
 
@@ -747,6 +819,278 @@ rwvk_entry_for(struct rwvk *v, IOSurfaceRef surface, uint32_t width, uint32_t he
 	return entry;
 }
 
+/* ------------------------------------------------- the source half of the composite */
+
+/*
+ * A surface this program fills with an 8x8 checker, imported by its id and
+ * copied once into a tiled image the sampler reads. This is the bridge's read
+ * side in miniature: the pixels come out of IOSurface memory through the same
+ * import Turnip uses for a drawable, and the two colours (blue 0,0,255 and
+ * yellow 255,255,0, opposite in every channel) make a channel swap or a stride
+ * mistake countable instead of plausible.
+ *
+ * The copy is deliberate for this step: whether a LINEAR image can be sampled
+ * directly is the next question, and a copy into the driver's own tiling keeps
+ * this step's failure about the import and the sampler, not about tiling.
+ */
+static int
+rwvk_make_source(struct rwvk *v)
+{
+	const uint32_t size = 256, cell = 32;
+	CFMutableDictionaryRef props;
+	CFNumberRef number;
+	int value;
+	IOSurfaceRef surface;
+	VkImageCreateInfo linearInfo, tiledInfo;
+	VkExternalMemoryImageCreateInfo external = {
+	    .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+	    .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	};
+	VkMemoryRequirements requirements;
+	uint32_t type;
+	VkImportMemoryFdInfoKHR import = {
+	    .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+	    .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	};
+	VkMemoryAllocateInfo allocate = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+	VkImageMemoryBarrier barriers[2] = {
+	    { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+	      .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+	      .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	      .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+	      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+	      .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } },
+	    { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+	      .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+	      .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	      .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+	      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+	      .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } },
+	};
+	VkImageMemoryBarrier ready = {
+	    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+	    .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+	    .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+	    .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	    .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+	    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+	    .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+	};
+	VkImageCopy copy = {
+	    .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+	    .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+	    .extent = { size, size, 1 },
+	};
+	VkSubmitInfo submit = {
+	    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+	    .commandBufferCount = 1,
+	    .pCommandBuffers = &v->commands,
+	};
+	VkImageViewCreateInfo viewInfo = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+	VkDescriptorPoolSize poolSize = {
+	    .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+	    .descriptorCount = 1,
+	};
+	VkDescriptorPoolCreateInfo poolInfo = {
+	    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+	    .maxSets = 1,
+	    .poolSizeCount = 1,
+	    .pPoolSizes = &poolSize,
+	};
+	VkDescriptorSetAllocateInfo setAllocate = {
+	    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+	    .descriptorSetCount = 1,
+	    .pSetLayouts = &v->set_layout,
+	};
+	VkDescriptorImageInfo imageInfo = {
+	    .sampler = v->sampler,
+	    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	};
+	VkWriteDescriptorSet write = {
+	    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+	    .descriptorCount = 1,
+	    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+	    .pImageInfo = &imageInfo,
+	};
+
+	/* The surface, filled with the checker and announced (the seed rule). */
+	props = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+	    &kCFTypeDictionaryValueCallBacks);
+	value = (int)size;
+	number = CFNumberCreate(NULL, kCFNumberIntType, &value);
+	CFDictionarySetValue(props, kIOSurfaceWidth, number); CFRelease(number);
+	CFDictionarySetValue(props, kIOSurfaceHeight, number); CFRelease(number);
+	value = 4;
+	number = CFNumberCreate(NULL, kCFNumberIntType, &value);
+	CFDictionarySetValue(props, kIOSurfaceBytesPerElement, number); CFRelease(number);
+	value = (int)size * 4;
+	number = CFNumberCreate(NULL, kCFNumberIntType, &value);
+	CFDictionarySetValue(props, kIOSurfaceBytesPerRow, number); CFRelease(number);
+	value = 0x42475241;                     /* 'BGRA' */
+	number = CFNumberCreate(NULL, kCFNumberIntType, &value);
+	CFDictionarySetValue(props, kIOSurfacePixelFormat, number); CFRelease(number);
+	surface = IOSurfaceCreate(props);
+	CFRelease(props);
+	if (surface == NULL) {
+		rwvk_say("vktriangle: FAILED: no source IOSurface");
+		return -1;
+	}
+	if (IOSurfaceLock(surface, 0, NULL) != 0) {
+		rwvk_say("vktriangle: FAILED: the source surface would not lock for writing");
+		return -1;
+	}
+	{
+		uint8_t *base = IOSurfaceGetBaseAddress(surface);
+		size_t stride = IOSurfaceGetBytesPerRow(surface);
+
+		for (uint32_t y = 0; y < size; y++) {
+			for (uint32_t x = 0; x < size; x++) {
+				uint8_t *p = base + (size_t)y * stride + (size_t)x * 4;
+				if (((x / cell) ^ (y / cell)) & 1) {
+					p[0] = 0; p[1] = 255; p[2] = 255;   /* yellow, BGRA */
+				} else {
+					p[0] = 255; p[1] = 0; p[2] = 0;      /* blue, BGRA */
+				}
+				p[3] = 255;
+			}
+		}
+	}
+	IOSurfaceUnlock(surface, 0, NULL);
+	v->source_surface = surface;
+	v->source_width = v->source_height = size;
+
+	/* The imported linear image. */
+	linearInfo = (VkImageCreateInfo){
+	    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+	    .pNext = &external,
+	    .imageType = VK_IMAGE_TYPE_2D,
+	    .format = VK_FORMAT_B8G8R8A8_UNORM,
+	    .extent = { size, size, 1 },
+	    .mipLevels = 1,
+	    .arrayLayers = 1,
+	    .samples = VK_SAMPLE_COUNT_1_BIT,
+	    .tiling = VK_IMAGE_TILING_LINEAR,
+	    .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+	    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+	    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	};
+	if (pCreateImage(v->device, &linearInfo, NULL, &v->source_linear) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: vkCreateImage(source, linear)");
+		return -1;
+	}
+	pGetImageMemoryRequirements(v->device, v->source_linear, &requirements);
+	type = UINT32_MAX;
+	for (uint32_t i = 0; i < v->memory.memoryTypeCount; i++) {
+		if ((requirements.memoryTypeBits & (1u << i)) &&
+		    !(v->memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+			type = i;
+			break;
+		}
+	}
+	for (uint32_t i = 0; i < v->memory.memoryTypeCount && type == UINT32_MAX; i++) {
+		if (requirements.memoryTypeBits & (1u << i))
+			type = i;
+	}
+	if (type == UINT32_MAX) {
+		rwvk_say("vktriangle: FAILED: no memory type for the source import");
+		return -1;
+	}
+	import.fd = (int)IOSurfaceGetID(surface);
+	allocate.pNext = &import;
+	allocate.allocationSize = requirements.size;
+	allocate.memoryTypeIndex = type;
+	if (pAllocateMemory(v->device, &allocate, NULL, &v->source_linear_memory) != VK_SUCCESS ||
+	    pBindImageMemory(v->device, v->source_linear, v->source_linear_memory, 0) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: the source import did not bind (id %u)",
+		    (unsigned)IOSurfaceGetID(surface));
+		return -1;
+	}
+
+	/* The tiled image the sampler reads. */
+	tiledInfo = linearInfo;
+	tiledInfo.pNext = NULL;
+	tiledInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	tiledInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	if (pCreateImage(v->device, &tiledInfo, NULL, &v->source_tiled) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: vkCreateImage(source, tiled)");
+		return -1;
+	}
+	pGetImageMemoryRequirements(v->device, v->source_tiled, &requirements);
+	type = UINT32_MAX;
+	for (uint32_t i = 0; i < v->memory.memoryTypeCount; i++) {
+		if ((requirements.memoryTypeBits & (1u << i)) &&
+		    !(v->memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+			type = i;
+			break;
+		}
+	}
+	for (uint32_t i = 0; i < v->memory.memoryTypeCount && type == UINT32_MAX; i++) {
+		if (requirements.memoryTypeBits & (1u << i))
+			type = i;
+	}
+	if (type == UINT32_MAX) {
+		rwvk_say("vktriangle: FAILED: no memory type for the tiled source");
+		return -1;
+	}
+	allocate.pNext = NULL;
+	allocate.allocationSize = requirements.size;
+	allocate.memoryTypeIndex = type;
+	if (pAllocateMemory(v->device, &allocate, NULL, &v->source_tiled_memory) != VK_SUCCESS ||
+	    pBindImageMemory(v->device, v->source_tiled, v->source_tiled_memory, 0) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: the tiled source did not bind");
+		return -1;
+	}
+
+	/* One command: import -> tiled, then the tiled image ready to sample. */
+	barriers[0].image = v->source_linear;
+	barriers[1].image = v->source_tiled;
+	ready.image = v->source_tiled;
+	if (pResetCommandBuffer(v->commands, 0) != VK_SUCCESS ||
+	    pBeginCommandBuffer(v->commands, &(VkCommandBufferBeginInfo){
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }) != VK_SUCCESS)
+		return -1;
+	pCmdPipelineBarrier(v->commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+	    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, barriers);
+	pCmdCopyImage(v->commands, v->source_linear, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	    v->source_tiled, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+	pCmdPipelineBarrier(v->commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
+	    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &ready);
+	if (pEndCommandBuffer(v->commands) != VK_SUCCESS)
+		return -1;
+	if (pQueueSubmit(v->queue, 1, &submit, v->fence) != VK_SUCCESS ||
+	    pWaitForFences(v->device, 1, &v->fence, VK_TRUE, 3000000000ull) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: the source copy never completed");
+		return -1;
+	}
+	pResetFences(v->device, 1, &v->fence);
+
+	viewInfo.image = v->source_tiled;
+	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	viewInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
+	viewInfo.subresourceRange = (VkImageSubresourceRange){
+	    VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	if (pCreateImageView(v->device, &viewInfo, NULL, &v->source_view) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: vkCreateImageView(source)");
+		return -1;
+	}
+	if (pCreateDescriptorPool(v->device, &poolInfo, NULL, &v->descriptor_pool) != VK_SUCCESS ||
+	    pAllocateDescriptorSets(v->device, &setAllocate, &v->descriptor_set) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: the descriptor set");
+		return -1;
+	}
+	imageInfo.imageView = v->source_view;
+	write.dstSet = v->descriptor_set;
+	pUpdateDescriptorSets(v->device, 1, &write, 0, NULL);
+	rwvk_say("vktriangle: source: surface id %u, %ux%u %#x, imported linear, copied "
+	    "once into a tiled image, sampled through a nearest sampler",
+	    (unsigned)IOSurfaceGetID(surface), size, size,
+	    (unsigned)IOSurfaceGetPixelFormat(surface));
+	return 0;
+}
+
 /*
  * One frame: draw into the surface, announce the write, present it, then read it
  * back through the surface the display will read. The read is the honest check
@@ -806,6 +1150,8 @@ rwvk_frame(struct rwvk *v, int loud)
 		VkRect2D scissor = { { 0, 0 }, { width, height } };
 		pCmdBeginRenderPass(v->commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
 		pCmdBindPipeline(v->commands, VK_PIPELINE_BIND_POINT_GRAPHICS, v->pipeline);
+		pCmdBindDescriptorSets(v->commands, VK_PIPELINE_BIND_POINT_GRAPHICS, v->layout,
+		    0, 1, &v->descriptor_set, 0, NULL);
 		pCmdSetViewport(v->commands, 0, 1, &viewport);
 		pCmdSetScissor(v->commands, 0, 1, &scissor);
 		pCmdDraw(v->commands, 3, 1, 0, 0);
@@ -842,30 +1188,37 @@ rwvk_frame(struct rwvk *v, int loud)
 			return -1;
 		}
 
-		/* Read back through the surface, the same pages the panel reads. */
+		/* Read back through the surface, the same pages the panel reads. The
+		 * check is the composite's: every sampled pixel must be one of the
+		 * source's two colours (blue B255 G0 R0, yellow B0 G255 R255), and
+		 * both must be present -- a clear colour, a black surface or a
+		 * uniform one are the three ways a broken sampler shows. */
 		if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) == 0) {
 			const uint8_t *bytes = IOSurfaceGetBaseAddress(surface);
 			size_t stride = IOSurfaceGetBytesPerRow(surface);
-			const uint8_t *corner = bytes + stride + 4;          /* (1,1) */
-			const uint8_t *middle = bytes + (size_t)(height / 2) * stride + (width / 2) * 4;
-			/* the clear alternates every eight frames (rwvk_clear_for), and the
-			 * corner check knows which picture this frame asked for */
-			int cyan = ((v->frames / 8) & 1) != 0;
-			int corner_ok = corner[2] < 40 && corner[1] > 200 &&
-			    (cyan ? corner[0] > 200 : corner[0] < 40);
-			int middle_ok = middle[2] > 200 && middle[0] < 40 && middle[1] < 40;
+			unsigned blue = 0, yellow = 0, other = 0;
 
+			for (uint32_t y = 0; y < height; y += 7) {
+				for (uint32_t x = 0; x < width; x += 7) {
+					const uint8_t *p = bytes + (size_t)y * stride + (size_t)x * 4;
+
+					if (p[0] > 200 && p[1] < 60 && p[2] < 60)
+						blue++;
+					else if (p[0] < 60 && p[1] > 200 && p[2] > 200)
+						yellow++;
+					else
+						other++;
+				}
+			}
 			IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
 			if (loud)
-				rwvk_say("vktriangle: frame %u: corner BGRA %u %u %u %u, "
-				    "middle BGRA %u %u %u %u", v->frames,
-				    corner[0], corner[1], corner[2], corner[3],
-				    middle[0], middle[1], middle[2], middle[3]);
-			if (!corner_ok || !middle_ok) {
+				rwvk_say("vktriangle: frame %u: sampled grid blue %u, yellow %u, "
+				    "other %u", v->frames, blue, yellow, other);
+			if (other * 20 > (blue + yellow + other) || blue == 0 || yellow == 0) {
 				v->failures++;
-				rwvk_say("vktriangle: frame %u: FAILED: the drawable does not "
-				    "hold the draw (corner %s, middle %s)", v->frames,
-				    corner_ok ? "ok" : "wrong", middle_ok ? "ok" : "wrong");
+				rwvk_say("vktriangle: frame %u: FAILED: the drawable does not hold the "
+				    "composite (blue %u, yellow %u, other %u)", v->frames, blue,
+				    yellow, other);
 				return -1;
 			}
 		} else {
@@ -890,6 +1243,24 @@ rwvk_close(struct rwvk *v)
 		if (v->entries[i].memory)
 			pFreeMemory(v->device, v->entries[i].memory, NULL);
 	}
+	if (v->source_view)
+		pDestroyImageView(v->device, v->source_view, NULL);
+	if (v->descriptor_pool)
+		pDestroyDescriptorPool(v->device, v->descriptor_pool, NULL);
+	if (v->set_layout)
+		pDestroyDescriptorSetLayout(v->device, v->set_layout, NULL);
+	if (v->sampler)
+		pDestroySampler(v->device, v->sampler, NULL);
+	if (v->source_tiled)
+		pDestroyImage(v->device, v->source_tiled, NULL);
+	if (v->source_tiled_memory)
+		pFreeMemory(v->device, v->source_tiled_memory, NULL);
+	if (v->source_linear)
+		pDestroyImage(v->device, v->source_linear, NULL);
+	if (v->source_linear_memory)
+		pFreeMemory(v->device, v->source_linear_memory, NULL);
+	if (v->source_surface)
+		CFRelease(v->source_surface);
 	if (v->pipeline)
 		pDestroyPipeline(v->device, v->pipeline, NULL);
 	if (v->layout)
@@ -1099,6 +1470,10 @@ rwvk_bench(struct rwvk *v, const char *where, unsigned frames)
 	}
 	if (rwvk_open(&rwvk_vulkan) != 0)
 		return YES;
+	if (rwvk_make_source(&rwvk_vulkan) != 0) {
+		rwvk_say("vktriangle: FAILED: no source to composite");
+		return YES;
+	}
 	self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
 	self.window.rootViewController = [[RWVKController alloc] init];
 	[self.window makeKeyAndVisible];
@@ -1133,6 +1508,10 @@ rwvk_layer_mode(void)
 	}
 	if (rwvk_open(&rwvk_vulkan) != 0)
 		return 1;
+	if (rwvk_make_source(&rwvk_vulkan) != 0) {
+		rwvk_say("vktriangle: FAILED: no source to composite");
+		return 1;
+	}
 	layer = [[CAMetalLayer alloc] init];
 	layer.device = rwvk_metal;
 	layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
