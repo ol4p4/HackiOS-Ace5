@@ -276,6 +276,12 @@ struct rwvk {
 	VkImage source_tiled;
 	VkDeviceMemory source_tiled_memory;
 	VkImageView source_view;
+
+	/* The upper layer (step 16): a red wash whose alpha runs left to right. */
+	IOSurfaceRef overlay_surface;
+	VkImage overlay_image;
+	VkDeviceMemory overlay_memory;
+	VkImageView overlay_view;
 	VkSampler sampler;
 	VkDescriptorSetLayout set_layout;
 	VkDescriptorPool descriptor_pool;
@@ -617,8 +623,8 @@ rwvk_open(struct rwvk *v)
 	};
 	VkShaderModuleCreateInfo fragmentInfo = {
 	    .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-	    .codeSize = sizeof(composite_frag_spirv),
-	    .pCode = composite_frag_spirv,
+	    .codeSize = sizeof(composite2_frag_spirv),
+	    .pCode = composite2_frag_spirv,
 	};
 	if (pCreateShaderModule(v->device, &vertexInfo, NULL, &v->vertex) != VK_SUCCESS ||
 	    pCreateShaderModule(v->device, &fragmentInfo, NULL, &v->fragment) != VK_SUCCESS) {
@@ -692,16 +698,20 @@ rwvk_open(struct rwvk *v)
 		rwvk_say("vktriangle: FAILED: vkCreateSampler");
 		return -1;
 	}
-	VkDescriptorSetLayoutBinding sourceBinding = {
-	    .binding = 0,
-	    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-	    .descriptorCount = 1,
-	    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+	VkDescriptorSetLayoutBinding sourceBindings[2] = {
+	    { .binding = 0,
+	      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+	      .descriptorCount = 1,
+	      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+	    { .binding = 1,
+	      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+	      .descriptorCount = 1,
+	      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
 	};
 	VkDescriptorSetLayoutCreateInfo setInfo = {
 	    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-	    .bindingCount = 1,
-	    .pBindings = &sourceBinding,
+	    .bindingCount = 2,
+	    .pBindings = sourceBindings,
 	};
 	if (pCreateDescriptorSetLayout(v->device, &setInfo, NULL, &v->set_layout) != VK_SUCCESS) {
 		rwvk_say("vktriangle: FAILED: vkCreateDescriptorSetLayout");
@@ -866,12 +876,14 @@ rwvk_entry_for(struct rwvk *v, IOSurfaceRef surface, uint32_t width, uint32_t he
 /* ------------------------------------------------- the source half of the composite */
 
 /*
- * A surface this program fills with an 8x8 checker, imported by its id and
- * copied once into a tiled image the sampler reads. This is the bridge's read
- * side in miniature: the pixels come out of IOSurface memory through the same
- * import Turnip uses for a drawable, and the two colours (blue 0,0,255 and
- * yellow 255,255,0, opposite in every channel) make a channel swap or a stride
- * mistake countable instead of plausible.
+ * A surface this program fills with vertical blue/yellow stripes, imported by
+ * its id and sampled where it lies. This is the bridge's read side: the pixels
+ * come out of IOSurface memory through the same import Turnip uses for a
+ * drawable, and the two colours (blue 0,0,255 and yellow 255,255,0, opposite in
+ * every channel) make a channel swap or a stride mistake countable instead of
+ * plausible. Stripes, not a checker: the blend check reads them back against an
+ * expected value, and a pattern that changes with x alone cannot be wrong about
+ * which end of the surface the sampler calls v = 0.
  *
  * The copy is deliberate for this step: whether a LINEAR image can be sampled
  * directly is the next question, and a copy into the driver's own tiling keeps
@@ -936,7 +948,7 @@ rwvk_make_source(struct rwvk *v)
 	VkImageViewCreateInfo viewInfo = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
 	VkDescriptorPoolSize poolSize = {
 	    .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-	    .descriptorCount = 1,
+	    .descriptorCount = 2,
 	};
 	VkDescriptorPoolCreateInfo poolInfo = {
 	    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1005,7 +1017,10 @@ rwvk_make_source(struct rwvk *v)
 		for (uint32_t y = 0; y < size; y++) {
 			for (uint32_t x = 0; x < size; x++) {
 				uint8_t *p = base + (size_t)y * stride + (size_t)x * 4;
-				if (((x / cell) ^ (y / cell)) & 1) {
+				/* vertical stripes, not a checker: the blend check must
+				 * not depend on which end of the surface the sampler calls
+				 * v = 0, and a colour that changes with x alone cannot. */
+				if ((x / cell) & 1) {
 					p[0] = 0; p[1] = 255; p[2] = 255;   /* yellow, BGRA */
 				} else {
 					p[0] = 255; p[1] = 0; p[2] = 0;      /* blue, BGRA */
@@ -1186,13 +1201,182 @@ rwvk_make_source(struct rwvk *v)
 	}
 	imageInfo.imageView = v->source_view;
 	write.dstSet = v->descriptor_set;
+	write.dstBinding = 0;
 	pUpdateDescriptorSets(v->device, 1, &write, 0, NULL);
 	rwvk_say("vktriangle: source: surface id %u, %ux%u %#x, imported linear, %s, "
-	    "sampled through a nearest sampler",
+	    "sampled through a nearest sampler (vertical stripes)",
 	    (unsigned)IOSurfaceGetID(surface), size, size,
 	    (unsigned)IOSurfaceGetPixelFormat(surface),
 	    RWVK_SAMPLE_LINEAR ? "sampled where it lies (no copy)"
 	                       : "copied once into a tiled image");
+	return 0;
+}
+
+
+/*
+ * The upper layer of the composite: a red wash whose alpha runs 0 at the left
+ * edge to 255 at the right. Imported the same zero-copy way as the under layer
+ * and bound to set 0, binding 1; the blend itself is the fragment shader's.
+ */
+static int
+rwvk_make_overlay(struct rwvk *v)
+{
+	const uint32_t size = 256;
+	CFMutableDictionaryRef props;
+	CFNumberRef number;
+	int value;
+	IOSurfaceRef surface;
+	VkExternalMemoryImageCreateInfo external = {
+	    .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+	    .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	};
+	VkImageCreateInfo info = {
+	    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+	    .pNext = &external,
+	    .imageType = VK_IMAGE_TYPE_2D,
+	    .format = VK_FORMAT_B8G8R8A8_UNORM,
+	    .extent = { size, size, 1 },
+	    .mipLevels = 1,
+	    .arrayLayers = 1,
+	    .samples = VK_SAMPLE_COUNT_1_BIT,
+	    .tiling = VK_IMAGE_TILING_LINEAR,
+	    .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+	    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+	    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	};
+	VkMemoryRequirements requirements;
+	uint32_t type = UINT32_MAX;
+	VkImportMemoryFdInfoKHR import = {
+	    .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+	    .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	};
+	VkMemoryAllocateInfo allocate = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+	VkImageMemoryBarrier ready = {
+	    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+	    .srcAccessMask = 0,
+	    .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+	    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	    .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+	    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+	    .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+	};
+	VkSubmitInfo submit = {
+	    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+	    .commandBufferCount = 1,
+	    .pCommandBuffers = &v->commands,
+	};
+	VkImageViewCreateInfo viewInfo = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+	VkDescriptorImageInfo imageInfo = {
+	    .sampler = v->sampler,
+	    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	};
+	VkWriteDescriptorSet write = {
+	    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+	    .dstSet = v->descriptor_set,
+	    .dstBinding = 1,
+	    .descriptorCount = 1,
+	    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+	    .pImageInfo = &imageInfo,
+	};
+
+	props = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+	    &kCFTypeDictionaryValueCallBacks);
+	value = (int)size;
+	number = CFNumberCreate(NULL, kCFNumberIntType, &value);
+	CFDictionarySetValue(props, kIOSurfaceWidth, number); CFRelease(number);
+	CFDictionarySetValue(props, kIOSurfaceHeight, number); CFRelease(number);
+	value = 4;
+	number = CFNumberCreate(NULL, kCFNumberIntType, &value);
+	CFDictionarySetValue(props, kIOSurfaceBytesPerElement, number); CFRelease(number);
+	value = (int)size * 4;
+	number = CFNumberCreate(NULL, kCFNumberIntType, &value);
+	CFDictionarySetValue(props, kIOSurfaceBytesPerRow, number); CFRelease(number);
+	value = 0x42475241;
+	number = CFNumberCreate(NULL, kCFNumberIntType, &value);
+	CFDictionarySetValue(props, kIOSurfacePixelFormat, number); CFRelease(number);
+	surface = IOSurfaceCreate(props);
+	CFRelease(props);
+	if (surface == NULL || IOSurfaceLock(surface, 0, NULL) != 0) {
+		rwvk_say("vktriangle: FAILED: no overlay surface");
+		return -1;
+	}
+	{
+		uint8_t *base = IOSurfaceGetBaseAddress(surface);
+		size_t stride = IOSurfaceGetBytesPerRow(surface);
+
+		for (uint32_t y = 0; y < size; y++) {
+			for (uint32_t x = 0; x < size; x++) {
+				uint8_t *p = base + (size_t)y * stride + (size_t)x * 4;
+
+				p[0] = 0; p[1] = 0; p[2] = 255;    /* red, BGRA */
+				p[3] = (uint8_t)x;                  /* alpha 0..255 left to right */
+			}
+		}
+	}
+	IOSurfaceUnlock(surface, 0, NULL);
+	v->overlay_surface = surface;
+
+	if (pCreateImage(v->device, &info, NULL, &v->overlay_image) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: vkCreateImage(overlay)");
+		return -1;
+	}
+	pGetImageMemoryRequirements(v->device, v->overlay_image, &requirements);
+	for (uint32_t i = 0; i < v->memory.memoryTypeCount; i++) {
+		if ((requirements.memoryTypeBits & (1u << i)) &&
+		    !(v->memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+			type = i;
+			break;
+		}
+	}
+	for (uint32_t i = 0; i < v->memory.memoryTypeCount && type == UINT32_MAX; i++) {
+		if (requirements.memoryTypeBits & (1u << i))
+			type = i;
+	}
+	if (type == UINT32_MAX) {
+		rwvk_say("vktriangle: FAILED: no memory type for the overlay");
+		return -1;
+	}
+	import.fd = (int)IOSurfaceGetID(surface);
+	allocate.pNext = &import;
+	allocate.allocationSize = requirements.size;
+	allocate.memoryTypeIndex = type;
+	if (pAllocateMemory(v->device, &allocate, NULL, &v->overlay_memory) != VK_SUCCESS ||
+	    pBindImageMemory(v->device, v->overlay_image, v->overlay_memory, 0) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: the overlay import did not bind");
+		return -1;
+	}
+	ready.image = v->overlay_image;
+	if (pResetCommandBuffer(v->commands, 0) != VK_SUCCESS ||
+	    pBeginCommandBuffer(v->commands, &(VkCommandBufferBeginInfo){
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }) != VK_SUCCESS)
+		return -1;
+	pCmdPipelineBarrier(v->commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+	    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &ready);
+	if (pEndCommandBuffer(v->commands) != VK_SUCCESS)
+		return -1;
+	if (pQueueSubmit(v->queue, 1, &submit, v->fence) != VK_SUCCESS ||
+	    pWaitForFences(v->device, 1, &v->fence, VK_TRUE, 3000000000ull) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: the overlay never became sampled");
+		return -1;
+	}
+	pResetFences(v->device, 1, &v->fence);
+
+	viewInfo.image = v->overlay_image;
+	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	viewInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
+	viewInfo.subresourceRange = (VkImageSubresourceRange){
+	    VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	if (pCreateImageView(v->device, &viewInfo, NULL, &v->overlay_view) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: vkCreateImageView(overlay)");
+		return -1;
+	}
+	imageInfo.imageView = v->overlay_view;
+	pUpdateDescriptorSets(v->device, 1, &write, 0, NULL);
+	rwvk_say("vktriangle: overlay: surface id %u, %ux%u %#x, red with alpha 0..255 "
+	    "left to right, sampled where it lies",
+	    (unsigned)IOSurfaceGetID(surface), size, size,
+	    (unsigned)IOSurfaceGetPixelFormat(surface));
 	return 0;
 }
 
@@ -1294,36 +1478,59 @@ rwvk_frame(struct rwvk *v, int loud)
 		}
 
 		/* Read back through the surface, the same pages the panel reads. The
-		 * check is the composite's: every sampled pixel must be one of the
-		 * source's two colours (blue B255 G0 R0, yellow B0 G255 R255), and
-		 * both must be present -- a clear colour, a black surface or a
-		 * uniform one are the three ways a broken sampler shows. */
+		 * check is the blend's: for every sampled pixel the expected byte is
+		 * computed from the same inputs the shader had -- the under checker at
+		 * that texel, and the overlay's alpha at that column -- and compared
+		 * within a byte or two of rounding. A compositor that dropped the
+		 * overlay, the under layer, or the alpha is counted, not looked at. */
 		if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) == 0) {
 			const uint8_t *bytes = IOSurfaceGetBaseAddress(surface);
 			size_t stride = IOSurfaceGetBytesPerRow(surface);
-			unsigned blue = 0, yellow = 0, other = 0;
+			unsigned good = 0, wrong = 0, red_edge = 0, under_edge = 0;
 
 			for (uint32_t y = 0; y < height; y += 7) {
 				for (uint32_t x = 0; x < width; x += 7) {
 					const uint8_t *p = bytes + (size_t)y * stride + (size_t)x * 4;
+					double u = (x + 0.5) / width;
+					double v = 1.0 - (y + 0.5) / height;
+					int cx = (int)(u * 256);
+					int cy = (int)(v * 256);
+					int stripe;
+					double a, under_r, under_g, under_b, out_r, out_g, out_b;
 
-					if (p[0] > 200 && p[1] < 60 && p[2] < 60)
-						blue++;
-					else if (p[0] < 60 && p[1] > 200 && p[2] > 200)
-						yellow++;
+					if (cx > 255) cx = 255;
+					if (cy > 255) cy = 255;
+					(void)cy;
+					stripe = (cx / 32) & 1;
+					under_r = stripe ? 1.0 : 0.0;    /* yellow or blue */
+					under_g = stripe ? 1.0 : 0.0;
+					under_b = stripe ? 0.0 : 1.0;
+					a = (cx > 255 ? 255 : cx) / 255.0;
+					out_r = a + (1.0 - a) * under_r;
+					out_g = (1.0 - a) * under_g;
+					out_b = (1.0 - a) * under_b;
+					if (abs((int)p[0] - (int)(out_b * 255.0 + 0.5)) <= 8 &&
+					    abs((int)p[1] - (int)(out_g * 255.0 + 0.5)) <= 8 &&
+					    abs((int)p[2] - (int)(out_r * 255.0 + 0.5)) <= 8)
+						good++;
 					else
-						other++;
+						wrong++;
+					if (a > 0.98)
+						red_edge++;
+					if (a < 0.02)
+						under_edge++;
 				}
 			}
 			IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
 			if (loud)
-				rwvk_say("vktriangle: frame %u: sampled grid blue %u, yellow %u, "
-				    "other %u", v->frames, blue, yellow, other);
-			if (other * 20 > (blue + yellow + other) || blue == 0 || yellow == 0) {
+				rwvk_say("vktriangle: frame %u: blend grid good %u, wrong %u "
+				    "(pure-over %u, pure-under %u)", v->frames, good, wrong,
+				    red_edge, under_edge);
+			if (wrong * 50 > (good + wrong) || red_edge == 0 || under_edge == 0) {
 				v->failures++;
-				rwvk_say("vktriangle: frame %u: FAILED: the drawable does not hold the "
-				    "composite (blue %u, yellow %u, other %u)", v->frames, blue,
-				    yellow, other);
+				rwvk_say("vktriangle: frame %u: FAILED: the drawable does not hold "
+				    "the blend (good %u, wrong %u, pure-over %u, pure-under %u)",
+				    v->frames, good, wrong, red_edge, under_edge);
 				return -1;
 			}
 		} else {
@@ -1579,6 +1786,10 @@ rwvk_bench(struct rwvk *v, const char *where, unsigned frames)
 		rwvk_say("vktriangle: FAILED: no source to composite");
 		return YES;
 	}
+	if (rwvk_make_overlay(&rwvk_vulkan) != 0) {
+		rwvk_say("vktriangle: FAILED: no overlay to composite");
+		return YES;
+	}
 	self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
 	self.window.rootViewController = [[RWVKController alloc] init];
 	[self.window makeKeyAndVisible];
@@ -1615,6 +1826,10 @@ rwvk_layer_mode(void)
 		return 1;
 	if (rwvk_make_source(&rwvk_vulkan) != 0) {
 		rwvk_say("vktriangle: FAILED: no source to composite");
+		return 1;
+	}
+	if (rwvk_make_overlay(&rwvk_vulkan) != 0) {
+		rwvk_say("vktriangle: FAILED: no overlay to composite");
 		return 1;
 	}
 	layer = [[CAMetalLayer alloc] init];
