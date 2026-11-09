@@ -146,7 +146,7 @@ rwvk_fault_handler(int sig, siginfo_t *info, void *uctx)
 
 	rwvk_say("vktriangle: FAULT sig=%d addr=%p libbase=%p", sig, info->si_addr,
 	    rwvk_fault_base);
-	for (int i = 0; i < 16; i++)
+	for (int i = 0; i < 34; i++)
 		rwvk_say("vktriangle:   uctx[%02d] = %#018llx%s", i, regs[i],
 		    (unsigned long long)regs[i] > (unsigned long long)rwvk_fault_base &&
 		    (unsigned long long)regs[i] < (unsigned long long)rwvk_fault_base + 0x1000000
@@ -794,6 +794,7 @@ rwvk_entry_for(struct rwvk *v, IOSurfaceRef surface, uint32_t width, uint32_t he
 	uint32_t type = UINT32_MAX;
 
 	memset(entry, 0, sizeof(*entry));
+	rwvk_step("entry: vkCreateImage over the drawable");
 	entry->sid = sid;
 	entry->width = width;
 	entry->height = height;
@@ -801,6 +802,7 @@ rwvk_entry_for(struct rwvk *v, IOSurfaceRef surface, uint32_t width, uint32_t he
 		rwvk_say("vktriangle: FAILED: vkCreateImage over surface %u", sid);
 		return NULL;
 	}
+	rwvk_step("entry: memory requirements");
 	pGetImageMemoryRequirements(v->device, entry->image, &requirements);
 	for (uint32_t i = 0; i < v->memory.memoryTypeCount; i++) {
 		if ((requirements.memoryTypeBits & (1u << i)) &&
@@ -834,6 +836,7 @@ rwvk_entry_for(struct rwvk *v, IOSurfaceRef surface, uint32_t width, uint32_t he
 	    .allocationSize = requirements.size,
 	    .memoryTypeIndex = type,
 	};
+	rwvk_step("entry: import and allocate the surface's memory");
 	if (pAllocateMemory(v->device, &allocate, NULL, &entry->memory) != VK_SUCCESS) {
 		rwvk_say("vktriangle: FAILED: vkAllocateMemory importing surface %u", sid);
 		return NULL;
@@ -842,6 +845,7 @@ rwvk_entry_for(struct rwvk *v, IOSurfaceRef surface, uint32_t width, uint32_t he
 		rwvk_say("vktriangle: FAILED: vkBindImageMemory for surface %u", sid);
 		return NULL;
 	}
+	rwvk_step("entry: view and framebuffer");
 	VkImageViewCreateInfo viewInfo = {
 	    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 	    .image = entry->image,
@@ -1435,6 +1439,8 @@ rwvk_frame(struct rwvk *v, int loud)
 		    .clearValueCount = 1,
 		    .pClearValues = &clear,
 		};
+		if (loud)
+			rwvk_step("frame: begin the pass and draw");
 		VkViewport viewport = { 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
 		VkRect2D scissor = { { 0, 0 }, { width, height } };
 		pCmdBeginRenderPass(v->commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
@@ -1454,6 +1460,8 @@ rwvk_frame(struct rwvk *v, int loud)
 		    .commandBufferCount = 1,
 		    .pCommandBuffers = &v->commands,
 		};
+		if (loud)
+			rwvk_step("frame: submit and wait");
 		if (pQueueSubmit(v->queue, 1, &submit, v->fence) != VK_SUCCESS) {
 			v->failures++;
 			rwvk_say("vktriangle: frame %u: vkQueueSubmit failed", v->frames);
