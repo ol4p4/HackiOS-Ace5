@@ -3911,4 +3911,46 @@ on this line is a `VkSwapchainKHR` in the ICD over the same import (the loader
 has no WSI today: the instance was created with no extensions), or the CA
 bridge with the fluency lanes as acceptance.
 
+### Step 15: sampling an IOSurface through Turnip — the bridge's read side (2026-11-09 21:50)
+
+Writing into a drawable is half a compositor; the other half is reading someone
+else's surface. The app now fills a 256×256 BGRA IOSurface with an 8×8
+blue/yellow checker (opposite in every channel), imports it **by its id** as a
+linear `VkImage`, copies it once into a tiled image, and draws a full-screen
+quad sampling it into the CA drawable. The shaders are
+`tools/vulkan/composite.vert`/`.frag` (embedded by `mk-spirv-arrays.py`), and
+the readback counts every sampled pixel as blue, yellow or other.
+
+**First run crashed in `vkAllocateDescriptorSets` — SIGSEGV at 0x58.** The
+fault handler added for exactly this reason printed the address, and the code
+had one mistake: `VkDescriptorSetAllocateInfo.descriptorPool` was never set (the
+initializer ran before the pool existed and the field was left NULL). The
+driver read the pool's field at +0x58. Fixed by naming the pool after
+`vkCreateDescriptorPool`; the crash, the address and the cause are all in the
+log of that boot (`20261109-213839`).
+
+**Second run (`20261109-215002`): the read side works.**
+
+```
+vktriangle: source: surface id 39, 256x256 0x42475241, imported linear,
+            copied once into a tiled image, sampled through a nearest sampler
+vktriangle: frame 1: sampled grid blue 28016, yellow 28012, other 0
+...
+vktriangle: LAYER MODE: PASS
+vktriangle: BENCH app: 55.3 fps over the window (18.1 ms/frame), 0 failures
+```
+
+`other 0` over the whole drawable is the strong statement: every sampled pixel
+is one of the two checker colours, so the pixels came out of the surface's
+memory with the right stride and channel order — nothing was a clear colour, a
+staging copy that never arrived, or a channel swap. `20261109-215210-screen.png`
+shows the blue/yellow checker filling the panel, and the app's 240-frame bench
+still presents at the display's cadence with zero failures.
+
+**What it leaves open, named so it is not mistaken for done.** The copy from
+the imported linear image into the driver's tiling is deliberate: this step
+proves the import and the sampler, not linear sampling. Whether a LINEAR image
+can be sampled directly is the next question on this road, and it is the one
+that decides how close a zero-copy CA bridge can get.
+
 

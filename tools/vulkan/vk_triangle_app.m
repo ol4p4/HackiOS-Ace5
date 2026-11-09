@@ -128,6 +128,41 @@ rwvk_step(const char *what)
 	rwvk_say("vktriangle: step: %s", what);
 }
 
+/* The XNU here fails corpse capture, so a SIGSEGV in the driver dies in silence
+ * (the first composite boot: "exited due to SIGSEGV" and nothing else). Print
+ * the fault address and the registers against the ICD's load base, as
+ * tools/vulkan/turnip_test.c does. */
+static void *rwvk_fault_base;
+
+static void
+rwvk_fault_handler(int sig, siginfo_t *info, void *uctx)
+{
+	unsigned long long *regs = (unsigned long long *)uctx;
+
+	rwvk_say("vktriangle: FAULT sig=%d addr=%p libbase=%p", sig, info->si_addr,
+	    rwvk_fault_base);
+	for (int i = 0; i < 16; i++)
+		rwvk_say("vktriangle:   uctx[%02d] = %#018llx%s", i, regs[i],
+		    (unsigned long long)regs[i] > (unsigned long long)rwvk_fault_base &&
+		    (unsigned long long)regs[i] < (unsigned long long)rwvk_fault_base + 0x1000000
+		        ? "  <-- in the ICD" : "");
+	_exit(99);
+}
+
+static void
+rwvk_install_fault_handler(void *library)
+{
+	struct sigaction action = { .sa_sigaction = rwvk_fault_handler,
+	    .sa_flags = SA_SIGINFO };
+	Dl_info info;
+
+	sigaction(SIGSEGV, &action, NULL);
+	sigaction(SIGBUS, &action, NULL);
+	if (library != NULL && dladdr(dlsym(library, "vk_icdGetInstanceProcAddr"), &info) &&
+	    info.dli_fbase != NULL)
+		rwvk_fault_base = info.dli_fbase;
+}
+
 /* --------------------------------------------------------------------------- the device */
 
 /*
@@ -343,6 +378,8 @@ rwvk_open(struct rwvk *v)
 	void *library = dlopen(RWVK_ICD_PATH, RTLD_NOW);
 	icd_gipa_t gipa;
 	VkResult result;
+
+	rwvk_install_fault_handler(library);
 	VkApplicationInfo app = {
 	    .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
 	    .pApplicationName = "vk_triangle_app",
@@ -916,6 +953,7 @@ rwvk_make_source(struct rwvk *v)
 	    .pImageInfo = &imageInfo,
 	};
 
+	rwvk_step("source: create the checker surface");
 	/* The surface, filled with the checker and announced (the seed rule). */
 	props = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
 	    &kCFTypeDictionaryValueCallBacks);
@@ -962,6 +1000,7 @@ rwvk_make_source(struct rwvk *v)
 	v->source_surface = surface;
 	v->source_width = v->source_height = size;
 
+	rwvk_step("source: import the surface as a linear VkImage");
 	/* The imported linear image. */
 	linearInfo = (VkImageCreateInfo){
 	    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -1009,6 +1048,7 @@ rwvk_make_source(struct rwvk *v)
 		return -1;
 	}
 
+	rwvk_step("source: create the tiled image");
 	/* The tiled image the sampler reads. */
 	tiledInfo = linearInfo;
 	tiledInfo.pNext = NULL;
@@ -1044,6 +1084,7 @@ rwvk_make_source(struct rwvk *v)
 		return -1;
 	}
 
+	rwvk_step("source: copy import -> tiled, then to SHADER_READ_ONLY");
 	/* One command: import -> tiled, then the tiled image ready to sample. */
 	barriers[0].image = v->source_linear;
 	barriers[1].image = v->source_tiled;
@@ -1067,6 +1108,7 @@ rwvk_make_source(struct rwvk *v)
 	}
 	pResetFences(v->device, 1, &v->fence);
 
+	rwvk_step("source: view, descriptor set, update");
 	viewInfo.image = v->source_tiled;
 	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 	viewInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
@@ -1076,9 +1118,17 @@ rwvk_make_source(struct rwvk *v)
 		rwvk_say("vktriangle: FAILED: vkCreateImageView(source)");
 		return -1;
 	}
-	if (pCreateDescriptorPool(v->device, &poolInfo, NULL, &v->descriptor_pool) != VK_SUCCESS ||
-	    pAllocateDescriptorSets(v->device, &setAllocate, &v->descriptor_set) != VK_SUCCESS) {
-		rwvk_say("vktriangle: FAILED: the descriptor set");
+	if (pCreateDescriptorPool(v->device, &poolInfo, NULL, &v->descriptor_pool) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: vkCreateDescriptorPool");
+		return -1;
+	}
+	/* The pool is named HERE and not in the initializer at the top: the pool
+	 * does not exist until this line, and the first device run of the
+	 * composite crashed in vkAllocateDescriptorSets on exactly that -- a NULL
+	 * descriptorPool (fault addr 0x58). */
+	setAllocate.descriptorPool = v->descriptor_pool;
+	if (pAllocateDescriptorSets(v->device, &setAllocate, &v->descriptor_set) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: vkAllocateDescriptorSets");
 		return -1;
 	}
 	imageInfo.imageView = v->source_view;
