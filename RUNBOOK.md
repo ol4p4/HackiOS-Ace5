@@ -3435,6 +3435,30 @@ ACE5_CMDLINE="pcie_clkref=0" python3 tools/ace5/phone.py run --pcie 3 \
   --root-image local/root-daily.apfs
 ```
 
+### PCIe M1, 2026-11-10: the PERST probe — CLKREQ does not follow PERST, so this observable cannot judge the wiring
+
+Two probe runs after the 14A/14B pair, both healthy returns:
+
+- `20261110-205710` (`pcie_perst_probe=1`): after the normal enable and
+  PERST release, PERST was asserted again for 100 ms. `clkreq` stayed 0 and
+  the PHY stayed `0x86` through assert, hold and release.
+- `20261110-210348` (same, plus a sample taken **before** the first PERST
+  release): `perst probe: still low with the card enabled, clkreq=0
+  phy=0x86`.
+
+So CLKREQ is already asserted while the card is still held in reset; it does
+not follow PERST, and no PERST transition moves either CLKREQ or the PHY
+status. The probe therefore cannot tell "GPIO94 reaches the card" from "the
+card holds CLKREQ low whenever it is powered" — a negative here is not
+evidence of a broken trace. It does add one fact to the model: the `0x86`
+state needs the gate and the card's power, not PERST.
+
+The probe is behind `pcie_perst_probe=1` and is inert otherwise
+(`mach.ace5-pcie-perst` is the first version, `mach.ace5-pcie-perst2` the
+one with the pre-release sample; both built with WSL `xnu-build.sh`, exit 0).
+The PERST/GPIO94 question is now a physical measurement at the card, not a
+software probe; do not spend another round on CLKREQ for it.
+
 ### The Turnip gate: step 9 passed — the triangle reaches an IOSurface in BGRA (2026-11-08 14:29)
 
 Back on the GPU line after the PCIe rounds. The step-9 image had been

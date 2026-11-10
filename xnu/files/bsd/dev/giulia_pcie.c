@@ -80,6 +80,11 @@ static int pcie_clkref = 1;     /* boot-arg pcie_clkref=0: skip the TCSR gate wr
                                  * card's refclk path at all; the 0 -> 0x1
                                  * LTSSM move has been confounded with the
                                  * gpio_out fix since the day both landed. */
+static int pcie_perst_probe;    /* boot-arg pcie_perst_probe=1: after the card is
+                                 * enabled and CLKREQ reads low, assert PERST for
+                                 * 100 ms and watch CLKREQ. A card that sees its
+                                 * PERST pin lets go of the clock request; if
+                                 * CLKREQ never moves, GPIO94 may not reach it. */
 static volatile unsigned pcie_pause_event;
 
 static uint32_t
@@ -816,6 +821,11 @@ clkref_done:
 	delay_us(50000);
 	pcie_phy_status("pretrain");
 
+	if (pcie_perst_probe) {
+		pcie_log("pcie: perst probe: still low with the card enabled, clkreq=%u phy=%#x\n",
+		    rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000 + 4) & 1,
+		    rd(phy, GIULIA_PCIE_PHY_STATUS));
+	}
 	gpio_out(GIULIA_PCIE_PERST_GPIO, true);
 	delay_us(1000);
 	pcie_log("pcie: perst released; perst in=%u wlan_en in=%u clkreq in=%u wake in=%u, phy status %#x\n",
@@ -824,6 +834,21 @@ clkref_done:
 	    rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000 + 4) & 1,
 	    rd(tlmm, GIULIA_PCIE_WAKE_GPIO * 0x1000 + 4) & 1,
 	    rd(phy, GIULIA_PCIE_PHY_STATUS));
+	if (pcie_perst_probe) {
+		pcie_log("pcie: perst probe: before, clkreq=%u phy=%#x\n",
+		    rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000 + 4) & 1,
+		    rd(phy, GIULIA_PCIE_PHY_STATUS));
+		gpio_out(GIULIA_PCIE_PERST_GPIO, false);
+		delay_us(100000);
+		pcie_log("pcie: perst probe: asserted 100 ms, clkreq=%u phy=%#x\n",
+		    rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000 + 4) & 1,
+		    rd(phy, GIULIA_PCIE_PHY_STATUS));
+		gpio_out(GIULIA_PCIE_PERST_GPIO, true);
+		delay_us(100000);
+		pcie_log("pcie: perst probe: released again, clkreq=%u phy=%#x\n",
+		    rd(tlmm, GIULIA_PCIE_CLKREQ_GPIO * 0x1000 + 4) & 1,
+		    rd(phy, GIULIA_PCIE_PHY_STATUS));
+	}
 	elbi = ml_io_map(GIULIA_PCIE_ELBI, GIULIA_PCIE_ELBI_SIZE);
 	if (elbi == 0) {
 		pcie_log("pcie: power: the ELBI page cannot be mapped\n");
@@ -952,6 +977,7 @@ giulia_pcie_init(void)
 	PE_parse_boot_argn("pcie_pause", &pcie_pause_s, sizeof(pcie_pause_s));
 	PE_parse_boot_argn("pcie_supplies", &pcie_supplies, sizeof(pcie_supplies));
 	PE_parse_boot_argn("pcie_gdsc", &pcie_gdsc, sizeof(pcie_gdsc));
+	PE_parse_boot_argn("pcie_perst_probe", &pcie_perst_probe, sizeof(pcie_perst_probe));
 	PE_parse_boot_argn("pcie_clkref", &pcie_clkref, sizeof(pcie_clkref));
 	if (kernel_thread_start(pcie_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
