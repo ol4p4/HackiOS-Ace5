@@ -127,9 +127,15 @@ rwvk_say(const char *format, ...)
 	(void)write(rwvk_console >= 0 ? rwvk_console : 2, line, (size_t)n);
 }
 
+static int rwvk_steps;	/* --steps: the entry trace. Off by default: the extra
+			 * writes change the timing of the import/present path, and
+			 * the frame-4 fault did not reproduce with them on. */
+
 static void
 rwvk_step(const char *what)
 {
+	if (!rwvk_steps)
+		return;
 	rwvk_say("vktriangle: step: %s", what);
 }
 
@@ -1883,6 +1889,8 @@ main(int argc, char **argv)
 			rwvk_say("vktriangle: LAYER MODE: %s", status == 0 ? "PASS" : "FAIL");
 			return status;
 		}
+		if (strcmp(argv[i], "--steps") == 0)
+			rwvk_steps = 1;
 	}
 	rwvk_open_console();
 	return UIApplicationMain(argc, argv, nil, NSStringFromClass([RWVKDelegate class]));
