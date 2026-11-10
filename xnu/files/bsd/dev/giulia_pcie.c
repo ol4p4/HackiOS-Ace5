@@ -245,6 +245,20 @@ windows_clocked(void)
 	return (core & 0x80000000u) != 0 && (phy & 0x80000000u) != 0 && (clocks & 0x80000000u) == 0;
 }
 
+/* The PHY's own status word (DT: qcom,phy-status-offset 0x214, -bit 6 =
+ * "ready"). It reads 0x41 after the vendor sequence and 0x86 by the time PERST
+ * is released -- and 0x86 has bit 6 clear. Where between the two the bit falls
+ * decides whether the PHY is leaving ready or merely changing state, so every
+ * stage of the card's enable logs it. Read-only. */
+static void
+pcie_phy_status(const char *stage)
+{
+	uint32_t status = rd(phy, GIULIA_PCIE_PHY_STATUS);
+
+	pcie_log("pcie: phy@%s %#x ready=%u\n", stage, status,
+	    (status >> GIULIA_PCIE_PHY_STATUS_BIT) & 1u);
+}
+
 /* ---- step 1: the always-on blocks -------------------------------------------------------------- */
 
 static void
@@ -750,6 +764,7 @@ power_up(void)
 	wr(gcc, GIULIA_GCC_PCIE_VOTE, rd(gcc, GIULIA_GCC_PCIE_VOTE) | 0x10u); /* PIPE */
 	error = poll(phy, GIULIA_PCIE_PHY_STATUS, 1u << GIULIA_PCIE_PHY_STATUS_BIT, 1u << GIULIA_PCIE_PHY_STATUS_BIT, 100000);
 	pcie_log("pcie: phy %s (%#x)\n", error ? "not ready" : "ready", rd(phy, GIULIA_PCIE_PHY_STATUS));
+	pcie_phy_status("sequence");
 	if (error) {
 		return error;
 	}
@@ -774,11 +789,14 @@ power_up(void)
 	pcie_log("pcie: power: the card's refclk gate pre=%#x post=%#x\n", clkref,
 	    rd(tcsrcc, GIULIA_TCSRCC_PCIE0_CLKREF_EN));
 clkref_done:
+	pcie_phy_status("refclk");
 	gpio_out(GIULIA_CNSS_WLAN_EN_GPIO, true);
 	delay_us(100000);                       /* 100 ms from the enable to PERST (PCIE_T_PVPERL_MS) */
 	pcie_log("pcie: wlan_en high; sw-ctrl pins read %u %u\n",
 	    rd(tlmm, GIULIA_CNSS_SW_CTRL_GPIO * 0x1000 + 4) & 1, rd(tlmm, GIULIA_CNSS_WLAN_SW_GPIO * 0x1000 + 4) & 1);
+	pcie_phy_status("wlan_en");
 	root_port_setup();
+	pcie_phy_status("root_port");
 	/* The vendor driver's pre-training writes that our upstream-2_7_0 port
 	 * lacked (pci-msm.c msm_pcie_enable_link, before PERST release):
 	 * de-assert Qactive -- clear the fal10_veto override and set the
@@ -796,6 +814,7 @@ clkref_done:
 	    rd(parf, 0));
 	wr(parf, 0, 0x365e);
 	delay_us(50000);
+	pcie_phy_status("pretrain");
 
 	gpio_out(GIULIA_PCIE_PERST_GPIO, true);
 	delay_us(1000);
