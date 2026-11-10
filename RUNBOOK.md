@@ -4080,9 +4080,17 @@ So the frame-4 SIGSEGV (old dump: fault addr `0xc6`, `x0=0`, stopped at
 ~580 app frames are not proof the bug is gone — only that this build did not
 show it.
 
-If the PC is wanted: make the `rwvk_step` calls opt-in (default off) while
-keeping the 34-register dump, rebuild the app and both images (the app bundle
-lives in the 2.4 GiB system image), then run until it faults and read
-`uctx[32]` (pc), `uctx[30]` (lr), `uctx[31]` (sp).
+That was done (`17224ba`): the steps are opt-in (`--steps`), the app rebuilt
+(109,544 bytes), and both images repacked (`root-turnip-vk-steps.apfs`,
+`system-metal-vk-steps.apfs`). Two more runs (`20261110-222214`, `-222628`)
+kept the original timing and still showed **zero `FAULT sig`** — surfaces
+44–48 / 42–48, ~291 app frames each.
+
+Four runs, ~1,160 app frames, no crash. The 11-09 fault was ~250 ms after
+the app spawned, at frame 4; that window has now been crossed four times
+without it. Treat it as a rare startup race, not a blocker: the 34-register
+dump stays in the binary, so when it recurs the PC is one run away. Do not
+spend more boots on it before the CA bridge; a stress run after the bridge
+is the better reproducer.
 
 
