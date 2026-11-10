@@ -4062,4 +4062,27 @@ compiled in (`RWVK_SAMPLE_LINEAR=0`) as the comparison. The screenshot
 
 Images: small root `1984d6e7…`, system `bbdc449f…`.
 
+### Step 16: two runs with the 34-register dump — the frame-4 crash did not reproduce (2026-11-10)
+
+The stale step-16 image (built 11-09 22:32–22:35; the binary carries both the
+34-register dump and the entry steps) was run twice on 11-10
+(`20261110-212010`, `20261110-212456`) with the step-13 recipe.
+
+- Both runs: `LAYER MODE: PASS` 123/123, the app ran ~291 frames,
+  **zero `FAULT sig`**.
+- Run 1 used five distinct app drawables (44–48); run 2 used 43–49 —
+  including **49**, the fourth distinct drawable whose arrival preceded the
+  11-09 crash — and survived, reusing 49 for 31 frames.
+
+So the frame-4 SIGSEGV (old dump: fault addr `0xc6`, `x0=0`, stopped at
+`uctx[15]`, no pc) is intermittent, and the entry-step logging added in
+`34ddc2e` likely perturbs the race window enough to mask it. Two runs and
+~580 app frames are not proof the bug is gone — only that this build did not
+show it.
+
+If the PC is wanted: make the `rwvk_step` calls opt-in (default off) while
+keeping the 34-register dump, rebuild the app and both images (the app bundle
+lives in the 2.4 GiB system image), then run until it faults and read
+`uctx[32]` (pc), `uctx[30]` (lr), `uctx[31]` (sp).
+
 
