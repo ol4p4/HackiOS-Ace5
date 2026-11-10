@@ -3373,9 +3373,9 @@ chip's own power sequencing (thyme clears the WCN's
 WLAON_QFPROM_PWR_CTRL SHUTDOWN/VDD4BLOW bits — but only after its link is
 up).
 
-### PCIe M1, 2026-11-10 (host-side): round 14's two probes are answered by source, and 0x86 is not "healthy"
+### PCIe M1, 2026-11-10: round 14 — the two source probes are dead ends, and the A/B settles 0x86
 
-Two results before another device round:
+Three results, the last two from the device:
 
 1. **The TCSR sweep and the GCC refgen hunt are dead ends.** Linux's
    `tcsrcc-sm8650` table has exactly **one** PCIe0 clock gate, `0xb1100`
@@ -3386,39 +3386,54 @@ Two results before another device round:
    `0x8c0xx` is not a PCIe0 range on this SoC (PCIe1 is `0x8d0xx`). Sweeping
    the TCSR window would only re-read other blocks' gates. (Local copies:
    `tmp/survey-1105/tcsrcc-pineapple.c`, `gcc-sm8650.c`.)
-2. **The PHY-status reading in round 13 needs to be revisited.** The device
-   tree states `qcom,phy-status-offset = 532` (`0x214`) and
-   `qcom,phy-status-bit = 6`; `giulia_pcie_regs.h` already encodes both. The
-   observed `0x41 → 0x86` is bit 6 **set → clear**, i.e. by the vendor's own
-   definition the PHY stops reporting ready exactly when the card comes out
-   of reset. Whether that is the PHY leaving ready or the status field
-   changing meaning is not something the two endpoint samples can decide.
+2. **The A/B settles what `0x86` is — and round 13's reading stands.** The
+   device tree's `qcom,phy-status-bit = 6` is a *pre-clock* phase indicator,
+   not a health check that stays valid after the PHY switches to the card's
+   reference clock. The staged runs (14A gate on, `20261110-203749`; 14B gate
+   off on a fresh loader, `20261110-204655`) show that:
 
-So `giulia_pcie.c` now logs the status word at every stage between the two
-samples — after the vendor sequence, after the TCSR gate (both A/B paths),
-after `wlan_en` + 100 ms, after the root-port setup, and after the pre-train
-writes (the PERST line already carries it). Read-only; no behaviour change.
-The rebuilt kernel is `out/giulia-kernel/mach.ace5-pcie-phy` (WSL incremental
-`xnu-build.sh`, exit 0; **not run on the phone**).
+   | stage | 14A gate on | 14B gate off |
+   | --- | --- | --- |
+   | `sequence` | `0x41 ready=1` | `0x41 ready=1` |
+   | `refclk` (gate write) | `0x41 ready=1` | `0x41 ready=1` (skipped) |
+   | `wlan_en` + 100 ms | **`0x86 ready=0`** | `0x41 ready=1` |
+   | `root_port` / `pretrain` | `0x86` | `0x41` |
+   | PERST release | `0x86` | `0x41` |
+   | LTSSM | Detect.Active (`0x1`) | `0` |
 
-Two runs decide it, in this order:
+   `0x86` needs **both** the TCSR gate and the card enabled; with either one
+   missing the PHY stays `0x41`. It appears exactly in the state where the
+   LTSSM starts moving, so it is the clocked/running state — the earlier
+   host-side note that "the PHY stops reporting ready" is retracted. The gate
+   is still the only write that moves the LTSSM off zero; the card's enable
+   is what moves the PHY's status into its clocked state.
+
+3. **Back-to-back step-3 runs are not independent.** The first 14B attempt
+   (`20261110-204100`, gate off without a fresh loader) never reached the PHY:
+   the first RPMh supply vote timed out (`RPMh HAS NOT SAID DONE after
+   400000 us`, slot 1, `rc=22`) because the previous run's slot/RSC state was
+   still there. `reboot → enter --stage kernel → ramdisk` made the rerun
+   clean. Every step-3 round must start from a fresh loader.
+
+The remaining picture is unchanged: host PHY clocked, card powered, PERST
+released, CLKREQ held low, every vendor write in place — and receiver detect
+still never completes. The two leaves are the same two board truths (the
+100 MHz between the gate and the card's lanes, and whether GPIO94 reaches the
+card's PERST pin). One cheap in-software test of the second is left for a next
+round: after the card is enabled and CLKREQ reads low, pulse PERST low again
+and watch whether CLKREQ releases — a card that sees PERST will let go of its
+clock request. That needs one more small probe, not a new theory.
 
 ```
-# gate on: where does bit 6 fall?
+# gate on (round 14A): where bit 6 falls
 python3 tools/ace5/phone.py run --pcie 3 \
   --kernel out/giulia-kernel/mach.ace5-pcie-phy \
   --root-image local/root-daily.apfs
-# gate off: is the gate itself the cause? (boot args ride in ACE5_CMDLINE)
+# gate off (round 14B; boot args ride in ACE5_CMDLINE)
 ACE5_CMDLINE="pcie_clkref=0" python3 tools/ace5/phone.py run --pcie 3 \
   --kernel out/giulia-kernel/mach.ace5-pcie-phy \
   --root-image local/root-daily.apfs
 ```
-
-Read the `phy@sequence / phy@refclk / phy@wlan_en / phy@root_port /
-phy@pretrain` lines. If bit 6 falls at `refclk`, the gate is the cause and the
-question becomes what the gate actually feeds; if it falls at `wlan_en` or
-`pretrain`, the gate is exonerated and the card's power sequencing is the
-subject. Do not resume the AOP/RF or CESTA theories until this is known.
 
 ### The Turnip gate: step 9 passed — the triangle reaches an IOSurface in BGRA (2026-11-08 14:29)
 
