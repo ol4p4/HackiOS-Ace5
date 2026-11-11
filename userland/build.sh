@@ -290,8 +290,23 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		# our library for inside stock iOS programs (the jobs in INJECT are started with it)
 		$DYN -dynamiclib -install_name /redwood/lib/libredwood.dylib -framework CoreFoundation -framework IOKit -lobjc \
 			-o obj/libredwood.dylib src/inject.c
-		$DYN -dynamiclib -install_name /redwood/lib/libredwood-sb.dylib -framework CoreFoundation -framework IOKit -lobjc \
-			-o obj/libredwood-sb.dylib src/inject_sb.c
+		if [ "${VKBRIDGE-0}" = 1 ]; then
+			# The CA bridge probe (src/redwood_vk_overlay.m + tools/vulkan/
+			# redwood_vk_bridge.m + wsi_redwood.m). Off by default so the
+			# ordinary SpringBoard library needs neither the Vulkan headers
+			# nor the Metal frameworks; VULKAN_INCLUDE points at the host
+			# headers tools/ace5/build-gpu-userland.sh already copies.
+			$DYN -dynamiclib -install_name /redwood/lib/libredwood-sb.dylib \
+				-framework CoreFoundation -framework IOKit -framework UIKit \
+				-framework QuartzCore -framework Metal -framework IOSurface -lobjc \
+				-DREDWOOD_VKBRIDGE=1 -I../tools/vulkan \
+				-I${VULKAN_INCLUDE:-/root/vulkan-include} \
+				-o obj/libredwood-sb.dylib src/inject_sb.c src/redwood_vk_overlay.m \
+				../tools/vulkan/redwood_vk_bridge.m ../tools/vulkan/wsi_redwood.m
+		else
+			$DYN -dynamiclib -install_name /redwood/lib/libredwood-sb.dylib -framework CoreFoundation -framework IOKit -lobjc \
+				-o obj/libredwood-sb.dylib src/inject_sb.c
+		fi
 		# ... the tweak loader of the package manager's prefix (src/inject_tweaks.c): it goes into a
 		# program either as the one library the kernel inserts or opened by a library of ours
 		$DYN -dynamiclib -install_name /redwood/lib/libredwood-tweaks.dylib -framework CoreFoundation -lobjc \

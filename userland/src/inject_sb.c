@@ -31,6 +31,10 @@
  *     In any other program given this library (INJECT in build.sh) only the last of them is
  *     answered, with that program's layers.
  */
+#ifdef REDWOOD_VKBRIDGE
+/* src/redwood_vk_overlay.m: the CA bridge probe; inert unless vkbridge=1. */
+void redwood_vk_overlay_maybe_start(void);
+#endif
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <dispatch/dispatch.h>
@@ -1402,6 +1406,9 @@ redwood_springboard_init(void)
 	 * would go with it, holding exactly the sentence we wanted.
 	 */
 	setvbuf(stdout, NULL, _IONBF, 0);
+#ifdef REDWOOD_VKBRIDGE
+	redwood_vk_overlay_maybe_start();
+#endif
 	display_link_rates();           /* before anything of SpringBoard's makes a display link */
 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
 	orig_display_period_sb = (double (*)(void *))replace_virtual_sb("SpringBoard display_period",
