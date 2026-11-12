@@ -9,7 +9,9 @@
  * so the proven app path is not edited for the probe.
  */
 #import <Foundation/Foundation.h>
+#import <IOSurface/IOSurfaceRef.h>
 
+#include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -382,6 +384,61 @@ failed:
 	return NULL;
 }
 
+/*
+ * The kernel's answer about a surface (kRedwoodSurface 0x7e, struct
+ * redwood_surface in RedwoodGPU.cpp). Read-only describe: handle = 0xffffffff
+ * asks for the numbers and allocates nothing.
+ */
+struct rwb_kernel_surface {
+	uint32_t surface;
+	uint32_t handle;
+	uint64_t size;
+	uint32_t offset, rowBytes;
+	uint32_t width, height;
+	uint32_t pixelFormat, planes;
+};
+
+#define RWB_KERNEL_DESCRIBE 0xffffffffu
+#define RWB_REQUEST_SURFACE 0x7eu
+
+static void
+rwb_describe_surface(uint32_t sid, IOSurfaceRef surface)
+{
+	io_service_t service = IOServiceGetMatchingService(0,
+	    IOServiceMatching("RedwoodGPU"));
+	struct rwb_kernel_surface question, answer;
+	io_connect_t connection = 0;
+	size_t size = sizeof(answer);
+	kern_return_t result;
+
+	if (service == IO_OBJECT_NULL) {
+		fprintf(stderr, "vkbridge: describe: no RedwoodGPU service\n");
+		return;
+	}
+	if (IOServiceOpen(service, mach_task_self(), 0, &connection) != KERN_SUCCESS) {
+		fprintf(stderr, "vkbridge: describe: RedwoodGPU refused a user client\n");
+		IOObjectRelease(service);
+		return;
+	}
+	memset(&question, 0, sizeof(question));
+	question.surface = sid;
+	question.handle = RWB_KERNEL_DESCRIBE;
+	memset(&answer, 0, sizeof(answer));
+	result = IOConnectCallStructMethod(connection, RWB_REQUEST_SURFACE, &question,
+	    sizeof(question), &answer, &size);
+	fprintf(stderr, "vkbridge: describe sid %u: kr %#x, size %llu offset %#x "
+	    "rowBytes %u, %ux%u fmt %#x planes %u\n",
+	    sid, result, (unsigned long long)answer.size, answer.offset,
+	    answer.rowBytes, answer.width, answer.height, answer.pixelFormat,
+	    answer.planes);
+	fprintf(stderr, "vkbridge: iosurface sid %u: %zux%zu, rowBytes %zu, alloc %zu, "
+	    "base %p\n", sid, IOSurfaceGetWidth(surface), IOSurfaceGetHeight(surface),
+	    IOSurfaceGetBytesPerRow(surface), IOSurfaceGetAllocSize(surface),
+	    IOSurfaceGetBaseAddress(surface));
+	IOServiceClose(connection);
+	IOObjectRelease(service);
+}
+
 static void
 rwb_entry_reset(struct rwb *bridge, struct rwb_entry *entry)
 {
@@ -443,6 +500,11 @@ rwb_entry(struct rwb *bridge, const struct rw_wsi_image *image, char *why,
 		return NULL;
 	}
 	bridge->image_memory_requirements(bridge->device, entry->image, &requirements);
+	fprintf(stderr, "vkbridge: image %ux%u requirements size %llu align %llu "
+	    "bits %#x\n", image->width, image->height,
+	    (unsigned long long)requirements.size,
+	    (unsigned long long)requirements.alignment, requirements.memoryTypeBits);
+	rwb_describe_surface(image->sid, image->surface);
 
 	/*
 	 * The app's rule (vk_triangle_app.m) prefers a non-host-visible type and

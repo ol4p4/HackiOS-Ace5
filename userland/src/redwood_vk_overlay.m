@@ -124,7 +124,8 @@ rwb_make_device(void)
 @implementation RWVKBViewController
 - (void)loadView
 {
-	self.view = [[RWVKBView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+	self.view = [[RWVKBView alloc] initWithFrame:CGRectMake(0, 0,
+	    [UIScreen mainScreen].bounds.size.width, RWVKB_BAND_HEIGHT)];
 }
 @end
 
@@ -202,7 +203,8 @@ rwb_key_window(void)
 	 * home screen replaces that window (measured 2026-11-12: frames presented
 	 * for 1,300+ ticks while the panel showed the plain home screen).
 	 */
-	self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+	self.window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0,
+	    [UIScreen mainScreen].bounds.size.width, RWVKB_BAND_HEIGHT)];
 	if (@available(iOS 13.0, *))
 		self.window.windowScene = scene;
 	self.window.windowLevel = UIWindowLevelStatusBar + 1;
