@@ -4218,4 +4218,23 @@ will. CA's compositor also asks half-float formats: K90 maps R16Float to
 `L00h`/`1C0h` and RG16Float to `2C0h` (`cd6555e`, `84371e3`, `e09aed9`). This
 bridge declares BGRA only and will refuse those -- expected at this stage.
 
+### External compositor: the first primitive is measured (2026-11-12 22:40)
+
+`20261112-224024` ran the vkbridge overlay plus `userland/src/lookup_test.c`
+from the job list -- a separate process, no UI. The overlay writes the id of
+each newly imported drawable to `/tmp/vkbridge.sid`; lookup_test reads it and
+calls `IOSurfaceLookup`:
+
+```
+lookup: asking for sid 38
+lookup: sid 38 -> 1125x720, rowBytes 4608, alloc 3325952, fmt 0x42475241, base 0x100f50000
+```
+
+So a process that is not SpringBoard can take a reference to a
+SpringBoard-owned CA surface by id -- the primitive an app-hosted compositor
+needs. Next: sample that surface through Turnip (step 15's path) and present it
+in a normal app window (step 14's 60 Hz), i.e. a cross-process composite. The
+unknown after that is enumerating the layer list and rectangles; the kernel's
+swap request already carries them.
+
 

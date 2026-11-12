@@ -577,6 +577,19 @@ rwb_entry(struct rwb *bridge, const struct rw_wsi_image *image, char *why,
 	bridge->entries_used++;
 	fprintf(stderr, "vkbridge: surface %u imported, %ux%u stride %zu\n",
 	    image->sid, image->width, image->height, image->stride);
+	/*
+	 * A marker for the external-compositor probe (userland/src/lookup_test.c):
+	 * another process asks IOSurfaceLookup for this id. /tmp is writable from
+	 * SpringBoard and from the job list.
+	 */
+	{
+		FILE *marker = fopen("/tmp/vkbridge.sid", "w");
+
+		if (marker != NULL) {
+			fprintf(marker, "%u\n", image->sid);
+			fclose(marker);
+		}
+	}
 	return entry;
 }
 
