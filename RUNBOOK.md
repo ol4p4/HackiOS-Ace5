@@ -4170,11 +4170,24 @@ different layer:
    hold 60 Hz yet.
 
 Settled: a process inside SpringBoard can acquire a CA drawable, import its
-IOSurface into Turnip, clear it and have CA display it. Not settled: a small
-(non-panel-height) drawable renders only its bottom strip, and a full-screen
-overlay paces at 20 Hz while the 240 pt window paced at 60 Hz. The next round
-is drawable geometry (kernel describe: offset/size/rowBytes against the
-imported image) and full-screen present cost -- not the bridge ABI.
+IOSurface into Turnip, clear it and have CA display it. Not settled: pacing (the
+same overlay measured 16.667 ms on one boot and 50-66 ms on another), and what
+the partial bands in the screenshots really are.
+
+**Geometry, 2026-11-12 21:12 (`20261112-211213`).** The 240 pt window's drawable
+describes cleanly: kernel `kRedwoodSurface` answers size 3,325,952, **offset 0**,
+rowBytes 4608, 1125x720, BGRA, 0 planes; the IOSurface agrees; the VkImage needs
+3,317,760 bytes at alignment 64 (the surface is 8 KiB larger). The import is
+therefore neither shifted nor truncated. The screenshots that showed "only the
+bottom strip" differ from shot to shot (one shows two red bands with the home
+screen between them), and the user watching the panel saw the band flashing
+continuously -- the partial bands are **framebuffer-capture tearing**, not a
+stable render defect. Do not patch the import for them.
+
+What is left is pacing: this boot's 240 pt window ran at 50-66 ms medians while
+an earlier boot held 16.667 ms for its first 120 frames. Next: a job list that
+runs only the overlay (no `turnip_test`, no `vk_triangle_app`) to tell whether
+20 Hz belongs to the overlay itself or to contention with the gate/app.
 
 **Risks carried from K90's 11-11 Metal work.** Process-owned IOSurfaces are
 refused as GPU buffers by our kernel (`s->client != NULL`); K90 added a
