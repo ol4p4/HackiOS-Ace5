@@ -4093,4 +4093,77 @@ dump stays in the binary, so when it recurs the PC is one run away. Do not
 spend more boots on it before the CA bridge; a stress run after the bridge
 is the better reproducer.
 
+### CA bridge stage 1: a SpringBoard-side Turnip overlay probe (2026-11-12; built, run pending)
+
+The client half is proven (steps 13–16), but only from a standalone app. This
+stage moves it inside CoreAnimation's own client to answer the one question that
+app cannot: can SpringBoard -- the process that owns the window server -- acquire
+a CA drawable, import its IOSurface into Turnip and put pixels on the panel?
+
+**Design (new files).**
+
+- `tools/vulkan/redwood_vk_bridge.{h,m}`: `rwb_open(device)` opens the ICD
+  (`/redwood/lib/libvulkan_freedreno.dylib`, no Vulkan loader), creates an
+  instance/device/queue and one BGRA8 render pass. `rwb_present_clear(bridge,
+  wsi, bgra)` acquires a drawable through `rw_wsi_acquire`, imports it as a
+  linear BGRA `VkImage` (`DMA_BUF_BIT_EXT`, fd = IOSurface id -- the step-11
+  sequence), clears it, submits and waits, then `rw_wsi_present` (seed bump +
+  `presentDrawable:` + `commit`). The import is duplicated from
+  `vk_triangle_app.m` on purpose: the proven app path is not edited for a probe.
+- `userland/src/redwood_vk_overlay.m`: a 240 pt `CAMetalLayer` band added as a
+  sublayer of SpringBoard's key window, driven by `CADisplayLink` at 60 Hz with
+  a colour that cycles. Enabled by `vkbridge=1` or `/redwood/etc/vkbridge`.
+  stderr is pointed at `/dev/console` before the first line; a real start
+  failure stops instead of retrying (so a failed device/layer is not recreated
+  every 0.5 s); a failed surface import destroys its partial entry.
+- `userland/build.sh` grows a `VKBRIDGE=1` branch (default off: CI needs no
+  Vulkan headers); `inject_sb.c` calls the overlay only under
+  `REDWOOD_VKBRIDGE`.
+
+**Build (host, WSL).**
+
+```
+cd userland && THEOS=/root/theos /root/HackiOS-Ace5/xnu-deps/host/bin/xnu-clang \
+  -arch arm64 -isysroot /root/theos/sdks/iPhoneOS16.5.sdk -O1 -dynamiclib \
+  -install_name /redwood/lib/libredwood-sb.dylib \
+  -framework Foundation -framework CoreFoundation -framework IOKit -framework UIKit \
+  -framework QuartzCore -framework Metal -framework IOSurface -lobjc \
+  -DREDWOOD_VKBRIDGE=1 -I../tools/vulkan -I/root/vulkan-include \
+  -o obj/libredwood-sb.dylib src/inject_sb.c src/redwood_vk_overlay.m \
+  ../tools/vulkan/redwood_vk_bridge.m ../tools/vulkan/wsi_redwood.m
+```
+
+Result: 113,360 B dylib. `otool -L` shows Foundation/CoreFoundation/IOKit/UIKit/
+QuartzCore/Metal/IOSurface; `_OBJC_CLASS_$_RWVKBOverlay`, selectors `start`,
+`tick:`, `fail:` and minos 16.5 are present; `/redwood/etc/vkbridge` and the
+`vkbridge:` log strings are in the binary.
+
+**Images.** Small root `local/root-turnip-vk-bridge.apfs` (13,058,048 B, 122
+manifest entries including `etc/vkbridge`); system image unchanged from step 16
+(`local/system-metal-vk-steps.apfs`).
+
+**The run (owed; the phone was not enumerating when this was built):**
+
+```
+enter --stage kernel
+ramdisk --image local/system-metal-vk-steps.apfs
+run --seconds 240 --bootcpu 1 --live-log --gpu-probe 20 --gpu-direct --gpu-keep \
+    --kernel out/giulia-kernel/mach.ace5-public \
+    --root-image local/root-turnip-vk-bridge.apfs
+# ACE5_CMDLINE="vkbridge=1" is optional: the image carries etc/vkbridge too
+```
+
+**Acceptance, one log and screenshots.** `turnip_test: PASS (steps 1-12)` still
+there; `vkbridge: armed` -> `layer added` -> `surface N imported` -> `frame N:
+presented`; 120 frames with present-interval median 16.6–16.8 ms; a screenshot
+shows the cycling band on the live SpringBoard UI; zero `FAULT sig`.
+
+**Risks carried from K90's 11-11 Metal work.** Process-owned IOSurfaces are
+refused as GPU buffers by our kernel (`s->client != NULL`); K90 added a
+copy-backed path for that class (`018a9e0`). The probe's drawable is CA-owned,
+so it should not hit this, but a real compositor reading client-backed layers
+will. CA's compositor also asks half-float formats: K90 maps R16Float to
+`L00h`/`1C0h` and RG16Float to `2C0h` (`cd6555e`, `84371e3`, `e09aed9`). This
+bridge declares BGRA only and will refuse those -- expected at this stage.
+
 

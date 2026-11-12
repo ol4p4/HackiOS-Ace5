@@ -16,6 +16,7 @@
 #import <Metal/Metal.h>
 
 #include <IOKit/IOKitLib.h>
+#include <fcntl.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdio.h>
@@ -120,7 +121,18 @@ rwb_make_device(void)
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) CADisplayLink *link;
+@property(nonatomic) BOOL failed;
 @end
+
+/* SpringBoard's key window, or the first one it has. nil means "not up yet". */
+static UIWindow *
+rwb_key_window(void)
+{
+	for (UIWindow *candidate in [UIApplication sharedApplication].windows)
+		if (candidate.isKeyWindow)
+			return candidate;
+	return [UIApplication sharedApplication].windows.firstObject;
+}
 
 @implementation RWVKBOverlay {
 	struct rw_wsi *_wsi;
@@ -135,6 +147,7 @@ rwb_make_device(void)
 - (void)fail:(const char *)why
 {
 	rwb_say("FAILED: %s", why != NULL ? why : "(no sentence)");
+	self.failed = YES;
 	[self.link invalidate];
 	self.link = nil;
 }
@@ -142,30 +155,25 @@ rwb_make_device(void)
 - (BOOL)start
 {
 	char why[192];
-	UIWindow *window = nil;
+	UIWindow *window = rwb_key_window();
 
-	for (UIWindow *candidate in [UIApplication sharedApplication].windows)
-		if (candidate.isKeyWindow) {
-			window = candidate;
-			break;
-		}
-	if (window == nil)
-		window = [UIApplication sharedApplication].windows.firstObject;
 	if (window == nil) {
 		rwb_say("no SpringBoard window yet");
 		return NO;
 	}
 	CALayer *host = window.rootViewController.view.layer ?: window.layer;
 	if (host == nil) {
-		rwb_say("the key window has no layer");
+		[self fail:"the key window has no layer"];
 		return NO;
 	}
 	self.device = rwb_make_device();
-	if (self.device == nil)
+	if (self.device == nil) {
+		[self fail:"no Metal device"];
 		return NO;
+	}
 	self.queue = [self.device newCommandQueue];
 	if (self.queue == nil) {
-		rwb_say("FAILED: the device gave no command queue");
+		[self fail:"the device gave no command queue"];
 		return NO;
 	}
 	self.layer = [CAMetalLayer layer];
@@ -280,8 +288,21 @@ rwb_try_start(unsigned attempt)
 	}
 	if (overlay == nil)
 		overlay = [[RWVKBOverlay alloc] init];
-	if (([UIApplication sharedApplication].windows.count > 0) && [overlay start])
+	if (overlay.failed) {
+		rwb_say("not retrying after a failed start");
 		return;
+	}
+	if (rwb_key_window() == nil) {
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+		    dispatch_get_main_queue(), ^{
+			rwb_try_start(attempt + 1);
+		});
+		return;
+	}
+	if ([overlay start])
+		return;
+	if (overlay.failed)
+		return;                 /* the reason is already on the console */
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
 	    dispatch_get_main_queue(), ^{
 		rwb_try_start(attempt + 1);
@@ -291,9 +312,22 @@ rwb_try_start(unsigned attempt)
 void
 redwood_vk_overlay_maybe_start(void)
 {
+	/*
+	 * SpringBoard's stdio is not the console: its standard output goes
+	 * nowhere unless inject_sb.c points it somewhere, and our probe writes
+	 * to stderr. Point both at /dev/console before the first line, or a
+	 * failed boot reports nothing at all.
+	 */
+	int console = open("/dev/console", O_WRONLY | O_NOCTTY);
+
+	if (console >= 0) {
+		dup2(console, STDERR_FILENO);
+		if (console != STDERR_FILENO)
+			close(console);
+	}
+	setvbuf(stderr, NULL, _IONBF, 0);
 	if (!rwb_wanted())
 		return;
-	setvbuf(stderr, NULL, _IONBF, 0);
 	rwb_say("armed (pid %d); waiting for SpringBoard's window", getpid());
 	/*
 	 * SpringBoard's UI is not up when this constructor runs; the first window

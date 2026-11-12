@@ -340,6 +340,20 @@ failed:
 	return NULL;
 }
 
+static void
+rwb_entry_reset(struct rwb *bridge, struct rwb_entry *entry)
+{
+	if (entry->framebuffer && bridge->destroy_framebuffer)
+		bridge->destroy_framebuffer(bridge->device, entry->framebuffer, NULL);
+	if (entry->view && bridge->destroy_image_view)
+		bridge->destroy_image_view(bridge->device, entry->view, NULL);
+	if (entry->image && bridge->destroy_image)
+		bridge->destroy_image(bridge->device, entry->image, NULL);
+	if (entry->memory && bridge->free_memory)
+		bridge->free_memory(bridge->device, entry->memory, NULL);
+	memset(entry, 0, sizeof(*entry));
+}
+
 static struct rwb_entry *
 rwb_entry(struct rwb *bridge, const struct rw_wsi_image *image, char *why,
     size_t why_size)
@@ -383,6 +397,7 @@ rwb_entry(struct rwb *bridge, const struct rw_wsi_image *image, char *why,
 	create.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	if (bridge->create_image(bridge->device, &create, NULL, &entry->image) != VK_SUCCESS) {
 		rwb_fail(why, why_size, "vkCreateImage over the drawable failed");
+		rwb_entry_reset(bridge, entry);
 		return NULL;
 	}
 	bridge->image_memory_requirements(bridge->device, entry->image, &requirements);
@@ -400,6 +415,7 @@ rwb_entry(struct rwb *bridge, const struct rw_wsi_image *image, char *why,
 	}
 	if (type == UINT32_MAX) {
 		rwb_fail(why, why_size, "the drawable's image allows no memory type");
+		rwb_entry_reset(bridge, entry);
 		return NULL;
 	}
 	memset(&import, 0, sizeof(import));
@@ -414,11 +430,13 @@ rwb_entry(struct rwb *bridge, const struct rw_wsi_image *image, char *why,
 	if (bridge->allocate_memory(bridge->device, &allocate, NULL, &entry->memory) !=
 	    VK_SUCCESS) {
 		rwb_fail(why, why_size, "vkAllocateMemory importing the surface failed");
+		rwb_entry_reset(bridge, entry);
 		return NULL;
 	}
 	if (bridge->bind_image_memory(bridge->device, entry->image, entry->memory, 0) !=
 	    VK_SUCCESS) {
 		rwb_fail(why, why_size, "vkBindImageMemory failed");
+		rwb_entry_reset(bridge, entry);
 		return NULL;
 	}
 
@@ -433,6 +451,7 @@ rwb_entry(struct rwb *bridge, const struct rw_wsi_image *image, char *why,
 	if (bridge->create_image_view(bridge->device, &view, NULL, &entry->view) !=
 	    VK_SUCCESS) {
 		rwb_fail(why, why_size, "vkCreateImageView failed");
+		rwb_entry_reset(bridge, entry);
 		return NULL;
 	}
 	memset(&framebuffer, 0, sizeof(framebuffer));
@@ -446,6 +465,7 @@ rwb_entry(struct rwb *bridge, const struct rw_wsi_image *image, char *why,
 	if (bridge->create_framebuffer(bridge->device, &framebuffer, NULL,
 	    &entry->framebuffer) != VK_SUCCESS) {
 		rwb_fail(why, why_size, "vkCreateFramebuffer failed");
+		rwb_entry_reset(bridge, entry);
 		return NULL;
 	}
 
@@ -532,18 +552,8 @@ rwb_close(struct rwb *bridge)
 		return;
 	if (bridge->device != NULL && bridge->device_wait_idle != NULL)
 		bridge->device_wait_idle(bridge->device);
-	for (unsigned i = 0; i < bridge->entries_used; i++) {
-		struct rwb_entry *entry = &bridge->entries[i];
-
-		if (entry->framebuffer && bridge->destroy_framebuffer)
-			bridge->destroy_framebuffer(bridge->device, entry->framebuffer, NULL);
-		if (entry->view && bridge->destroy_image_view)
-			bridge->destroy_image_view(bridge->device, entry->view, NULL);
-		if (entry->image && bridge->destroy_image)
-			bridge->destroy_image(bridge->device, entry->image, NULL);
-		if (entry->memory && bridge->free_memory)
-			bridge->free_memory(bridge->device, entry->memory, NULL);
-	}
+	for (unsigned i = 0; i < bridge->entries_used; i++)
+		rwb_entry_reset(bridge, &bridge->entries[i]);
 	if (bridge->fence && bridge->destroy_fence)
 		bridge->destroy_fence(bridge->device, bridge->fence, NULL);
 	if (bridge->pool && bridge->destroy_command_pool)
