@@ -116,11 +116,24 @@ rwb_make_device(void)
 }
 @end
 
+/* The overlay's own window, so it does not ride a transient SpringBoard window
+ * (the first key window appears during boot and is replaced when the home
+ * screen comes up; a sublayer of it is then composited nowhere). */
+@interface RWVKBViewController : UIViewController
+@end
+@implementation RWVKBViewController
+- (void)loadView
+{
+	self.view = [[RWVKBView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+}
+@end
+
 @interface RWVKBOverlay : NSObject
 @property(nonatomic, strong) CAMetalLayer *layer;
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) CADisplayLink *link;
+@property(nonatomic, strong) UIWindow *window;
 @property(nonatomic) BOOL failed;
 @end
 
@@ -155,16 +168,23 @@ rwb_key_window(void)
 - (BOOL)start
 {
 	char why[192];
+	UIWindowScene *scene = nil;
 	UIWindow *window = rwb_key_window();
 
 	if (window == nil) {
 		rwb_say("no SpringBoard window yet");
 		return NO;
 	}
-	CALayer *host = window.rootViewController.view.layer ?: window.layer;
-	if (host == nil) {
-		[self fail:"the key window has no layer"];
-		return NO;
+	if (@available(iOS 13.0, *)) {
+		for (UIScene *candidate in [UIApplication sharedApplication].connectedScenes)
+			if (candidate.activationState == UISceneActivationStateForegroundActive) {
+				scene = (UIWindowScene *)candidate;
+				break;
+			}
+		if (scene == nil) {
+			rwb_say("no foreground-active scene yet");
+			return NO;
+		}
 	}
 	self.device = rwb_make_device();
 	if (self.device == nil) {
@@ -176,17 +196,48 @@ rwb_key_window(void)
 		[self fail:"the device gave no command queue"];
 		return NO;
 	}
-	self.layer = [CAMetalLayer layer];
+	/*
+	 * Our own window, at a level above the status bar and below nothing else:
+	 * a sublayer of SpringBoard's first window is composited nowhere once the
+	 * home screen replaces that window (measured 2026-11-12: frames presented
+	 * for 1,300+ ticks while the panel showed the plain home screen).
+	 */
+	self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+	if (@available(iOS 13.0, *))
+		self.window.windowScene = scene;
+	self.window.windowLevel = UIWindowLevelStatusBar + 1;
+	self.window.userInteractionEnabled = NO;
+	self.window.backgroundColor = [UIColor clearColor];
+	RWVKBViewController *controller = [[RWVKBViewController alloc] init];
+	self.window.rootViewController = controller;
+	self.window.hidden = NO;
+	CALayer *host = controller.view.layer;
+	if (host == nil) {
+		[self fail:"the overlay view has no layer"];
+		return NO;
+	}
+	self.layer = (CAMetalLayer *)host;
 	self.layer.device = self.device;
 	self.layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
 	self.layer.framebufferOnly = NO;
-	self.layer.contentsScale = host.contentsScale > 0 ? host.contentsScale : 1.0;
-	self.layer.frame = CGRectMake(0, 0, host.bounds.size.width, RWVKB_BAND_HEIGHT);
-	self.layer.zPosition = 10000;
-	[host addSublayer:self.layer];
-	rwb_say("layer added: %.0fx%.0f at scale %.1f",
-	    self.layer.frame.size.width, self.layer.frame.size.height,
-	    self.layer.contentsScale);
+	self.layer.contentsScale = [UIScreen mainScreen].scale;
+	[self.window layoutIfNeeded];
+	controller.view.frame = self.window.bounds;
+	self.layer.frame = controller.view.bounds;
+	rwb_say("geometry: window %.0fx%.0f at %.0f,%.0f; view %.0fx%.0f; "
+	    "layer %.0fx%.0f at %.0f,%.0f pos %.0f,%.0f scale %.1f",
+	    self.window.bounds.size.width, self.window.bounds.size.height,
+	    self.window.frame.origin.x, self.window.frame.origin.y,
+	    controller.view.bounds.size.width, controller.view.bounds.size.height,
+	    self.layer.bounds.size.width, self.layer.bounds.size.height,
+	    self.layer.frame.origin.x, self.layer.frame.origin.y,
+	    self.layer.position.x, self.layer.position.y,
+	    (double)self.layer.contentsScale);
+	rwb_say("overlay window %.0fx%.0f level %.1f, scene %s, layer %s, scale %.1f",
+	    self.window.frame.size.width, self.window.frame.size.height,
+	    (double)self.window.windowLevel,
+	    scene != nil ? class_getName([scene class]) : "none",
+	    class_getName([host class]), (double)self.layer.contentsScale);
 
 	if (rw_wsi_open(&_wsi, self.layer, self.device, self.queue, why, sizeof(why)) != 0) {
 		[self fail:why];

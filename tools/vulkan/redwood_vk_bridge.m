@@ -121,11 +121,44 @@ typedef PFN_vkResetFences PFN_reset_fences;
 typedef PFN_vkDeviceWaitIdle PFN_device_wait_idle;
 typedef PFN_vkDestroyDevice PFN_destroy_device;
 
+/*
+ * vkGetDeviceProcAddr wants the real Vulkan name; the struct fields are snaked.
+ * One string per field, next to the typedef above, so RWB_LOAD stays one line.
+ */
+#define RWB_FN_get_device_queue "vkGetDeviceQueue"
+#define RWB_FN_create_image "vkCreateImage"
+#define RWB_FN_destroy_image "vkDestroyImage"
+#define RWB_FN_image_memory_requirements "vkGetImageMemoryRequirements"
+#define RWB_FN_allocate_memory "vkAllocateMemory"
+#define RWB_FN_free_memory "vkFreeMemory"
+#define RWB_FN_bind_image_memory "vkBindImageMemory"
+#define RWB_FN_create_image_view "vkCreateImageView"
+#define RWB_FN_destroy_image_view "vkDestroyImageView"
+#define RWB_FN_create_render_pass "vkCreateRenderPass"
+#define RWB_FN_destroy_render_pass "vkDestroyRenderPass"
+#define RWB_FN_create_framebuffer "vkCreateFramebuffer"
+#define RWB_FN_destroy_framebuffer "vkDestroyFramebuffer"
+#define RWB_FN_create_command_pool "vkCreateCommandPool"
+#define RWB_FN_destroy_command_pool "vkDestroyCommandPool"
+#define RWB_FN_allocate_command_buffers "vkAllocateCommandBuffers"
+#define RWB_FN_reset_command_pool "vkResetCommandPool"
+#define RWB_FN_begin_command_buffer "vkBeginCommandBuffer"
+#define RWB_FN_end_command_buffer "vkEndCommandBuffer"
+#define RWB_FN_cmd_begin_render_pass "vkCmdBeginRenderPass"
+#define RWB_FN_cmd_end_render_pass "vkCmdEndRenderPass"
+#define RWB_FN_queue_submit "vkQueueSubmit"
+#define RWB_FN_create_fence "vkCreateFence"
+#define RWB_FN_destroy_fence "vkDestroyFence"
+#define RWB_FN_wait_for_fences "vkWaitForFences"
+#define RWB_FN_reset_fences "vkResetFences"
+#define RWB_FN_device_wait_idle "vkDeviceWaitIdle"
+#define RWB_FN_destroy_device "vkDestroyDevice"
+
 #define RWB_LOAD(dev, name) \
 	do { \
-		bridge->name = (PFN_##name)gdpa(bridge->device, #name); \
+		bridge->name = (PFN_##name)gdpa(bridge->device, RWB_FN_##name); \
 		if (bridge->name == NULL) { \
-			rwb_fail(why, why_size, "the ICD has no " #name); \
+			rwb_fail(why, why_size, "the ICD has no " RWB_FN_##name); \
 			goto failed; \
 		} \
 	} while (0)
@@ -173,14 +206,13 @@ rwb_open(id<MTLDevice> device, char *why, size_t why_size)
 		rwb_fail(why, why_size, "the ICD has no vk_icdGetInstanceProcAddr");
 		goto failed;
 	}
+	/* Only vkCreateInstance is a NULL-instance (global) lookup in this ICD;
+	 * the rest are instance commands and come back NULL when asked with a
+	 * NULL instance. Resolve them after the instance exists, as
+	 * vk_triangle_app.m:425-436 and turnip_test.c:270 do. */
 	create_instance = (PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance");
-	enumerate = (PFN_vkEnumeratePhysicalDevices)gipa(NULL, "vkEnumeratePhysicalDevices");
-	families = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)
-	    gipa(NULL, "vkGetPhysicalDeviceQueueFamilyProperties");
-	create_device = (PFN_vkCreateDevice)gipa(NULL, "vkCreateDevice");
-	if (create_instance == NULL || enumerate == NULL || families == NULL ||
-	    create_device == NULL) {
-		rwb_fail(why, why_size, "the ICD did not give the instance entry points");
+	if (create_instance == NULL) {
+		rwb_fail(why, why_size, "the ICD gave no vkCreateInstance");
 		goto failed;
 	}
 
@@ -197,6 +229,16 @@ rwb_open(id<MTLDevice> device, char *why, size_t why_size)
 	}
 	bridge->destroy_instance = (PFN_vkDestroyInstance)
 	    gipa(bridge->instance, "vkDestroyInstance");
+	enumerate = (PFN_vkEnumeratePhysicalDevices)
+	    gipa(bridge->instance, "vkEnumeratePhysicalDevices");
+	families = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)
+	    gipa(bridge->instance, "vkGetPhysicalDeviceQueueFamilyProperties");
+	create_device = (PFN_vkCreateDevice)
+	    gipa(bridge->instance, "vkCreateDevice");
+	if (enumerate == NULL || families == NULL || create_device == NULL) {
+		rwb_fail(why, why_size, "the ICD did not give the instance entry points");
+		goto failed;
+	}
 
 	if (enumerate(bridge->instance, &count, &bridge->physical) != VK_SUCCESS || count < 1) {
 		rwb_fail(why, why_size, "no physical device");

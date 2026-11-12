@@ -4142,21 +4142,39 @@ QuartzCore/Metal/IOSurface; `_OBJC_CLASS_$_RWVKBOverlay`, selectors `start`,
 manifest entries including `etc/vkbridge`); system image unchanged from step 16
 (`local/system-metal-vk-steps.apfs`).
 
-**The run (owed; the phone was not enumerating when this was built):**
+**Runs on 2026-11-12 (the phone came back).** Five boots, each one fixed a
+different layer:
 
-```
-enter --stage kernel
-ramdisk --image local/system-metal-vk-steps.apfs
-run --seconds 240 --bootcpu 1 --live-log --gpu-probe 20 --gpu-direct --gpu-keep \
-    --kernel out/giulia-kernel/mach.ace5-public \
-    --root-image local/root-turnip-vk-bridge.apfs
-# ACE5_CMDLINE="vkbridge=1" is optional: the image carries etc/vkbridge too
-```
+1. `20261112-203139`: overlay armed, `RedwoodMetalDevice` built, layer added;
+   `FAILED: the ICD did not give the instance entry points`.
+   `vkEnumeratePhysicalDevices` and friends are instance commands and this ICD
+   returns NULL for them when asked with a NULL instance; resolve them after
+   `vkCreateInstance`.
+2. `20261112-203726`: `FAILED: the ICD has no get_device_queue` -- RWB_LOAD
+   passed the snaked field name to `vkGetDeviceProcAddr`; a name table now maps
+   every field to `vkGetDeviceQueue` etc.
+3. `20261112-204051` (sublayer of SpringBoard's first key window): the bridge
+   opened, imported surfaces 6/7/8, presented 1,300+ frames (first 120 at
+   median **16.666 ms**), gate PASS, zero faults -- but **no band on the
+   panel**: the first key window is a boot/transition window and is gone by the
+   time the home screen arrives.
+4. `20261112-204723` (our own 375x240 `UIWindow`, level 1001): geometry is
+   right (window/view/layer 375x240, drawable 1125x720), first 120 frames median
+   **16.667 ms**, gate PASS, zero faults; the panel shows only the **bottom
+   ~57 pt** of the band. A 240 pt drawable is not fully rendered -- the
+   non-panel-height surface class to investigate.
+5. `20261112-205649` (full-screen 375x812, drawable 1125x2436): **the whole
+   screen turns the cycling colour** -- Turnip output is composited by
+   SpringBoard and the screenshots prove it; gate PASS, zero faults. But the
+   present interval is **~50 ms (20 Hz)**, so the full-screen path does not
+   hold 60 Hz yet.
 
-**Acceptance, one log and screenshots.** `turnip_test: PASS (steps 1-12)` still
-there; `vkbridge: armed` -> `layer added` -> `surface N imported` -> `frame N:
-presented`; 120 frames with present-interval median 16.6–16.8 ms; a screenshot
-shows the cycling band on the live SpringBoard UI; zero `FAULT sig`.
+Settled: a process inside SpringBoard can acquire a CA drawable, import its
+IOSurface into Turnip, clear it and have CA display it. Not settled: a small
+(non-panel-height) drawable renders only its bottom strip, and a full-screen
+overlay paces at 20 Hz while the 240 pt window paced at 60 Hz. The next round
+is drawable geometry (kernel describe: offset/size/rowBytes against the
+imported image) and full-screen present cost -- not the bridge ABI.
 
 **Risks carried from K90's 11-11 Metal work.** Process-owned IOSurfaces are
 refused as GPU buffers by our kernel (`s->client != NULL`); K90 added a
