@@ -4185,9 +4185,26 @@ continuously -- the partial bands are **framebuffer-capture tearing**, not a
 stable render defect. Do not patch the import for them.
 
 What is left is pacing: this boot's 240 pt window ran at 50-66 ms medians while
-an earlier boot held 16.667 ms for its first 120 frames. Next: a job list that
-runs only the overlay (no `turnip_test`, no `vk_triangle_app`) to tell whether
-20 Hz belongs to the overlay itself or to contention with the gate/app.
+an earlier boot held 16.667 ms for its first 120 frames.
+
+**Pacing, three isolations (2026-11-12 21:23-21:30).**
+
+- `20261112-212346`, overlay-only job list (no `turnip_test`, no app):
+  **65.0 ms** median over 120 frames -- not contention with the gate/app.
+- `20261112-212736`, draw loop moved from SpringBoard's main-thread
+  CADisplayLink to a dispatch timer on its own queue: **64.2 ms** -- not
+  main-thread scheduling.
+- `20261112-213051`, window level dropped from status+1 to normal+1:
+  **65.5 ms** -- not the window level.
+
+So the ~65 ms sits in the present path itself: `rw_wsi_present` waits for the
+Metal command buffer's present on a window **owned by SpringBoard**, while the
+same WSI in a normal app process measured 16.676 ms (step 14). Next: separate
+the wait from the render (drop `waitUntilCompleted` and measure the timer's
+rate), and compare a normal app-process window on the same boot. The working
+hypothesis is that CA schedules an extra SpringBoard window at ~15 Hz (60/4);
+if so, 60 Hz for the bridge needs the client to be a normal app/frontmost
+window, not a SpringBoard overlay.
 
 **Risks carried from K90's 11-11 Metal work.** Process-owned IOSurfaces are
 refused as GPU buffers by our kernel (`s->client != NULL`); K90 added a

@@ -16,6 +16,7 @@
 #import <Metal/Metal.h>
 
 #include <IOKit/IOKitLib.h>
+#include <dispatch/dispatch.h>
 #include <fcntl.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
@@ -133,7 +134,6 @@ rwb_make_device(void)
 @property(nonatomic, strong) CAMetalLayer *layer;
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
-@property(nonatomic, strong) CADisplayLink *link;
 @property(nonatomic, strong) UIWindow *window;
 @property(nonatomic) BOOL failed;
 @end
@@ -156,14 +156,17 @@ rwb_key_window(void)
 	double _intervals[RWVKB_INTERVALS];
 	unsigned _interval_count;
 	unsigned _interval_next;
+	dispatch_source_t _timer;
 }
 
 - (void)fail:(const char *)why
 {
 	rwb_say("FAILED: %s", why != NULL ? why : "(no sentence)");
 	self.failed = YES;
-	[self.link invalidate];
-	self.link = nil;
+	if (_timer != NULL) {
+		dispatch_source_cancel(_timer);
+		_timer = NULL;
+	}
 }
 
 - (BOOL)start
@@ -207,7 +210,7 @@ rwb_key_window(void)
 	    [UIScreen mainScreen].bounds.size.width, RWVKB_BAND_HEIGHT)];
 	if (@available(iOS 13.0, *))
 		self.window.windowScene = scene;
-	self.window.windowLevel = UIWindowLevelStatusBar + 1;
+	self.window.windowLevel = UIWindowLevelNormal + 1;
 	self.window.userInteractionEnabled = NO;
 	self.window.backgroundColor = [UIColor clearColor];
 	RWVKBViewController *controller = [[RWVKBViewController alloc] init];
@@ -251,13 +254,25 @@ rwb_key_window(void)
 		return NO;
 	}
 	_last_time = CACurrentMediaTime();
-	self.link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
-	if (@available(iOS 15.0, *))
-		self.link.preferredFrameRateRange = CAFrameRateRangeMake(60, 60, 60);
-	else
-		self.link.preferredFramesPerSecond = 60;
-	[self.link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-	rwb_say("display link started");
+	/*
+	 * The loop runs on its own queue, not SpringBoard's main thread: the same
+	 * overlay measured ~65 ms between ticks on a CADisplayLink there, and the
+	 * isolation boot (no gate, no app) kept that number, so the main thread's
+	 * work is the first suspect, not the gate.
+	 */
+	dispatch_queue_t queue = dispatch_queue_create("com.redwood.vkbridge", NULL);
+	_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+	if (_timer == NULL) {
+		[self fail:"no dispatch timer"];
+		return NO;
+	}
+	dispatch_source_set_timer(_timer, dispatch_time(DISPATCH_TIME_NOW, 0),
+	    (uint64_t)(16.6666667 * NSEC_PER_MSEC), NSEC_PER_MSEC);
+	dispatch_source_set_event_handler(_timer, ^{
+		[self tick:nil];
+	});
+	dispatch_resume(_timer);
+	rwb_say("display timer started (60 Hz, own queue)");
 	return YES;
 }
 
