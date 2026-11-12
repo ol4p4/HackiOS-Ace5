@@ -4199,12 +4199,16 @@ an earlier boot held 16.667 ms for its first 120 frames.
 
 So the ~65 ms sits in the present path itself: `rw_wsi_present` waits for the
 Metal command buffer's present on a window **owned by SpringBoard**, while the
-same WSI in a normal app process measured 16.676 ms (step 14). Next: separate
-the wait from the render (drop `waitUntilCompleted` and measure the timer's
-rate), and compare a normal app-process window on the same boot. The working
-hypothesis is that CA schedules an extra SpringBoard window at ~15 Hz (60/4);
-if so, 60 Hz for the bridge needs the client to be a normal app/frontmost
-window, not a SpringBoard overlay.
+same WSI in a normal app process measured 16.676 ms (step 14).
+
+**The wait is not the block (`20261112-214118`).** With `vkbridge_nowait=1`
+(`rw_wsi_wait_for_present(0)`) the loop still medians **65.6 ms**; single frames
+reach 3 ms, so it is not computationally stuck, but it is gated: `nextDrawable`
+and the Metal queue wait for CA to consume the previous drawables. CA consumes a
+**SpringBoard-owned** window at ~15 Hz; a normal app window consumes at 60 Hz.
+The 60 Hz path for a CA bridge is therefore a normal app/frontmost window (or a
+different CA integration), not a SpringBoard overlay. The overlay result stands
+as the interface proof; 15 Hz is accepted for that host.
 
 **Risks carried from K90's 11-11 Metal work.** Process-owned IOSurfaces are
 refused as GPU buffers by our kernel (`s->client != NULL`); K90 added a

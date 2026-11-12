@@ -64,4 +64,9 @@ int rw_wsi_present(struct rw_wsi *wsi, struct rw_wsi_image *image, char *why,
     size_t why_size);
 void rw_wsi_close(struct rw_wsi *wsi);
 
+/* Present normally waits for the command buffer (display-locked, 16.676 ms in
+ * a normal app). Set 0 to skip that wait for a pacing experiment: the loop
+ * then runs free, but the drawable pool and CA's own cadence still bound it. */
+void rw_wsi_wait_for_present(int enable);
+
 #endif

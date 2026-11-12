@@ -25,6 +25,16 @@ struct rw_wsi {
 	unsigned presents;
 };
 
+/* Present waits for the command buffer by default; 0 is the pacing experiment
+ * (see wsi_redwood.h). */
+static int rw_wsi_wait_present = 1;
+
+void
+rw_wsi_wait_for_present(int enable)
+{
+	rw_wsi_wait_present = enable != 0;
+}
+
 static void
 rw_wsi_why(char *why, size_t size, const char *format, ...)
 {
@@ -171,7 +181,8 @@ rw_wsi_present(struct rw_wsi *wsi, struct rw_wsi_image *image, char *why,
 	}
 	[commit presentDrawable:image->drawable];
 	[commit commit];
-	[commit waitUntilCompleted];
+	if (rw_wsi_wait_present)
+		[commit waitUntilCompleted];
 	wsi->presents++;
 	image->drawable = nil;
 	image->surface = NULL;

@@ -326,17 +326,23 @@ rwb_key_window(void)
 @end
 
 static BOOL
-rwb_wanted(void)
+rwb_boot_arg(const char *needle)
 {
 	char args[2048];
 	size_t length = sizeof(args);
 
-	if (sysctlbyname("kern.bootargs", args, &length, NULL, 0) == 0) {
-		args[sizeof(args) - 1] = '\0';
-		if (strstr(args, "vkbridge=1") != NULL) {
-			rwb_say("wanted by kern.bootargs");
-			return YES;
-		}
+	if (sysctlbyname("kern.bootargs", args, &length, NULL, 0) != 0)
+		return NO;
+	args[sizeof(args) - 1] = '\0';
+	return strstr(args, needle) != NULL;
+}
+
+static BOOL
+rwb_wanted(void)
+{
+	if (rwb_boot_arg("vkbridge=1")) {
+		rwb_say("wanted by kern.bootargs");
+		return YES;
 	}
 	if (access("/redwood/etc/vkbridge", F_OK) == 0) {
 		rwb_say("wanted by /redwood/etc/vkbridge");
@@ -396,6 +402,10 @@ redwood_vk_overlay_maybe_start(void)
 	setvbuf(stderr, NULL, _IONBF, 0);
 	if (!rwb_wanted())
 		return;
+	if (rwb_boot_arg("vkbridge_nowait=1")) {
+		rw_wsi_wait_for_present(0);
+		rwb_say("present wait disabled (vkbridge_nowait=1)");
+	}
 	rwb_say("armed (pid %d); waiting for SpringBoard's window", getpid());
 	/*
 	 * SpringBoard's UI is not up when this constructor runs; the first window
