@@ -4237,4 +4237,38 @@ in a normal app window (step 14's 60 Hz), i.e. a cross-process composite. The
 unknown after that is enumerating the layer list and rectangles; the kernel's
 swap request already carries them.
 
+### App-hosted composite: the cross-process source is built (2026-11-13; run pending)
+
+`vk_triangle_app` now takes its source from another process when the vkbridge
+overlay has published one: `rwvk_make_source` reads `/tmp/vkbridge.sid`,
+calls `IOSurfaceLookup`, requires BGRA, and feeds the looked-up surface's
+width/height/stride into the existing linear import; the checker creation and
+fill are skipped, and `rwvk_frame` skips the byte-for-byte blend readback for a
+cross source (the present and seed bump still happen). The overlay is still
+created and blended at binding 1, so the picture is a Turnip composite of a
+foreign CA surface plus the red wash.
+
+Built: 109,856 B app; installed as `RedwoodVK.app/RedwoodVK` and
+`/redwood/bin/vk_triangle_app`. Images: system
+`local/system-metal-vk-cross.apfs` (2,492,280,832 B), root
+`local/root-turnip-vk-cross.apfs` (13,070,336 B, vkapp job, overlay dylib with
+the sid marker). The device run is owed -- the phone stopped enumerating before
+the boot. Recipe:
+
+```
+enter --stage kernel
+ramdisk --image local/system-metal-vk-cross.apfs
+run --seconds 180 --bootcpu 1 --live-log --shots 15 \
+    --gpu-probe 20 --gpu-direct --gpu-keep \
+    --kernel out/giulia-kernel/mach.ace5-public \
+    --root-image local/root-turnip-vk-cross.apfs
+# ACE5_CMDLINE="vkbridge=1"
+```
+
+Acceptance: `turnip_test: PASS (1-12)` in the same log; `vktriangle: cross
+source sid N, ...`; app frames with 0 failure(s); two screenshots showing the
+app window carrying the overlay's cycling colour; zero `FAULT sig`. If
+`/tmp/vkbridge.sid` is absent at app start the app logs its own stripes
+instead and the run proves nothing about cross-process -- retry.
+
 

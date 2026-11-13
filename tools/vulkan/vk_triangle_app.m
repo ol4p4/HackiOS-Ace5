@@ -293,6 +293,13 @@ struct rwvk {
 	VkDescriptorPool descriptor_pool;
 	VkDescriptorSet descriptor_set;
 	unsigned source_width, source_height;
+	/* The cross-process source: an IOSurface looked up by id from
+	 * /tmp/vkbridge.sid (the SpringBoard vkbridge overlay's drawable), not
+	 * created here. Its content is not the checker, so the blend readback is
+	 * skipped for it. */
+	int cross_source;
+	uint32_t source_sid;
+	size_t source_stride;
 };
 
 /* The process's one Vulkan context, its Metal device and the queue the present
@@ -903,6 +910,9 @@ static int
 rwvk_make_source(struct rwvk *v)
 {
 	const uint32_t size = 256, cell = 32;
+	uint32_t width = size, height = size;
+	size_t stride = (size_t)size * 4;
+	uint32_t sid = 0;
 	CFMutableDictionaryRef props;
 	CFNumberRef number;
 	int value;
@@ -994,7 +1004,45 @@ rwvk_make_source(struct rwvk *v)
 		    (format.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)
 		        ? "yes" : "NO");
 	}
+	/*
+	 * Cross-process source: if the vkbridge overlay in SpringBoard has written
+	 * its current drawable's id, take that surface instead of making one. The
+	 * id was proved readable across processes by userland/src/lookup_test.c
+	 * (run 20261112-224024). BGRA only: the import path below is the one the
+	 * port measured, and a foreign format would be a different road.
+	 */
+	{
+		FILE *file = fopen("/tmp/vkbridge.sid", "r");
+
+		if (file != NULL) {
+			unsigned id;
+
+			if (fscanf(file, "%u", &id) == 1) {
+				surface = IOSurfaceLookup((IOSurfaceID)id);
+				if (surface == NULL) {
+					rwvk_say("vktriangle: FAILED: IOSurfaceLookup(%u)", id);
+					fclose(file);
+					return -1;
+				}
+				if (IOSurfaceGetPixelFormat(surface) != 0x42475241) {
+					rwvk_say("vktriangle: FAILED: cross source %u is not BGRA (%#x)",
+					    id, (unsigned)IOSurfaceGetPixelFormat(surface));
+					fclose(file);
+					return -1;
+				}
+				v->cross_source = 1;
+				sid = id;
+				width = (uint32_t)IOSurfaceGetWidth(surface);
+				height = (uint32_t)IOSurfaceGetHeight(surface);
+				stride = IOSurfaceGetBytesPerRow(surface);
+				rwvk_say("vktriangle: cross source sid %u, %ux%u, rowBytes %zu",
+				    sid, width, height, stride);
+			}
+			fclose(file);
+		}
+	}
 	/* The surface, filled with the checker and announced (the seed rule). */
+	if (!v->cross_source) {
 	props = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
 	    &kCFTypeDictionaryValueCallBacks);
 	value = (int)size;
@@ -1040,8 +1088,14 @@ rwvk_make_source(struct rwvk *v)
 		}
 	}
 	IOSurfaceUnlock(surface, 0, NULL);
+	}
 	v->source_surface = surface;
-	v->source_width = v->source_height = size;
+	v->source_width = width;
+	v->source_height = height;
+	v->source_sid = v->cross_source ? sid : (uint32_t)IOSurfaceGetID(surface);
+	v->source_stride = stride;
+	copy.extent.width = width;
+	copy.extent.height = height;
 
 	rwvk_step("source: import the surface as a linear VkImage");
 	/* The imported linear image. */
@@ -1050,7 +1104,7 @@ rwvk_make_source(struct rwvk *v)
 	    .pNext = &external,
 	    .imageType = VK_IMAGE_TYPE_2D,
 	    .format = VK_FORMAT_B8G8R8A8_UNORM,
-	    .extent = { size, size, 1 },
+	    .extent = { width, height, 1 },
 	    .mipLevels = 1,
 	    .arrayLayers = 1,
 	    .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -1080,7 +1134,7 @@ rwvk_make_source(struct rwvk *v)
 		rwvk_say("vktriangle: FAILED: no memory type for the source import");
 		return -1;
 	}
-	import.fd = (int)IOSurfaceGetID(surface);
+	import.fd = (int)v->source_sid;
 	allocate.pNext = &import;
 	allocate.allocationSize = requirements.size;
 	allocate.memoryTypeIndex = type;
@@ -1213,12 +1267,13 @@ rwvk_make_source(struct rwvk *v)
 	write.dstSet = v->descriptor_set;
 	write.dstBinding = 0;
 	pUpdateDescriptorSets(v->device, 1, &write, 0, NULL);
-	rwvk_say("vktriangle: source: surface id %u, %ux%u %#x, imported linear, %s, "
-	    "sampled through a nearest sampler (vertical stripes)",
-	    (unsigned)IOSurfaceGetID(surface), size, size,
-	    (unsigned)IOSurfaceGetPixelFormat(surface),
+	rwvk_say("vktriangle: source: surface id %u, %ux%u %#x, rowBytes %zu, imported linear, %s, "
+	    "sampled through a nearest sampler (%s)",
+	    (unsigned)v->source_sid, v->source_width, v->source_height,
+	    (unsigned)IOSurfaceGetPixelFormat(surface), v->source_stride,
 	    RWVK_SAMPLE_LINEAR ? "sampled where it lies (no copy)"
-	                       : "copied once into a tiled image");
+	                       : "copied once into a tiled image",
+	    v->cross_source ? "cross-process surface" : "own stripes");
 	return 0;
 }
 
@@ -1490,6 +1545,13 @@ rwvk_frame(struct rwvk *v, int loud)
 			rwvk_say("vktriangle: frame %u: %s", v->frames, why);
 			return -1;
 		}
+		/*
+		 * A cross-process source is not the checker, so the byte-for-byte
+		 * blend readback below cannot describe it. The present and the seed
+		 * bump already happened; count the frame and move on.
+		 */
+		if (v->cross_source)
+			return 0;
 
 		/* Read back through the surface, the same pages the panel reads. The
 		 * check is the blend's: for every sampled pixel the expected byte is
