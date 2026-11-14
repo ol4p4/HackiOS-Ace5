@@ -4323,4 +4323,39 @@ What remains is putting them together in the compositor's frame loop — and,
 for honesty, excluding the compositor's own window from its own layer list
 (it will be in the swap once it covers the screen).
 
+### The compositor reads the REAL home screen: Turnip-composited iOS on the panel (2026-11-14 11:45)
+
+`20261114-114501` — the first composite of real iOS content through Turnip:
+
+- the app's pick now takes the **home screen canvas** from the swap list
+  (sid 1/2 alternating, 1125x2436, the largest layer that is not the
+  drawable), and `IOSurfaceLookup` + the linear import **succeeded** — after
+  one kernel change;
+- the screenshot shows the red wash ramping left to right with the **home
+  screen's icons visible through its transparent part** — the canvas surface
+  SpringBoard drew (via Mesa GL) is being sampled by Turnip in another
+  process and blended on the panel;
+- `LAYER MODE: PASS` 120/120 with the real canvas as the under layer; app
+  bench 240/240, 0 failure(s); `turnip_test: PASS (1-12)`; zero `FAULT sig`;
+- `describe sid 2: rowBytes 4608` — the surface alignment change is visible
+  in the kernel's answer.
+
+**The root cause the import needed: row alignment.** Turnip's linear pitch
+for a 4-byte format is `1 << (fdl_cpp_shift + 6)` = **256-byte aligned**
+(`fdl_set_pitchalign` in fdl6_layout.c), so for width 1125 it computes pitch
+4608 and requirements.size 4608x2436 = 11,225,088. The kernel's surfaces were
+aligned to **64 bytes** (`MINISURF_ROW_ALIGN`), so CA's canvas had rowBytes
+4544 and alloc 11,075,584 — 149,504 bytes less than the import demands, and
+`vkAllocateMemory` failed. `MINISURF_ROW_ALIGN` 64 → 256 (and
+`rowAlignMask`, which derives from it) makes every kernel-made surface match
+Turnip's computation; the drawables were already 4608 (Metal aligns its own),
+so every previously-working import keeps working. This is the same wall K90's
+transplant list calls "linear import pitch tolerance (set pitchalign=6)" —
+on this port the cleaner fix was on the kernel's side, one constant.
+
+Two known costs, recorded not fixed: (1) the canvas alternates sid 1/2 every
+frame, and the layer bench rebuilds its import every frame at ~41 ms/frame —
+a 2-4 entry source cache keyed by sid removes that; (2) the compositor loop
+is not display-locked (~860 fps in the app) — it must pace itself at 60 Hz.
+
 

@@ -64,6 +64,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 
 #include <vulkan/vulkan.h>
@@ -1446,6 +1447,187 @@ rwvk_make_overlay(struct rwvk *v)
 }
 
 /*
+ * The compositor's input: the framebuffer driver's snapshot of the last swap
+ * CA submitted (selector 83 on IOMobileFramebufferUserClient; the struct is
+ * field for field the kernel's fb_swap_snapshot in
+ * iokit/Kernel/MiniIOMobileFramebuffer.cpp). The app picks the layer it wants
+ * to show, and samples that surface by its id — the id is the "fd" of the
+ * import, exactly as /tmp/vkbridge.sid was.
+ */
+struct rwvk_fb_layer {
+	uint32_t sid, enabled;
+	int32_t src[4], dst[4];         /* in the surface: x,y,w,h; on the display: x,y,w,h */
+};
+
+struct rwvk_fb_snapshot {
+	uint32_t swap_id, seq, layers_set, layers_cleared;
+	struct rwvk_fb_layer layer[4];
+};
+
+static io_connect_t rwvk_fb_connection;
+static int rwvk_fb_opened;
+
+static int
+rwvk_fb_snapshot(struct rwvk_fb_snapshot *out)
+{
+	if (!rwvk_fb_opened) {
+		io_service_t service = IOServiceGetMatchingService(0,
+		    IOServiceMatching("IOMobileFramebuffer"));
+
+		if (service == 0 ||
+		    IOServiceOpen(service, mach_task_self(), 0, &rwvk_fb_connection) != KERN_SUCCESS) {
+			if (service != 0)
+				IOObjectRelease(service);
+			return -1;
+		}
+		IOObjectRelease(service);
+		rwvk_fb_opened = 1;
+	}
+	size_t size = sizeof(*out);
+
+	memset(out, 0, sizeof(*out));
+	return IOConnectCallStructMethod(rwvk_fb_connection, 83, NULL, 0, out, &size) !=
+	    KERN_SUCCESS ? -1 : 0;
+}
+
+/*
+ * Swap the sampled source for another surface by id: the same import
+ * rwvk_make_source measured (linear BGRA, fd = IOSurface id), with the old
+ * image's pieces destroyed first. The surface reference is taken through
+ * IOSurfaceLookup so it cannot be released under us.
+ */
+static int
+rwvk_cross_rebuild(struct rwvk *v, uint32_t sid, uint32_t width, uint32_t height)
+{
+	VkExternalMemoryImageCreateInfo external = {
+	    .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+	    .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	};
+	VkImageCreateInfo linearInfo = {
+	    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+	    .pNext = &external,
+	    .imageType = VK_IMAGE_TYPE_2D,
+	    .format = VK_FORMAT_B8G8R8A8_UNORM,
+	    .extent = { width, height, 1 },
+	    .mipLevels = 1,
+	    .arrayLayers = 1,
+	    .samples = VK_SAMPLE_COUNT_1_BIT,
+	    .tiling = VK_IMAGE_TILING_LINEAR,
+	    .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+	    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+	    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	};
+	VkMemoryRequirements requirements;
+	VkImportMemoryFdInfoKHR import = {
+	    .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+	    .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	    .fd = (int)sid,
+	};
+	VkMemoryAllocateInfo allocate = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+	VkImageViewCreateInfo viewInfo = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+	uint32_t type = UINT32_MAX;
+
+	/* The kernel's own answer about this surface (kRedwoodSurface describe):
+	 * it says whether the id is in the table at all, and its geometry. */
+	{
+		io_service_t gpu = IOServiceGetMatchingService(0, IOServiceMatching("RedwoodGPU"));
+		struct { uint32_t surface, handle; uint64_t size; uint32_t offset, rowBytes,
+		    width, height, pixelFormat, planes; } question, answer;
+		size_t answer_size = sizeof(answer);
+		kern_return_t result;
+
+	if (gpu != 0) {
+		io_connect_t gpu_connection = 0;
+
+		if (IOServiceOpen(gpu, mach_task_self(), 0, &gpu_connection) == KERN_SUCCESS) {
+				memset(&question, 0, sizeof(question));
+				question.surface = sid;
+				question.handle = 0xffffffffu;          /* describe, allocate nothing */
+				result = IOConnectCallStructMethod(gpu_connection, 0x7e, &question,
+				    sizeof(question), &answer, &answer_size);
+				fprintf(stderr, "vktriangle: describe sid %u: kr %#x, size %llu offset %#x "
+				    "rowBytes %u, %ux%u fmt %#x planes %u\n", sid, result,
+				    (unsigned long long)answer.size, answer.offset, answer.rowBytes,
+				    answer.width, answer.height, answer.pixelFormat, answer.planes);
+				IOServiceClose(gpu_connection);
+			}
+			IOObjectRelease(gpu);
+		}
+	}
+
+	if (v->source_view)
+		pDestroyImageView(v->device, v->source_view, NULL);
+	v->source_view = 0;
+	if (v->source_linear)
+		pDestroyImage(v->device, v->source_linear, NULL);
+	v->source_linear = 0;
+	if (v->source_linear_memory)
+		pFreeMemory(v->device, v->source_linear_memory, NULL);
+	v->source_linear_memory = 0;
+	if (v->source_surface)
+		CFRelease(v->source_surface);
+	v->source_surface = NULL;
+	if (pCreateImage(v->device, &linearInfo, NULL, &v->source_linear) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: cross rebuild: vkCreateImage(sid %u)", sid);
+		return -1;
+	}
+	pGetImageMemoryRequirements(v->device, v->source_linear, &requirements);
+	for (uint32_t i = 0; i < v->memory.memoryTypeCount && type == UINT32_MAX; i++) {
+		if (requirements.memoryTypeBits & (1u << i))
+			type = i;
+	}
+	if (type == UINT32_MAX) {
+		rwvk_say("vktriangle: FAILED: cross rebuild: no memory type");
+		return -1;
+	}
+	allocate.pNext = &import;
+	allocate.allocationSize = requirements.size;
+	allocate.memoryTypeIndex = type;
+	if (pAllocateMemory(v->device, &allocate, NULL, &v->source_linear_memory) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: cross rebuild: vkAllocateMemory failed (id %u)", sid);
+		return -1;
+	}
+	if (pBindImageMemory(v->device, v->source_linear, v->source_linear_memory, 0) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: cross rebuild: vkBindImageMemory failed (id %u)", sid);
+		return -1;
+	}
+	viewInfo = (VkImageViewCreateInfo){
+	    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+	    .image = v->source_linear,
+	    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+	    .format = VK_FORMAT_B8G8R8A8_UNORM,
+	    .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+	};
+	if (pCreateImageView(v->device, &viewInfo, NULL, &v->source_view) != VK_SUCCESS) {
+		rwvk_say("vktriangle: FAILED: cross rebuild: vkCreateImageView");
+		return -1;
+	}
+	v->source_sid = sid;
+	v->source_width = width;
+	v->source_height = height;
+	v->source_surface = IOSurfaceLookup((IOSurfaceID)sid);   /* our reference; released in close */
+	{
+		VkDescriptorImageInfo imageInfo = {
+		    .sampler = v->sampler,
+		    .imageView = v->source_view,
+		    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		};
+		VkWriteDescriptorSet write = {
+		    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		    .dstSet = v->descriptor_set,
+		    .dstBinding = 0,
+		    .descriptorCount = 1,
+		    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		    .pImageInfo = &imageInfo,
+		};
+
+		pUpdateDescriptorSets(v->device, 1, &write, 0, NULL);
+	}
+	rwvk_say("vktriangle: cross source rebuilt: sid %u, %ux%u", sid, width, height);
+	return 0;
+}
+
+/*
  * One frame: draw into the surface, announce the write, present it, then read it
  * back through the surface the display will read. The read is the honest check
  * (two views of the same pages), the present is what puts it on the panel.
@@ -1476,6 +1658,45 @@ rwvk_frame(struct rwvk *v, int loud)
 		if (width == 0 || height == 0) {
 			v->failures++;
 			return -1;
+		}
+		/*
+		 * The compositor's pick: the largest layer in CA's last swap that is
+		 * not the drawable we are rendering into. The home screen's canvas
+		 * (1125x2436) wins while it is submitted; the pick follows the swap
+		 * list as CA changes it.
+		 */
+		if (v->cross_source) {
+			struct rwvk_fb_snapshot snap;
+			uint32_t pick = 0;
+			int32_t area = -1;
+
+			if (rwvk_fb_snapshot(&snap) == 0) {
+				for (unsigned layer = 0; layer < 4; layer++) {
+					const struct rwvk_fb_layer *candidate = &snap.layer[layer];
+					int32_t layer_area = candidate->src[2] * candidate->src[3];
+
+					if (candidate->sid != 0 && candidate->sid != image.sid &&
+					    layer_area > area) {
+						area = layer_area;
+						pick = candidate->sid;
+					}
+				}
+			}
+			if (pick != 0 && pick != v->source_sid) {
+				uint32_t pick_width = 0, pick_height = 0;
+
+				for (unsigned layer = 0; layer < 4; layer++) {
+					if (snap.layer[layer].sid == pick) {
+						pick_width = (uint32_t)snap.layer[layer].src[2];
+						pick_height = (uint32_t)snap.layer[layer].src[3];
+					}
+				}
+				if (pick_width == 0 || pick_height == 0 ||
+				    rwvk_cross_rebuild(v, pick, pick_width, pick_height) != 0) {
+					v->failures++;
+					return -1;
+				}
+			}
 		}
 		struct rwvk_entry *entry = rwvk_entry_for(v, surface, width, height);
 		if (entry == NULL) {
