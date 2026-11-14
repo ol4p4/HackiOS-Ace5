@@ -4271,4 +4271,29 @@ app window carrying the overlay's cycling colour; zero `FAULT sig`. If
 `/tmp/vkbridge.sid` is absent at app start the app logs its own stripes
 instead and the run proves nothing about cross-process -- retry.
 
+### App-hosted composite: the cross-process surface is ON THE PANEL (2026-11-14 10:27)
+
+`20261114-102741` — the first cross-process Turnip composite, measured end to
+end:
+
+- the app read `/tmp/vkbridge.sid` (sid 38, the SpringBoard overlay's
+  drawable), `IOSurfaceLookup` succeeded, and `rwvk_make_source` imported it
+  linear with **no copy** (`cross source sid 38, 1125x720, rowBytes 4608`);
+- **LAYER MODE: PASS** with the foreign surface as the under layer; the app's
+  240-frame bench ran **0 failure(s)**;
+- the panel shows the blend: the foreign surface (green, the overlay's cycle
+  colour at that moment) under the red wash ramping left to right — the
+  composite shader's under layer is **another process's CoreAnimation
+  surface**;
+- `turnip_test: PASS (1-12)` in the same log; zero `FAULT sig`;
+- pacing note: with the checker readback skipped the bench loop runs at
+  ~920 fps — the presents are not display-locked on this path, so a compositor
+  that wants 60 Hz paces itself (the display is the limit, the loop is not).
+
+Both halves of the app-hosted compositor are now measured on hardware: **read**
+(sample a foreign CA surface zero-copy, step 15's path, across processes) and
+**write** (present in a normal app window, 60 Hz-capable, step 14). The
+remaining piece is enumerating what to composite — the layer list and
+rectangles the kernel's swap request already carries.
+
 
