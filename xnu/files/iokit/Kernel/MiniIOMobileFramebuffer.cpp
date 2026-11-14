@@ -66,6 +66,7 @@ enum {
 	kFBMethodGetBlock               = 79,
 	kFBMethodSwapCancelAll          = 81,
 	kFBMethodGetProtectionOptions   = 82,
+	kFBMethodGetLastSwapLayers      = 83,   /* ours: the last swap's layers, for a compositor */
 };
 
 /* The swap request (IOMobileFramebufferSwapEnd): 0x46c bytes, of which we read these. */
@@ -78,6 +79,24 @@ enum {
 #define SWAP_LAYERS_SET         0x104                   /* bit per layer given in this swap */
 #define SWAP_LAYERS_CLEARED     0x108
 #define SWAP_LAYERS             4
+
+/*
+ * The last swap the driver took, as CA submitted it: the surface ids and the
+ * rectangles, exposed to a userland compositor through
+ * kFBMethodGetLastSwapLayers. The surfaces themselves the compositor takes by
+ * id through IOSurfaceRootUserClient (IOSurfaceLookup).
+ */
+struct fb_swap_layer {
+	uint32_t sid, enabled;
+	int32_t src[4], dst[4];         /* in the surface: x,y,w,h; on the display: x,y,w,h */
+};
+
+struct fb_swap_snapshot {
+	uint32_t swap_id;
+	uint32_t seq;                   /* ++ on every swap taken */
+	uint32_t layers_set, layers_cleared;
+	struct fb_swap_layer layer[SWAP_LAYERS];
+};
 
 #define kFBNotifyVSync          5
 #define kFBNotifyTypes          8
@@ -293,6 +312,7 @@ public:
 	uint32_t        fStatSwapsLate;         /* swaps that came more than a refresh and a quarter after the one before (and no pause) */
 	uint32_t        fStatClockReads;        /* GetCurrentAbsoluteTime calls: how often CA reads the display clock */
 	uint64_t        fStatWaiting;           /* how long frames waited for the GPU here */
+	struct fb_swap_snapshot fLastSwap;      /* the swap last taken, for kFBMethodGetLastSwapLayers */
 	/* how the display is doing: frames and time spent drawing them here since fStatSince */
 	uint32_t        fStatFrames;
 	uint64_t        fStatSince, fStatDrawing;
@@ -319,6 +339,7 @@ public:
 	MiniIOSurface * defaultSurface(void);
 	void present(const uint8_t * swap);
 	void show(const uint8_t * swap, MiniIOSurface ** surfaces);
+	void lastSwap(struct fb_swap_snapshot * out);
 	void presenter(void);
 	static void presenterMain(void * self, wait_result_t result);
 	void reportFrameTimes(void);
@@ -934,6 +955,17 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 
 		fSwapSurfaces[slot][layer] = sid != 0 ? MiniIOSurfaceCopy(sid) : NULL;
 	}
+	/* The compositor's snapshot: what CA last asked to be on the screen. */
+	fLastSwap.swap_id = swapWord(swap, SWAP_ID);
+	fLastSwap.seq++;
+	fLastSwap.layers_set = swapWord(swap, SWAP_LAYERS_SET);
+	fLastSwap.layers_cleared = swapWord(swap, SWAP_LAYERS_CLEARED);
+	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+		fLastSwap.layer[layer].sid = swapWord(swap, SWAP_SURFACE(layer));
+		fLastSwap.layer[layer].enabled = swapWord(swap, SWAP_ENABLED(layer));
+		memcpy(fLastSwap.layer[layer].src, swap + SWAP_SOURCE(layer), sizeof(fLastSwap.layer[layer].src));
+		memcpy(fLastSwap.layer[layer].dst, swap + SWAP_DEST(layer), sizeof(fLastSwap.layer[layer].dst));
+	}
 	fSwapsWaiting++;
 	IOLockWakeup(fSwapLock, fSwap, true);
 	IOLockUnlock(fSwapLock);
@@ -970,6 +1002,14 @@ IOMobileFramebuffer::presenter(void)
 }
 
 /* A swap's surfaces onto the panel, once the GPU is done with them. */
+void
+IOMobileFramebuffer::lastSwap(struct fb_swap_snapshot * out)
+{
+	IOLockLock(fSwapLock);
+	memcpy(out, &fLastSwap, sizeof(*out));
+	IOLockUnlock(fSwapLock);
+}
+
 void
 IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 {
@@ -1414,6 +1454,14 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			return kIOReturnBadArgument;
 		}
 		fOwner->present((const uint8_t *) args->structureInput);
+		return kIOReturnSuccess;
+
+	case kFBMethodGetLastSwapLayers:                /* out: the last swap's layers, for a compositor */
+		if (args->structureOutput == NULL || args->structureOutputSize < sizeof(struct fb_swap_snapshot)) {
+			return kIOReturnBadArgument;
+		}
+		fOwner->lastSwap((struct fb_swap_snapshot *) args->structureOutput);
+		args->structureOutputSize = sizeof(struct fb_swap_snapshot);
 		return kIOReturnSuccess;
 
 	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */

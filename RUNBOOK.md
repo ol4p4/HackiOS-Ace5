@@ -4296,4 +4296,31 @@ Both halves of the app-hosted compositor are now measured on hardware: **read**
 remaining piece is enumerating what to composite — the layer list and
 rectangles the kernel's swap request already carries.
 
+### The compositor's input: the layer list is readable from userland (2026-11-14 10:49)
+
+`20261114-104908` — the kernel now keeps a snapshot of every swap it takes
+(`fb_swap_snapshot`: swap id, sequence, per-layer surface id + enabled +
+source/destination rectangles) and answers selector **83**
+(`kFBMethodGetLastSwapLayers`) on `IOMobileFramebufferUserClient` with it.
+`userland/src/swaplist_test.c` dumps it from the job list, a second apart:
+
+```
+swaplist: seq 528 swap 528 set 0x7 cleared 0x4
+swaplist:   layer 0: sid 38 en 1 src 0,0 1125x720 dst 0,0 1125x720
+swaplist:   layer 1: sid 1  en 1 src 0,0 1125x2436 dst 0,0 1125x2436
+```
+
+Reading it: layer 0 is **our vkbridge overlay** (sid 37/38 — CA's two-drawable
+pool rotating), layer 1 is **the home screen's canvas** (sid 1/2 rotating,
+1125x2436), layers 2-3 empty. The sequence advances **~16.5 per second — CA
+submits swaps at 60 Hz**, so the 15 Hz wall was in the present/compositing of
+the overlay window, not in CA's submission rate.
+
+Everything the app-hosted compositor needs is now measured on hardware:
+the layer list and rectangles (this), the cross-process lookup (`IOSurfaceLookup`,
+`0d225ca`), the zero-copy sampling (step 15), and the 60 Hz present (step 14).
+What remains is putting them together in the compositor's frame loop — and,
+for honesty, excluding the compositor's own window from its own layer list
+(it will be in the swap once it covers the screen).
+
 
